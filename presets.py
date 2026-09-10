@@ -14,7 +14,9 @@ PRESETS_FILE = Path(__file__).resolve().parent / "training_presets.json"
 # Fields a preset can set. Keep in sync with gui.py's training-tab StringVars.
 PRESET_FIELDS = (
     "game", "timesteps", "n_envs", "ent_coef", "learning_rate",
-    "n_steps", "batch_size", "device", "obs_type",
+    "n_steps", "batch_size", "device", "obs_type", "start_level",
+    "action_repeat", "frame_stack", "n_epochs",
+    "seed", "checkpoint_freq", "eval_freq", "n_eval_episodes",
 )
 
 BUILTIN_PRESETS: dict[str, dict] = {
@@ -22,6 +24,7 @@ BUILTIN_PRESETS: dict[str, dict] = {
     "Mario — Balanced tiles (recommended, ~15 min)": {
         "game": "mario",
         "obs_type": "tiles",
+        "start_level": "default",
         "timesteps": 2_000_000,
         "n_envs": 8,
         "ent_coef": 0.01,
@@ -33,6 +36,7 @@ BUILTIN_PRESETS: dict[str, dict] = {
     "Mario — Quick smoke test (30 s)": {
         "game": "mario",
         "obs_type": "tiles",
+        "start_level": "default",
         "timesteps": 4_000,
         "n_envs": 2,
         "ent_coef": 0.01,
@@ -44,6 +48,7 @@ BUILTIN_PRESETS: dict[str, dict] = {
     "Mario — Extended (~1 h)": {
         "game": "mario",
         "obs_type": "tiles",
+        "start_level": "default",
         "timesteps": 8_000_000,
         "n_envs": 8,
         "ent_coef": 0.01,
@@ -55,6 +60,7 @@ BUILTIN_PRESETS: dict[str, dict] = {
     "Mario — Overnight (~8 h)": {
         "game": "mario",
         "obs_type": "tiles",
+        "start_level": "default",
         "timesteps": 60_000_000,
         "n_envs": 8,
         "ent_coef": 0.01,
@@ -63,9 +69,37 @@ BUILTIN_PRESETS: dict[str, dict] = {
         "batch_size": 64,
         "device": "cpu",
     },
+    "Mario — Random levels (all 12, ~1 h)": {
+        # Each parallel env picks a random level per episode. Trains a policy
+        # that generalises across worlds 1-1 through 4-3 instead of memorising
+        # one specific level's obstacle pattern.
+        "game": "mario",
+        "obs_type": "tiles",
+        "start_level": "random",
+        "timesteps": 10_000_000,
+        "n_envs": 8,
+        "ent_coef": 0.02,
+        "learning_rate": 2.5e-4,
+        "n_steps": 512,
+        "batch_size": 64,
+        "device": "cpu",
+    },
+    "Mario — Random levels (overnight, ~8 h)": {
+        "game": "mario",
+        "obs_type": "tiles",
+        "start_level": "random",
+        "timesteps": 60_000_000,
+        "n_envs": 8,
+        "ent_coef": 0.02,
+        "learning_rate": 2.5e-4,
+        "n_steps": 512,
+        "batch_size": 64,
+        "device": "cpu",
+    },
     "Mario — Pixels (slow, CNN, ~2 h for 500k)": {
         "game": "mario",
         "obs_type": "pixels",
+        "start_level": "default",
         "timesteps": 500_000,
         "n_envs": 4,
         "ent_coef": 0.02,
@@ -77,6 +111,7 @@ BUILTIN_PRESETS: dict[str, dict] = {
     "Kirby — Default pixels": {
         "game": "kirby",
         "obs_type": "pixels",
+        "start_level": "default",
         "timesteps": 500_000,
         "n_envs": 4,
         "ent_coef": 0.01,

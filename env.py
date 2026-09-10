@@ -1,4 +1,5 @@
 """PyBoy gym environment factory for Game Boy AI training."""
+import random as _random_mod
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -7,6 +8,111 @@ import numpy as np
 from gymnasium import spaces
 from pyboy import PyBoy, WindowEvent
 from stable_baselines3.common.monitor import Monitor
+
+
+# Super Mario Land has 4 worlds × 3 levels = 12 total levels. PyBoy's
+# `set_world_level(w, l)` docstring is wrong — it says args are 0-indexed
+# (0-3 world, 0-2 level) but the actual SML memory encoding is 1-INDEXED:
+# byte 0x11 = 1-1, 0x21 = 2-1, 0x43 = 4-3. Writing invalid values (0x00,
+# 0x10, 0x20, 0x30, 0x40, 0x01…) silently loads a default fallback level
+# while `game_wrapper.world` still reports the (wrong) patched tuple. So
+# we always pass w, l as 1-indexed to `start_game(world_level=…)`.
+#
+# Even with 1-indexed values, levels 2-3 and 4-3 don't load correctly —
+# `start_game(world_level=(2,3))` also falls through to the default level.
+# Those are the truly-broken level values in the wrapper.
+SML_BROKEN_LEVELS = frozenset({(2, 3), (4, 3)})
+SML_ALL_LEVELS = tuple(
+    (w, l) for w in range(1, 5) for l in range(1, 4)
+    if (w, l) not in SML_BROKEN_LEVELS
+)
+
+# Where per-level save-state files live. Gitignored via models/.
+LEVEL_STATES_DIR = Path("models") / "mario" / "_level_states"
+
+
+def _level_state_path(world: int, level: int) -> Path:
+    return LEVEL_STATES_DIR / f"{world}-{level}.state"
+
+
+def _bootstrap_level_state(rom_path: Path, world: int, level: int,
+                            timeout_sec: int = 20) -> bool:
+    """Create a save-state file for SML level `world-level` (1-indexed) via a
+    subprocess (isolated so hangs can be killed). Returns True on success.
+    Idempotent: skips work if the state file already exists.
+    """
+    state_file = _level_state_path(world, level)
+    if state_file.exists() and state_file.stat().st_size > 1000:
+        return True
+    if (world, level) in SML_BROKEN_LEVELS:
+        return False
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    # PyBoy's set_world_level encoding is 1-indexed (memory byte 0x11 = 1-1),
+    # despite what its docstring claims. Pass w, l as-is (1-indexed).
+    code = (
+        "from pyboy import PyBoy;"
+        f"p = PyBoy({str(rom_path.resolve())!r}, window_type='null', "
+        "game_wrapper=True, disable_renderer=True);"
+        f"p.game_wrapper().start_game(world_level=({world},{level}));"
+        # Let the level fully load before saving state so the tile map is
+        # settled — avoids a state that boots into the "level intro" screen.
+        "[p.tick() for _ in range(60)];"
+        f"p.save_state(open({str(state_file.resolve())!r}, 'wb'));"
+        "p.stop(save=False)"
+    )
+    import subprocess
+    import sys as _sys
+    try:
+        subprocess.run(
+            [_sys.executable, "-c", code],
+            timeout=timeout_sec, capture_output=True, check=True,
+        )
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+        state_file.unlink(missing_ok=True)
+        return False
+    return state_file.exists() and state_file.stat().st_size > 1000
+
+
+def ensure_level_states(rom_path: Path, targets=None) -> list[tuple[int, int]]:
+    """Bootstrap save-state files for the given levels. If targets is None,
+    bootstraps every usable level. Returns list of levels that succeeded.
+    """
+    if targets is None:
+        targets = list(SML_ALL_LEVELS)
+    ok: list[tuple[int, int]] = []
+    for w, l in targets:
+        if _bootstrap_level_state(Path(rom_path), w, l):
+            ok.append((w, l))
+    return ok
+
+
+def parse_start_level(spec):
+    """Parse a start_level spec into None, "random", or a (world, level) tuple.
+
+    Accepts: None, "default", "random", "W-L" string (e.g. "2-3"),
+    or a (world, level) tuple.
+    """
+    if spec is None or spec == "default":
+        return None
+    if spec == "random":
+        return "random"
+    if isinstance(spec, tuple) and len(spec) == 2:
+        w, l = int(spec[0]), int(spec[1])
+    elif isinstance(spec, str) and "-" in spec:
+        parts = spec.split("-")
+        if len(parts) != 2:
+            raise ValueError(f"invalid start_level {spec!r}, expected 'W-L' (e.g. '2-3')")
+        w, l = int(parts[0]), int(parts[1])
+    else:
+        raise ValueError(f"invalid start_level {spec!r}")
+    if (w, l) in SML_BROKEN_LEVELS:
+        raise ValueError(
+            f"level {w}-{l} cannot be started via PyBoy's SML wrapper "
+            f"(known upstream bug — start_game hangs). Pick a different level."
+        )
+    if (w, l) not in SML_ALL_LEVELS:
+        raise ValueError(f"level {w}-{l} not in Super Mario Land (worlds 1-4, levels 1-3)")
+    return (w, l)
 
 
 @dataclass(frozen=True)
@@ -51,12 +157,14 @@ class MarioEnv(gym.Env):
     frame like PyBoy's default openai_gym). Without this, tapping RIGHT
     barely moves Mario and the agent has no gradient toward forward progress.
 
-    Discrete(10) action space, symmetric so Mario can jump in either direction
+    Discrete(11) action space, symmetric so Mario can jump in either direction
     (essential for maneuvers like "back up, jump onto a brick, jump forward
-    over an obstacle with enemies on top"):
+    over an obstacle with enemies on top") plus DOWN so Mario can enter
+    downward pipes:
         0 NOOP           1 RIGHT          2 LEFT          3 JUMP
         4 RIGHT+JUMP     5 RIGHT+RUN      6 RIGHT+RUN+JUMP
         7 LEFT+JUMP      8 LEFT+RUN       9 LEFT+RUN+JUMP
+        10 DOWN  (crouch / enter pipe when standing on one)
 
     Two observation modes (`obs_type`):
       - `"pixels"`: (144, 160, 3) uint8 raw RGB screen — use with CnnPolicy
@@ -93,6 +201,7 @@ class MarioEnv(gym.Env):
         (WindowEvent.PRESS_ARROW_LEFT, WindowEvent.PRESS_BUTTON_B),        # 8 LEFT+RUN
         (WindowEvent.PRESS_ARROW_LEFT, WindowEvent.PRESS_BUTTON_A,
          WindowEvent.PRESS_BUTTON_B),                                      # 9 LEFT+RUN+JUMP
+        (WindowEvent.PRESS_ARROW_DOWN,),                                   # 10 DOWN
     )
     RELEASES = (
         (),
@@ -107,6 +216,7 @@ class MarioEnv(gym.Env):
         (WindowEvent.RELEASE_ARROW_LEFT, WindowEvent.RELEASE_BUTTON_B),
         (WindowEvent.RELEASE_ARROW_LEFT, WindowEvent.RELEASE_BUTTON_A,
          WindowEvent.RELEASE_BUTTON_B),
+        (WindowEvent.RELEASE_ARROW_DOWN,),                                 # 10 DOWN
     )
 
     # Divisor for normalizing tile IDs to [0, 1]-ish
@@ -126,6 +236,7 @@ class MarioEnv(gym.Env):
         obs_type: str = "pixels",
         tick_callback=None,
         jump_hold_bonus: int = 6,
+        start_level=None,
     ):
         super().__init__()
         if obs_type not in ("pixels", "tiles"):
@@ -146,6 +257,12 @@ class MarioEnv(gym.Env):
         # additional ticks so Mario gets a real jump (Super Mario Land jump
         # height scales with A-hold duration up to ~12 frames).
         self.jump_hold_bonus = jump_hold_bonus
+        # Starting level:
+        #   None       → SML's default (world 1-1)
+        #   (w, l)     → always start there (1-indexed, e.g. (2, 3) = level 2-3)
+        #   "random"   → pick a random level from SML_ALL_LEVELS each reset
+        self.start_level = parse_start_level(start_level)
+        self._level_rng = _random_mod.Random()
         self._jump_actions = frozenset(i for i, evts in enumerate(self.ACTIONS)
                                         if WindowEvent.PRESS_BUTTON_A in evts)
 
@@ -178,7 +295,46 @@ class MarioEnv(gym.Env):
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        if not self._started:
+        if seed is not None:
+            self._level_rng.seed(seed)
+
+        target = None
+        if self.start_level == "random":
+            target = self._level_rng.choice(SML_ALL_LEVELS)
+        elif isinstance(self.start_level, tuple):
+            target = self.start_level
+
+        if target is not None:
+            # Preferred path: load a pre-saved emulator state for this level.
+            # This is what PyBoy's docs recommend for level switching — instant,
+            # race-free, and avoids the start_game()-hang for some levels.
+            state_file = _level_state_path(*target)
+            if state_file.exists() and state_file.stat().st_size > 1000:
+                # PyBoy needs the game_wrapper "started" flag set for helpers
+                # like level_progress / lives_left to read from the right memory
+                # after load_state, so make sure start_game() has run at least
+                # once first.
+                if not self._started:
+                    self.gw.start_game()
+                    self._started = True
+                with open(state_file, "rb") as f:
+                    self.pyboy.load_state(f)
+                # CRITICAL: after load_state, memory-mapped values like
+                # level_progress / lives_left / world stay stale until at
+                # least one tick runs and the wrapper refreshes. Without
+                # this, our first step() sees `lives_left` drop from stale
+                # to real, misfires the death termination, and the env
+                # ends up in a reset-die-reset-die infinite loop.
+                for _ in range(4):
+                    self.pyboy.tick()
+            else:
+                # Fallback: state file missing → try the old path. May hang
+                # for broken levels. `ensure_level_states()` should have been
+                # called upfront to avoid this. Note: 1-indexed args.
+                self.gw.set_world_level(target[0], target[1])
+                self.gw.start_game()
+                self._started = True
+        elif not self._started:
             self.gw.start_game()
             self._started = True
         else:
@@ -277,6 +433,7 @@ def make_pyboy_env(
     rom_dir: str | Path = "ROMs",
     emulation_speed: int | None = None,
     obs_type: str = "pixels",
+    start_level=None,
 ) -> gym.Env:
     """Build a PyBoy gym env.
     - 'mario' → MarioEnv (hold-button actions + shaped reward, pixels or tiles)
@@ -309,8 +466,12 @@ def make_pyboy_env(
         print(f"[env] warning: expected '{spec.cartridge_title}', got '{actual_title}'")
 
     if game == "mario":
-        env: gym.Env = MarioEnv(pyboy, frame_skip=action_repeat, obs_type=obs_type)
+        env: gym.Env = MarioEnv(pyboy, frame_skip=action_repeat, obs_type=obs_type,
+                                 start_level=start_level)
     else:
+        if start_level is not None and start_level != "default":
+            pyboy.stop(save=False)
+            raise ValueError(f"start_level only supported for mario, not {game!r}")
         if pyboy.game_wrapper() is None:
             pyboy.stop(save=False)
             raise ValueError(
@@ -335,6 +496,7 @@ def env_factory(
     window_type: str = "null",
     action_repeat: int = 4,
     obs_type: str = "pixels",
+    start_level=None,
 ) -> gym.Env:
     """Picklable factory for SubprocVecEnv workers."""
     env = make_pyboy_env(
@@ -343,5 +505,6 @@ def env_factory(
         action_repeat=action_repeat,
         seed=seed,
         obs_type=obs_type,
+        start_level=start_level,
     )
     return Monitor(env)

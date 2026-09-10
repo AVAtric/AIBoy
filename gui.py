@@ -25,7 +25,7 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecTransposeImage
 
 import presets
-from env import GAMES, MarioEnv
+from env import GAMES, MarioEnv, SML_ALL_LEVELS, ensure_level_states
 
 SCALE = 3
 GAME_W, GAME_H = 160, 144
@@ -36,6 +36,8 @@ TRACKED_STATS = ("total_timesteps", "ep_rew_mean", "ep_len_mean", "fps", "time_e
 
 SPEED_CHOICES = [("0.5×", 0.5), ("1× (real time)", 1.0), ("2×", 2.0),
                  ("4×", 4.0), ("Unlimited", 0.0)]
+
+LEVEL_CHOICES = ["default", "random"] + [f"{w}-{l}" for (w, l) in SML_ALL_LEVELS]
 
 
 class GameBoyAIGUI:
@@ -119,6 +121,14 @@ class GameBoyAIGUI:
         self.batch_var = tk.IntVar(value=64)
         self.device_var = tk.StringVar(value="auto")
         self.resume_var = tk.BooleanVar(value=False)
+        # Advanced (previously CLI-only)
+        self.action_repeat_var = tk.IntVar(value=4)
+        self.frame_stack_var = tk.IntVar(value=4)
+        self.n_epochs_var = tk.IntVar(value=4)
+        self.seed_var = tk.IntVar(value=0)
+        self.ckpt_freq_var = tk.IntVar(value=25_000)
+        self.eval_freq_var = tk.IntVar(value=10_000)
+        self.n_eval_var = tk.IntVar(value=3)
 
         # ---- Presets bar ----
         preset_frame = ttk.LabelFrame(parent, text="Preset", padding=6)
@@ -157,8 +167,37 @@ class GameBoyAIGUI:
         self.obs_type_var = tk.StringVar(value="tiles")
         add("Obs type:", ttk.Combobox(parent, textvariable=self.obs_type_var,
                                        values=["tiles", "pixels"], state="readonly", width=17))
+        self.start_level_var = tk.StringVar(value="default")
+        add("Start level:", ttk.Combobox(parent, textvariable=self.start_level_var,
+                                          values=LEVEL_CHOICES, state="readonly", width=17))
         add("Device:", ttk.Combobox(parent, textvariable=self.device_var,
                                      values=["auto", "cpu", "mps", "cuda"], state="readonly", width=17))
+
+        # -------- Advanced params (each has a sane default; only tweak if you know why) --------
+        ttk.Separator(parent, orient="horizontal").grid(row=row, column=0, columnspan=2,
+                                                        sticky="ew", pady=(8, 2))
+        row += 1
+        ttk.Label(parent, text="Advanced", font=("", 10, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(0, 3))
+        row += 1
+        add("Action repeat:", ttk.Spinbox(parent, from_=1, to=16,
+                                            textvariable=self.action_repeat_var, width=18))
+        add("Frame stack:", ttk.Spinbox(parent, from_=1, to=16,
+                                          textvariable=self.frame_stack_var, width=18))
+        add("PPO n_epochs:", ttk.Spinbox(parent, from_=1, to=30,
+                                           textvariable=self.n_epochs_var, width=18))
+        add("Seed:", ttk.Spinbox(parent, from_=0, to=2_147_483_647,
+                                   textvariable=self.seed_var, width=18))
+        add("Checkpoint every N steps:", ttk.Spinbox(parent, from_=100, to=10_000_000, increment=1000,
+                                                       textvariable=self.ckpt_freq_var, width=18))
+        add("Eval every N steps:", ttk.Spinbox(parent, from_=100, to=10_000_000, increment=1000,
+                                                 textvariable=self.eval_freq_var, width=18))
+        add("Eval episodes per check:", ttk.Spinbox(parent, from_=1, to=100,
+                                                      textvariable=self.n_eval_var, width=18))
+        ttk.Separator(parent, orient="horizontal").grid(row=row, column=0, columnspan=2,
+                                                         sticky="ew", pady=(4, 8))
+        row += 1
+
         self.resume_check = ttk.Checkbutton(parent, text="Resume from newest checkpoint (uses selected run name)",
                                              variable=self.resume_var)
         self.resume_check.grid(row=row, column=0, columnspan=2, sticky="w", pady=6)
@@ -262,6 +301,9 @@ class GameBoyAIGUI:
         add("Obs type (match training):",
             ttk.Combobox(opts_frame, textvariable=self.play_obs_type_var,
                           values=["tiles", "pixels"], state="readonly", width=10))
+        self.play_level_var = tk.StringVar(value="default")
+        add("Start level:", ttk.Combobox(opts_frame, textvariable=self.play_level_var,
+                                          values=LEVEL_CHOICES, state="readonly", width=10))
         add("Speed:", ttk.Combobox(opts_frame, textvariable=self.play_speed_label_var,
                                     values=[c[0] for c in SPEED_CHOICES],
                                     state="readonly", width=15))
@@ -376,13 +418,23 @@ class GameBoyAIGUI:
             "batch_size": self.batch_var,
             "device": self.device_var,
             "obs_type": self.obs_type_var,
+            "start_level": self.start_level_var,
+            "action_repeat": self.action_repeat_var,
+            "frame_stack": self.frame_stack_var,
+            "n_epochs": self.n_epochs_var,
+            "seed": self.seed_var,
+            "checkpoint_freq": self.ckpt_freq_var,
+            "eval_freq": self.eval_freq_var,
+            "n_eval_episodes": self.n_eval_var,
         }
         for key, var in var_map.items():
             if key in cfg:
                 var.set(cfg[key])
-        # Keep the Play tab's obs_type in sync so playing a just-trained model works
+        # Keep the Play tab in sync so playing a just-trained model works
         if "obs_type" in cfg:
             self.play_obs_type_var.set(cfg["obs_type"])
+        if "start_level" in cfg:
+            self.play_level_var.set(cfg["start_level"])
         self._refresh_models()
 
     def _current_config(self) -> dict:
@@ -396,6 +448,14 @@ class GameBoyAIGUI:
             "batch_size": int(self.batch_var.get()),
             "device": self.device_var.get(),
             "obs_type": self.obs_type_var.get(),
+            "start_level": self.start_level_var.get(),
+            "action_repeat": int(self.action_repeat_var.get()),
+            "frame_stack": int(self.frame_stack_var.get()),
+            "n_epochs": int(self.n_epochs_var.get()),
+            "seed": int(self.seed_var.get()),
+            "checkpoint_freq": int(self.ckpt_freq_var.get()),
+            "eval_freq": int(self.eval_freq_var.get()),
+            "n_eval_episodes": int(self.n_eval_var.get()),
         }
 
     def _save_preset(self) -> None:
@@ -470,7 +530,15 @@ class GameBoyAIGUI:
             "--n-steps", str(self.nsteps_var.get()),
             "--batch-size", str(self.batch_var.get()),
             "--obs-type", self.obs_type_var.get(),
+            "--start-level", self.start_level_var.get(),
             "--device", self.device_var.get(),
+            "--action-repeat", str(self.action_repeat_var.get()),
+            "--frame-stack", str(self.frame_stack_var.get()),
+            "--n-epochs", str(self.n_epochs_var.get()),
+            "--seed", str(self.seed_var.get()),
+            "--checkpoint-freq", str(self.ckpt_freq_var.get()),
+            "--eval-freq", str(self.eval_freq_var.get()),
+            "--n-eval-episodes", str(self.n_eval_var.get()),
             "--run-name", run_name,
         ]
         if self.resume_var.get():
@@ -522,9 +590,12 @@ class GameBoyAIGUI:
     def _start_preview(self, game: str, run_name: str) -> None:
         """Watch the newest saved model play alongside training, in the Play tab canvas."""
         self.preview_stop.clear()
-        action_repeat = 4
-        frame_stack = 4
+        action_repeat = int(self.action_repeat_var.get())
+        frame_stack = int(self.frame_stack_var.get())
         obs_type = self.obs_type_var.get()
+        raw_level = self.start_level_var.get()
+        # Preview: if training was random, watch a specific level (1-1) for consistency
+        preview_level = None if raw_level in ("default", "random") else raw_level
 
         def _preview_loop():
             from stable_baselines3.common.vec_env import DummyVecEnv as DVE
@@ -561,7 +632,8 @@ class GameBoyAIGUI:
                                 pass
 
                         base = MarioEnv(pyboy, frame_skip=action_repeat,
-                                        obs_type=obs_type, tick_callback=_grab)
+                                        obs_type=obs_type, tick_callback=_grab,
+                                        start_level=preview_level)
                         vec = DVE([lambda env=Mon(base): env])
                         if obs_type == "pixels":
                             vec = VecTransposeImage(vec)
@@ -623,6 +695,8 @@ class GameBoyAIGUI:
         action_repeat = int(self.play_action_repeat_var.get())
         frame_stack = int(self.play_frame_stack_var.get())
         obs_type = self.play_obs_type_var.get()
+        raw_level = self.play_level_var.get()
+        start_level = None if raw_level == "default" else raw_level
         episodes = int(self.play_episodes_var.get())
         max_steps = int(self.play_max_steps_var.get())
         deterministic = not self.play_stochastic_var.get()
@@ -637,7 +711,7 @@ class GameBoyAIGUI:
         self.play_thread = threading.Thread(
             target=self._play_loop,
             args=(game, model_path, speed_mult, action_repeat, frame_stack,
-                  obs_type, episodes, max_steps, deterministic),
+                  obs_type, start_level, episodes, max_steps, deterministic),
             daemon=True,
         )
         self.play_thread.start()
@@ -648,11 +722,19 @@ class GameBoyAIGUI:
     def _play_loop(
         self, game: str, model_path: Path, speed_mult: float,
         action_repeat: int, frame_stack: int, obs_type: str,
-        episodes: int, max_steps: int, deterministic: bool,
+        start_level, episodes: int, max_steps: int, deterministic: bool,
     ) -> None:
         try:
             spec = GAMES[game]
             rom_path = self.project_dir / "ROMs" / spec.rom_file
+            # Bootstrap save-state file for the requested level if missing
+            # (subprocess with timeout, so a stuck level can't wedge the GUI).
+            if game == "mario" and start_level is not None:
+                if start_level == "random":
+                    ensure_level_states(rom_path)
+                else:
+                    w, l = (int(x) for x in start_level.split("-"))
+                    ensure_level_states(rom_path, [(w, l)])
             # For tiles we still need rendering enabled — we grab pixel frames
             # for the canvas even though the model sees tiles.
             pyboy = PyBoy(str(rom_path), window_type="null",
@@ -669,7 +751,8 @@ class GameBoyAIGUI:
 
             if game == "mario":
                 base = MarioEnv(pyboy, frame_skip=action_repeat,
-                                obs_type=obs_type, tick_callback=_grab_frame)
+                                obs_type=obs_type, tick_callback=_grab_frame,
+                                start_level=start_level)
             else:
                 if pyboy.game_wrapper() is None:
                     pyboy.stop(save=False)
@@ -846,6 +929,7 @@ MARIO_ACTION_NAMES = [
     "NOOP", "RIGHT", "LEFT", "JUMP",
     "RIGHT+JUMP", "RIGHT+RUN", "RIGHT+RUN+JUMP",
     "LEFT+JUMP", "LEFT+RUN", "LEFT+RUN+JUMP",
+    "DOWN",
 ]
 
 

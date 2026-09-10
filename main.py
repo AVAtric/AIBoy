@@ -20,7 +20,7 @@ from stable_baselines3.common.vec_env import (
     VecTransposeImage,
 )
 
-from env import GAMES, env_factory, make_pyboy_env
+from env import GAMES, SML_ALL_LEVELS, env_factory, ensure_level_states, make_pyboy_env
 
 
 MODELS_ROOT = Path("models")
@@ -41,8 +41,8 @@ def run_paths(game: str, run_name: str) -> dict[str, Path]:
 
 # ------------------------- vec-env plumbing -------------------------
 
-def build_vec_env(game, n_envs, seed, action_repeat, frame_stack, obs_type):
-    fns = [partial(env_factory, game, seed + i, "null", action_repeat, obs_type)
+def build_vec_env(game, n_envs, seed, action_repeat, frame_stack, obs_type, start_level=None):
+    fns = [partial(env_factory, game, seed + i, "null", action_repeat, obs_type, start_level)
            for i in range(n_envs)]
     vec = SubprocVecEnv(fns, start_method="spawn") if n_envs > 1 else DummyVecEnv(fns)
     if obs_type == "pixels":
@@ -55,12 +55,12 @@ def build_vec_env(game, n_envs, seed, action_repeat, frame_stack, obs_type):
     return vec
 
 
-def build_play_env(game, action_repeat, frame_stack, emulation_speed, obs_type):
+def build_play_env(game, action_repeat, frame_stack, emulation_speed, obs_type, start_level=None):
     def _init():
         env = make_pyboy_env(
             game=game, window_type="SDL2",
             action_repeat=action_repeat, emulation_speed=emulation_speed,
-            obs_type=obs_type,
+            obs_type=obs_type, start_level=start_level,
         )
         return Monitor(env)
 
@@ -128,10 +128,33 @@ def cmd_train(args: argparse.Namespace) -> None:
           f"batch={args.batch_size} lr={args.learning_rate}")
     print(f"[train] writing to {paths['base']}")
 
+    start_level = args.start_level if args.start_level != "default" else None
+    # Pre-bootstrap per-level save-states so SubprocVecEnv workers just load
+    # them (instant, race-free) instead of each running set_world_level +
+    # start_game, which is fragile and can hang.
+    if args.game == "mario" and start_level is not None:
+        rom = Path("ROMs") / "mario.gb"
+        targets = SML_ALL_LEVELS if start_level == "random" else [tuple(int(x) for x in start_level.split("-"))]
+        needed = [(w, l) for (w, l) in targets
+                  if not (Path("models") / "mario" / "_level_states" / f"{w}-{l}.state").exists()]
+        if needed:
+            print(f"[train] bootstrapping save-states for {len(needed)} level(s): "
+                  f"{[f'{w}-{l}' for w, l in needed]}...")
+            ok = ensure_level_states(rom, needed)
+            failed = [t for t in needed if t not in ok]
+            if failed:
+                print(f"[train] warning: could not bootstrap {failed} — falling back to old path")
+            else:
+                print(f"[train] all requested level states cached")
     env = build_vec_env(args.game, args.n_envs, args.seed,
-                        args.action_repeat, args.frame_stack, args.obs_type)
+                        args.action_repeat, args.frame_stack, args.obs_type,
+                        start_level=start_level)
+    # Eval env is fixed to level 1-1 when training on random levels (so eval
+    # reward is comparable across evaluations). Otherwise mirror the train level.
+    eval_start = None if start_level == "random" else start_level
     eval_env = build_vec_env(args.game, 1, args.seed + 10_000,
-                             args.action_repeat, args.frame_stack, args.obs_type)
+                             args.action_repeat, args.frame_stack, args.obs_type,
+                             start_level=eval_start)
 
     try:
         from torch.utils.tensorboard import SummaryWriter  # noqa: F401
@@ -214,8 +237,16 @@ def cmd_play(args: argparse.Namespace) -> None:
     model_path = resolve_model_path(args.model, args.game, run_name)
     print(f"[play] loading model from {model_path}")
 
+    start_level = args.start_level if args.start_level != "default" else None
+    if args.game == "mario" and start_level is not None:
+        rom = Path("ROMs") / "mario.gb"
+        if start_level == "random":
+            ensure_level_states(rom)
+        else:
+            ensure_level_states(rom, [tuple(int(x) for x in start_level.split("-"))])
     env = build_play_env(args.game, args.action_repeat, args.frame_stack,
-                         args.emulation_speed, args.obs_type)
+                         args.emulation_speed, args.obs_type,
+                         start_level=start_level)
     model = PPO.load(str(model_path), env=env, device=args.device)
     deterministic = not args.stochastic
     print(f"[play] {args.episodes} episode(s), deterministic={deterministic}")
@@ -246,6 +277,11 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--frame-stack", type=int, default=4, help="Consecutive frames stacked as obs")
     p.add_argument("--obs-type", default="tiles", choices=["pixels", "tiles"],
                    help="tiles = 16×20 game_area (fast, MLP); pixels = 144×160×3 RGB (slow, CNN)")
+    from env import SML_ALL_LEVELS
+    level_choices = ["default", "random"] + [f"{w}-{l}" for (w, l) in SML_ALL_LEVELS]
+    p.add_argument("--start-level", default="default", choices=level_choices,
+                   help="Which SML level to start on: 'default' (1-1), '1-1'..'4-3' "
+                        "(2-1 excluded — PyBoy wrapper bug), or 'random'")
 
 
 def build_parser() -> argparse.ArgumentParser:
