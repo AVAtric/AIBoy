@@ -7,11 +7,11 @@ learning algorithm.
 
 Supported games (require a PyBoy game-wrapper):
 
-| Name     | ROM file    | Cartridge title  |
-|----------|-------------|------------------|
-| `mario`  | `mario.gb`  | `SUPER MARIOLAN` |
-| `kirby`  | `kirby.gb`  | `KIRBY DREAM LA` |
-| `tetris` | `tetris.gb` | `TETRIS`         |
+| Name    | ROM file   | Cartridge title  | Notes                         |
+|---------|------------|------------------|-------------------------------|
+| `mario` | `mario.gb` | `SUPER MARIOLAN` | Custom shaped-reward MarioEnv |
+| `kirby` | `kirby.gb` | `KIRBY DREAM LA` | PyBoy's default openai_gym    |
+| `wario` | `wario.gb` | `WARIO`          | ⚠ No PyBoy game_wrapper — unsupported for training/play |
 
 Super Mario Land uses a custom `MarioEnv` with:
 
@@ -24,6 +24,20 @@ Super Mario Land uses a custom `MarioEnv` with:
   − death_penalty (200 on death) + completion_bonus (1000 on level clear)`.
 - **Episode termination** on death or level clear; truncation when Mario
   makes no forward progress for `stuck_steps` steps.
+- **Two observation modes** (`--obs-type`):
+  - `tiles` (default, recommended) — 16×20 PyBoy `game_area()` tile IDs
+    normalized to [0, 1]. Trained with `MlpPolicy`. **~30× faster** than
+    pixels on CPU; the semantic tile representation lets the agent learn
+    "enemy tile → jump" much faster than from raw RGB.
+  - `pixels` — raw 144×160×3 RGB screen. Trained with `CnnPolicy`. Slower
+    but strictly more information; use it if tile learning plateaus.
+
+## M1 / Apple Silicon note
+
+For our small MLP, **CPU is faster than MPS** by ~4× (measured on M1 Max)
+because Metal kernel launch overhead exceeds the compute per call. The default
+`--device cpu` is intentional. MPS would only start winning with much larger
+networks.
 
 ## Prerequisites
 
@@ -53,10 +67,15 @@ The **GUI** is the easiest way to work with the project. It has two tabs:
 - **Train** — start / stop a headless training run, see live `total_timesteps`,
   `ep_rew_mean`, `ep_len_mean`, `fps` and a scrolling training log. Training
   runs as a subprocess of the CLI so the GUI stays responsive.
-- **Play** — load the best model for the selected run and watch the agent
-  play, embedded in a 3× upscaled Canvas inside the GUI window. This avoids
-  the macOS "hidden window" issue you may hit when running the SDL2 play
-  mode from a nested shell.
+  Includes a **Preset** bar at the top: pick a built-in preset like
+  `Mario — Balanced (recommended)`, or `Save as…` your own tweaked config.
+  User presets are stored in `training_presets.json`. Built-ins can be used
+  but not deleted or overwritten.
+- **Play** — model selector dropdown lists all `logs/*/best_model.zip`,
+  `checkpoints/*/final.zip` and step snapshots. Speed selector supports
+  `0.5×`, `1× (real time)`, `2×`, `4×`, `Unlimited` — pacing is done manually
+  via `time.sleep()` because PyBoy's built-in speed doesn't pace in
+  null-window mode. Game plays inside a 3× upscaled Canvas at ~60Hz.
 
 ### `train` flags
 
@@ -97,32 +116,42 @@ Model resolution order for `play`:
 3. `checkpoints/<run-name>/final.zip`
 4. Newest `checkpoints/<run-name>/ppo_*_steps.zip`
 
-## Artifacts (per run)
+## Artifacts (per run, grouped by game)
 
 ```
-checkpoints/<run>/ppo_*_steps.zip     # periodic snapshots
-checkpoints/<run>/final.zip           # saved on exit
-logs/<run>/best_model.zip             # best-eval model
-logs/<run>/evaluations.npz            # eval history
-tensorboard/<run>/                    # TB event files
+models/
+├── mario/
+│   └── <run-name>/                   # e.g. `balanced`, `experiment-1`
+│       ├── checkpoints/
+│       │   ├── ppo_25000_steps.zip   # periodic snapshots
+│       │   └── final.zip             # saved on exit / Ctrl-C
+│       ├── logs/
+│       │   ├── best_model.zip        # best eval-reward model
+│       │   └── evaluations.npz       # eval history
+│       └── tensorboard/              # TB event files
+└── kirby/
+    └── <run-name>/
+        └── ...
 ```
 
 View training curves:
 
 ```bash
-tensorboard --logdir tensorboard
+tensorboard --logdir models/mario/<run-name>/tensorboard
 ```
 
 ## Project layout
 
 ```
-env.py            # MarioEnv + game registry + ActionRepeat wrapper
-main.py           # CLI: `gui`, `train`, `play` subcommands
-gui.py            # Tkinter GUI (embedded game view, subprocess-based training)
+env.py                  # MarioEnv + game registry + ActionRepeat wrapper
+main.py                 # CLI: `gui`, `train`, `play` subcommands
+gui.py                  # Tkinter GUI (preset bar, embedded game view)
+presets.py              # Built-in + user-saved training presets
+training_presets.json   # User-saved presets (created on first save)
 requirements.txt
 README.md
-ROMs/             # Your ROM files (gitignored)
-checkpoints/, logs/, tensorboard/     # Training artifacts (gitignored)
+ROMs/                                  # Your ROM files (gitignored)
+checkpoints/, logs/, tensorboard/      # Training artifacts (gitignored)
 ```
 
 ## Notes on training Mario

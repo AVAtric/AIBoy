@@ -2,7 +2,7 @@
 
 Usage:
     python main.py gui                                                 # open Tkinter GUI
-    python main.py train --game mario --n-envs 4 --timesteps 1000000   # train headless
+    python main.py train --game mario --n-envs 8 --timesteps 500000    # train headless
     python main.py play  --game mario --episodes 3                     # play in SDL2 window
 """
 import argparse
@@ -23,29 +23,53 @@ from stable_baselines3.common.vec_env import (
 from env import GAMES, env_factory, make_pyboy_env
 
 
+MODELS_ROOT = Path("models")
+
+
+# ------------------------- paths -------------------------
+
+def run_paths(game: str, run_name: str) -> dict[str, Path]:
+    """models/<game>/<run>/{checkpoints,logs,tensorboard}/"""
+    base = MODELS_ROOT / game / run_name
+    return {
+        "base": base,
+        "checkpoints": base / "checkpoints",
+        "logs": base / "logs",
+        "tensorboard": base / "tensorboard",
+    }
+
+
 # ------------------------- vec-env plumbing -------------------------
 
-def build_vec_env(game, n_envs, seed, action_repeat, frame_stack):
-    fns = [partial(env_factory, game, seed + i, "null", action_repeat) for i in range(n_envs)]
+def build_vec_env(game, n_envs, seed, action_repeat, frame_stack, obs_type):
+    fns = [partial(env_factory, game, seed + i, "null", action_repeat, obs_type)
+           for i in range(n_envs)]
     vec = SubprocVecEnv(fns, start_method="spawn") if n_envs > 1 else DummyVecEnv(fns)
-    vec = VecTransposeImage(vec)
+    if obs_type == "pixels":
+        vec = VecTransposeImage(vec)
     if frame_stack > 1:
-        vec = VecFrameStack(vec, n_stack=frame_stack, channels_order="first")
+        # For pixels (transposed to CHW) use channels_order="first"
+        # For tiles (float32 HWC), use "last" to stack along channel dim
+        order = "first" if obs_type == "pixels" else "last"
+        vec = VecFrameStack(vec, n_stack=frame_stack, channels_order=order)
     return vec
 
 
-def build_play_env(game, action_repeat, frame_stack, emulation_speed):
+def build_play_env(game, action_repeat, frame_stack, emulation_speed, obs_type):
     def _init():
         env = make_pyboy_env(
             game=game, window_type="SDL2",
             action_repeat=action_repeat, emulation_speed=emulation_speed,
+            obs_type=obs_type,
         )
         return Monitor(env)
 
     vec = DummyVecEnv([_init])
-    vec = VecTransposeImage(vec)
+    if obs_type == "pixels":
+        vec = VecTransposeImage(vec)
     if frame_stack > 1:
-        vec = VecFrameStack(vec, n_stack=frame_stack, channels_order="first")
+        order = "first" if obs_type == "pixels" else "last"
+        vec = VecFrameStack(vec, n_stack=frame_stack, channels_order=order)
     return vec
 
 
@@ -58,61 +82,81 @@ def latest_checkpoint(ckpt_dir: Path) -> Path | None:
     return ckpts[-1] if ckpts else None
 
 
-def resolve_model_path(model_arg: str | None, run_name: str) -> Path:
+def resolve_model_path(model_arg: str | None, game: str, run_name: str) -> Path:
     if model_arg:
         p = Path(model_arg)
         if not p.exists():
             raise FileNotFoundError(f"Model not found: {p}")
         return p
+    paths = run_paths(game, run_name)
     candidates = [
-        Path("logs") / run_name / "best_model.zip",
-        Path("checkpoints") / run_name / "final.zip",
+        paths["logs"] / "best_model.zip",
+        paths["checkpoints"] / "final.zip",
     ]
-    ckpt_dir = Path("checkpoints") / run_name
-    if ckpt_dir.exists():
-        ckpts = sorted(ckpt_dir.glob("ppo_*.zip"))
+    if paths["checkpoints"].exists():
+        ckpts = sorted(paths["checkpoints"].glob("ppo_*.zip"))
         if ckpts:
             candidates.append(ckpts[-1])
     for c in candidates:
         if c.exists():
             return c
     raise FileNotFoundError(
-        f"No trained model for run '{run_name}'. Looked in: {[str(c) for c in candidates]}"
+        f"No trained model for game='{game}' run='{run_name}'. "
+        f"Looked in: {[str(c) for c in candidates]}"
     )
+
+
+def pick_policy(obs_type: str) -> tuple[str, dict]:
+    """Return (policy_name, policy_kwargs) for the given observation type."""
+    if obs_type == "pixels":
+        return "CnnPolicy", {}
+    # Tiles → MLP, small state so a moderately-sized net is enough
+    return "MlpPolicy", dict(net_arch=dict(pi=[256, 256], vf=[256, 256]))
 
 
 # ------------------------- train -------------------------
 
 def cmd_train(args: argparse.Namespace) -> None:
-    run_name = args.run_name or args.game
-    ckpt_dir = Path("checkpoints") / run_name
-    log_dir = Path("logs") / run_name
-    tb_dir = Path("tensorboard") / run_name
-    for d in (ckpt_dir, log_dir, tb_dir):
-        d.mkdir(parents=True, exist_ok=True)
+    run_name = args.run_name or "default"
+    paths = run_paths(args.game, run_name)
+    for d in ("checkpoints", "logs", "tensorboard"):
+        paths[d].mkdir(parents=True, exist_ok=True)
 
-    print(f"[train] game={args.game} n_envs={args.n_envs} device={args.device}")
-    print(f"[train] action_repeat={args.action_repeat} frame_stack={args.frame_stack} "
-          f"ent_coef={args.ent_coef} n_steps={args.n_steps}")
+    print(f"[train] game={args.game} run={run_name} obs_type={args.obs_type}")
+    print(f"[train] n_envs={args.n_envs} device={args.device}")
+    print(f"[train] ent_coef={args.ent_coef} n_steps={args.n_steps} "
+          f"batch={args.batch_size} lr={args.learning_rate}")
+    print(f"[train] writing to {paths['base']}")
 
-    env = build_vec_env(args.game, args.n_envs, args.seed, args.action_repeat, args.frame_stack)
-    eval_env = build_vec_env(args.game, 1, args.seed + 10_000, args.action_repeat, args.frame_stack)
+    env = build_vec_env(args.game, args.n_envs, args.seed,
+                        args.action_repeat, args.frame_stack, args.obs_type)
+    eval_env = build_vec_env(args.game, 1, args.seed + 10_000,
+                             args.action_repeat, args.frame_stack, args.obs_type)
 
     try:
         from torch.utils.tensorboard import SummaryWriter  # noqa: F401
-        tb_log = str(tb_dir)
+        tb_log = str(paths["tensorboard"])
     except ImportError:
         print("[train] tensorboard not installed; skipping TB logging (pip install tensorboard)")
         tb_log = None
 
-    resumed_from = latest_checkpoint(ckpt_dir) if args.resume else None
+    resumed_from = latest_checkpoint(paths["checkpoints"]) if args.resume else None
     if resumed_from is not None:
         print(f"[train] resuming from {resumed_from}")
+        print(f"[train] WARNING: --resume loads the saved model's hyperparameters. "
+              f"Mutable overrides (ent_coef, learning_rate, n_epochs) will be applied, "
+              f"but architecture / n_steps / batch_size come from the saved model.")
         model = PPO.load(str(resumed_from), env=env, device=args.device, tensorboard_log=tb_log)
+        model.ent_coef = args.ent_coef
+        model.learning_rate = args.learning_rate
+        model.n_epochs = args.n_epochs
     else:
+        policy, policy_kwargs = pick_policy(args.obs_type)
+        print(f"[train] policy={policy} policy_kwargs={policy_kwargs}")
         model = PPO(
-            "CnnPolicy",
+            policy,
             env,
+            policy_kwargs=policy_kwargs,
             verbose=1,
             device=args.device,
             tensorboard_log=tb_log,
@@ -132,13 +176,13 @@ def cmd_train(args: argparse.Namespace) -> None:
     per_env = max(1, args.n_envs)
     checkpoint_cb = CheckpointCallback(
         save_freq=max(args.checkpoint_freq // per_env, 1),
-        save_path=str(ckpt_dir),
+        save_path=str(paths["checkpoints"]),
         name_prefix="ppo",
     )
     eval_cb = EvalCallback(
         eval_env,
-        best_model_save_path=str(log_dir),
-        log_path=str(log_dir),
+        best_model_save_path=str(paths["logs"]),
+        log_path=str(paths["logs"]),
         eval_freq=max(args.eval_freq // per_env, 1),
         n_eval_episodes=args.n_eval_episodes,
         deterministic=True,
@@ -153,7 +197,7 @@ def cmd_train(args: argparse.Namespace) -> None:
             progress_bar=False,
         )
     finally:
-        final_path = ckpt_dir / "final.zip"
+        final_path = paths["checkpoints"] / "final.zip"
         model.save(str(final_path))
         print(f"[train] saved final model to {final_path}")
         env.close()
@@ -163,11 +207,12 @@ def cmd_train(args: argparse.Namespace) -> None:
 # ------------------------- play -------------------------
 
 def cmd_play(args: argparse.Namespace) -> None:
-    run_name = args.run_name or args.game
-    model_path = resolve_model_path(args.model, run_name)
+    run_name = args.run_name or "default"
+    model_path = resolve_model_path(args.model, args.game, run_name)
     print(f"[play] loading model from {model_path}")
 
-    env = build_play_env(args.game, args.action_repeat, args.frame_stack, args.emulation_speed)
+    env = build_play_env(args.game, args.action_repeat, args.frame_stack,
+                         args.emulation_speed, args.obs_type)
     model = PPO.load(str(model_path), env=env, device=args.device)
     deterministic = not args.stochastic
     print(f"[play] {args.episodes} episode(s), deterministic={deterministic}")
@@ -196,6 +241,8 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--game", default="mario", choices=sorted(GAMES.keys()))
     p.add_argument("--action-repeat", type=int, default=4, help="Frames each action is held")
     p.add_argument("--frame-stack", type=int, default=4, help="Consecutive frames stacked as obs")
+    p.add_argument("--obs-type", default="tiles", choices=["pixels", "tiles"],
+                   help="tiles = 16×20 game_area (fast, MLP); pixels = 144×160×3 RGB (slow, CNN)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -207,21 +254,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     t = sub.add_parser("train", help="Train a PPO agent (headless)")
     _add_common(t)
-    t.add_argument("--timesteps", type=int, default=1_000_000)
-    t.add_argument("--n-envs", type=int, default=4, help="Parallel PyBoy instances")
+    t.add_argument("--timesteps", type=int, default=500_000)
+    t.add_argument("--n-envs", type=int, default=8, help="Parallel PyBoy instances")
     t.add_argument("--seed", type=int, default=0)
-    t.add_argument("--device", default="auto", help="cpu, cuda, mps, or auto")
+    t.add_argument("--device", default="cpu",
+                   help="cpu (recommended for tile obs), cuda, mps, or auto")
     t.add_argument("--resume", action="store_true", help="Resume from newest checkpoint")
-    t.add_argument("--run-name", default=None, help="Sub-directory name (defaults to <game>)")
+    t.add_argument("--run-name", default=None, help="Sub-dir name (defaults to 'default')")
     t.add_argument("--checkpoint-freq", type=int, default=25_000)
     t.add_argument("--eval-freq", type=int, default=10_000)
     t.add_argument("--n-eval-episodes", type=int, default=3)
     t.add_argument("--learning-rate", type=float, default=2.5e-4)
     t.add_argument("--n-steps", type=int, default=256, help="PPO rollout length per env")
-    t.add_argument("--batch-size", type=int, default=256)
+    t.add_argument("--batch-size", type=int, default=64)
     t.add_argument("--n-epochs", type=int, default=4)
-    t.add_argument("--ent-coef", type=float, default=0.05,
-                   help="Entropy coefficient (higher = more exploration)")
+    t.add_argument("--ent-coef", type=float, default=0.01,
+                   help="Entropy coefficient (raise for more exploration)")
 
     sub.add_parser("gui", help="Launch the Tkinter GUI (train + play in one window)")
 
