@@ -316,16 +316,24 @@ class MarioEnv(gym.Env):
         arr = np.asarray(self.gw.custom_minimal_enemy(), dtype=np.float32)
         # The HUD area at the top of the screen collapses to 0.0 in this
         # representation, so the agent otherwise has NO awareness of lives,
-        # coins, timer or progress. Overlay 4 normalised scalar features
-        # into the top-left cells so the agent knows how careful to be
-        # (low lives), how urgent the level is (low time), and how far
-        # it has already got (max_x this attempt). This doesn't change
-        # the obs shape or the policy architecture — MlpPolicy just sees
-        # a few extra non-zero entries in the flattened vector.
-        arr[0, 0] = min(max(self.gw.lives_left, 0), 9) / 9.0    # lives:  0 .. ~1
-        arr[0, 1] = min(self.gw.coins, 99) / 99.0                # coins:  0 .. ~1
-        arr[0, 2] = min(max(self.gw.time_left, 0), 400) / 400.0  # timer:  0 .. 1
-        arr[0, 3] = min(self._max_x, 4096) / 4096.0              # max_x:  0 .. ~1
+        # coins, timer, its position in the level, OR which level it's
+        # playing. Overlay 6 normalised scalar features into the top-left
+        # cells so the agent knows how careful to be (low lives), how
+        # urgent the level is (low time), where in the level it is
+        # (current_x), and which world/level it's in (crucial in campaign
+        # / random mode — each level has different obstacles, enemies,
+        # physics). max_x is intentionally NOT included: it's env-internal
+        # bookkeeping (used by the reward function), the agent doesn't
+        # need it to pick optimal actions, and current_x is strictly more
+        # informative game-state.
+        # This doesn't change the obs shape or the policy architecture.
+        w, l = self.gw.world
+        arr[0, 0] = min(max(self.gw.lives_left, 0), 9) / 9.0        # lives:  0 .. ~1
+        arr[0, 1] = min(self.gw.coins, 99) / 99.0                    # coins:  0 .. ~1
+        arr[0, 2] = min(max(self.gw.time_left, 0), 400) / 400.0      # timer:  0 .. 1
+        arr[0, 3] = min(self.gw.level_progress, 4096) / 4096.0       # current x in level
+        arr[0, 4] = min(max(int(w) - 1, 0), 3) / 3.0                 # world:  0, 1/3, 2/3, 1
+        arr[0, 5] = min(max(int(l) - 1, 0), 2) / 2.0                 # level:  0, 1/2, 1
         return arr[..., np.newaxis]
 
     def reset(self, *, seed=None, options=None):

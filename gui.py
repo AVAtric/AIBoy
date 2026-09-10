@@ -44,8 +44,8 @@ class GameBoyAIGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title("Game Boy AI — Train & Play")
-        root.geometry("960x680")
-        root.minsize(880, 620)
+        root.geometry("1040x880")
+        root.minsize(920, 720)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.project_dir = Path(__file__).resolve().parent
@@ -125,11 +125,11 @@ class GameBoyAIGUI:
         parent.columnconfigure(0, weight=1)
 
         self.tsteps_var = tk.IntVar(value=500_000)
-        self.n_envs_var = tk.IntVar(value=8)
+        self.n_envs_var = tk.IntVar(value=10)
         self.ent_coef_var = tk.DoubleVar(value=0.01)
         self.lr_var = tk.DoubleVar(value=2.5e-4)
         self.nsteps_var = tk.IntVar(value=256)
-        self.batch_var = tk.IntVar(value=64)
+        self.batch_var = tk.IntVar(value=128)
         self.device_var = tk.StringVar(value="auto")
         self.resume_var = tk.BooleanVar(value=False)
         self.action_repeat_var = tk.IntVar(value=4)
@@ -580,6 +580,11 @@ class GameBoyAIGUI:
         if self.train_proc is not None and self.train_proc.poll() is None:
             messagebox.showwarning("Training", "Training is already running.")
             return
+        # Stop any running play session — it would compete with training
+        # for CPU and both threads pushing to frame_queue would clash on
+        # the shared canvas.
+        if self.play_thread is not None and self.play_thread.is_alive():
+            self.play_stop.set()
         game = self.game_var.get()
         run_name = self.run_name_var.get().strip() or "default"
         cmd = [
@@ -707,7 +712,16 @@ class GameBoyAIGUI:
                         model_mtime = mt
                         obs = vec.reset()
                         done = [False]
+                        # Per-episode tracking so the Play tab's live-episode
+                        # panel gets the same info as a real play session
+                        ep_num = 1
+                        ep_reward = 0.0
+                        ep_steps = 0
                         self.stats_queue.put(("log", f"[preview] loaded {model_path.name}\n"))
+                        self.stats_queue.put(("play_status",
+                                              f"preview — {model_path.name}"))
+                        self.stats_queue.put(("play_stat", "episode",
+                                              f"{ep_num} (preview)"))
                     except Exception as e:
                         self.stats_queue.put(("log", f"[preview] load err: {e}\n"))
                         time.sleep(3)
@@ -716,20 +730,44 @@ class GameBoyAIGUI:
                 # Play one step, mildly paced so we don't spin CPU
                 action, _ = model.predict(obs, deterministic=False)
                 obs, r, done, info = vec.step(action)
-                # Push game state to the Train tab stats
+                ep_reward += float(r[0])
+                ep_steps += 1
+                # Push game state to BOTH the Train tab stats and the Play
+                # tab's live-episode panel (the canvas shows the preview).
                 if info and isinstance(info[0], dict):
                     i0 = info[0]
                     if "world" in i0:
-                        w = i0["world"]
-                        self.stats_queue.put(("stat", "world", f"{w[0]}-{w[1]}"))
+                        w_str = f"{i0['world'][0]}-{i0['world'][1]}"
+                        self.stats_queue.put(("stat", "world", w_str))
+                        self.stats_queue.put(("play_stat", "world", w_str))
                     if "lives" in i0:
-                        self.stats_queue.put(("stat", "lives", str(i0["lives"])))
+                        v = str(i0["lives"])
+                        self.stats_queue.put(("stat", "lives", v))
+                        self.stats_queue.put(("play_stat", "lives", v))
                     if "coins" in i0:
-                        self.stats_queue.put(("stat", "coins", str(i0["coins"])))
+                        v = str(i0["coins"])
+                        self.stats_queue.put(("stat", "coins", v))
+                        self.stats_queue.put(("play_stat", "coins", v))
                     if "max_x" in i0:
                         self.stats_queue.put(("stat", "max_x", str(i0["max_x"])))
+                    if "x" in i0:
+                        self.stats_queue.put((
+                            "play_stat", "x",
+                            f"{i0['x']} (max {i0.get('max_x', '?')})"
+                        ))
+                act_id = int(np.asarray(action).flat[0])
+                if game == "mario" and act_id < len(MARIO_ACTION_NAMES):
+                    self.stats_queue.put(("play_stat", "action",
+                                          MARIO_ACTION_NAMES[act_id]))
+                self.stats_queue.put(("play_stat", "reward", f"{ep_reward:.1f}"))
+                self.stats_queue.put(("play_stat", "steps", str(ep_steps)))
                 if done[0]:
                     obs = vec.reset()
+                    ep_num += 1
+                    ep_reward = 0.0
+                    ep_steps = 0
+                    self.stats_queue.put(("play_stat", "episode",
+                                          f"{ep_num} (preview)"))
                 time.sleep(0.02)  # cap preview at ~50 env-steps/sec
 
             if vec is not None:
@@ -738,6 +776,7 @@ class GameBoyAIGUI:
                 except Exception:
                     pass
             self.stats_queue.put(("log", "[preview] stopped\n"))
+            self.stats_queue.put(("play_status", "idle"))
 
         self.preview_thread = threading.Thread(target=_preview_loop, daemon=True)
         self.preview_thread.start()
@@ -747,6 +786,14 @@ class GameBoyAIGUI:
     def start_playing(self) -> None:
         if self.play_thread is not None and self.play_thread.is_alive():
             messagebox.showwarning("Play", "Playback already running.")
+            return
+        # Defensive: the Start button is disabled while training runs, but
+        # a rogue keypress or scripted event shouldn't be able to bypass it.
+        if self.train_proc is not None and self.train_proc.poll() is None:
+            messagebox.showwarning(
+                "Play",
+                "Training is currently running. Stop training first, or wait for it to finish."
+            )
             return
         game = self.game_var.get()
         label = self.model_var.get()
@@ -961,12 +1008,20 @@ class GameBoyAIGUI:
                         self.play_stat_vars[key].set(val)
                 elif kind == "play_done":
                     self.play_status_var.set("done")
-                    self.btn_play_start.config(state="normal")
+                    # Don't re-enable Play Start if training is still running —
+                    # the whole play tab should stay disabled in that case.
+                    training_active = (self.train_proc is not None
+                                       and self.train_proc.poll() is None)
+                    if not training_active:
+                        self.btn_play_start.config(state="normal")
                     self.btn_play_stop.config(state="disabled")
                 elif kind == "play_error":
                     messagebox.showerror("Play error", item[1])
                     self.play_status_var.set("error")
-                    self.btn_play_start.config(state="normal")
+                    training_active = (self.train_proc is not None
+                                       and self.train_proc.poll() is None)
+                    if not training_active:
+                        self.btn_play_start.config(state="normal")
                     self.btn_play_stop.config(state="disabled")
         except queue.Empty:
             pass
