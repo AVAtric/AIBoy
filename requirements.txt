@@ -1,0 +1,7 @@
+pyboy>=1.6,<2.0
+stable-baselines3>=2.2.1
+gymnasium>=0.29
+numpy>=1.24
+torch>=2.0
+tensorboard>=2.14
+pysdl2-dll>=2.28
