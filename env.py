@@ -45,27 +45,32 @@ class ActionRepeat(gym.Wrapper):
 
 
 class MarioEnv(gym.Env):
-    """Super Mario Land env: hold-button actions + progress-based reward shaping.
+    """Super Mario Land env: hold-button actions + shaped reward.
 
-    Problem with PyBoy's openai_gym(action_type='press'): the button is released
-    every frame, so RIGHT taps don't actually walk Mario forward. This env holds
-    each action's buttons for `frame_skip` frames, mirroring how a human plays.
+    Fix vs. pyboy's openai_gym: buttons are held for the whole `frame_skip`
+    window (not released every frame). Without this, tapping RIGHT barely moves
+    Mario and the agent has no gradient toward forward progress.
 
-    Reward shaping:
-      + progress_weight * dx   (dx = change in level_progress this step)
-      + score_weight * dscore  (small bonus for coins / enemies)
-      - time_penalty           (per-step cost -> encourages fast play)
-      - death_penalty          (on losing a life, episode terminates)
-      + completion_bonus       (on world change, episode terminates)
+    Discrete(7) action space, all combos are Mario-useful:
+        0 NOOP  1 RIGHT  2 LEFT  3 JUMP
+        4 RIGHT+JUMP  5 RIGHT+RUN  6 RIGHT+RUN+JUMP
 
+    Per-step reward:
+        + progress_weight * dx            (dx = level_progress delta)
+        + explore_bonus  * new_max_x_dx   (extra bonus for exceeding max x)
+        + score_weight   * dscore         (coins / enemies)
+        - time_penalty                    (small per-step cost)
+
+    Terminal events (episode ends):
+        - Life lost           → -death_penalty
+        - World changed       → +completion_bonus (level cleared)
     Truncation:
-      - stuck_steps consecutive steps without a new max_x
-      - game_wrapper.game_over() returns True
+        - No new max_x for stuck_steps consecutive steps, OR
+        - game_wrapper.game_over() == True
     """
 
     metadata = {"render_modes": []}
 
-    # Actions: buttons to hold during this step (7 discrete actions)
     ACTIONS = (
         (),                                                              # 0 NOOP
         (WindowEvent.PRESS_ARROW_RIGHT,),                                # 1 RIGHT
@@ -91,12 +96,13 @@ class MarioEnv(gym.Env):
         self,
         pyboy: PyBoy,
         frame_skip: int = 4,
-        stuck_steps: int = 250,
+        stuck_steps: int = 200,
         progress_weight: float = 1.0,
+        explore_bonus: float = 2.0,
         score_weight: float = 0.02,
-        time_penalty: float = 0.1,
-        death_penalty: float = 25.0,
-        completion_bonus: float = 500.0,
+        time_penalty: float = 0.05,
+        death_penalty: float = 200.0,
+        completion_bonus: float = 1000.0,
     ):
         super().__init__()
         self.pyboy = pyboy
@@ -104,6 +110,7 @@ class MarioEnv(gym.Env):
         self.frame_skip = frame_skip
         self.stuck_steps = stuck_steps
         self.progress_weight = progress_weight
+        self.explore_bonus = explore_bonus
         self.score_weight = score_weight
         self.time_penalty = time_penalty
         self.death_penalty = death_penalty
@@ -162,7 +169,10 @@ class MarioEnv(gym.Env):
             reward -= self.death_penalty
             terminated = True
         else:
-            reward += self.progress_weight * (x - self._last_x)
+            dx = x - self._last_x
+            reward += self.progress_weight * dx
+            if x > self._max_x:
+                reward += self.explore_bonus * (x - self._max_x)
             reward += self.score_weight * max(0, score - self._last_score)
             reward -= self.time_penalty
 
@@ -199,10 +209,9 @@ def make_pyboy_env(
     rom_dir: str | Path = "ROMs",
     emulation_speed: int | None = None,
 ) -> gym.Env:
-    """Build a PyBoy gym environment for the given game.
-
-    For 'mario': uses MarioEnv (hold-button actions + progress reward).
-    For other games: uses PyBoy's default openai_gym + ActionRepeat wrapper.
+    """Build a PyBoy gym env.
+    - 'mario' → MarioEnv (hold-button actions + shaped reward)
+    - other games → PyBoy's default openai_gym + ActionRepeat
     """
     if game not in GAMES:
         raise ValueError(f"Unknown game '{game}'. Available: {sorted(GAMES)}")
