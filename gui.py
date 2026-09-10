@@ -44,7 +44,8 @@ class GameBoyAIGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title("Game Boy AI — Train & Play")
-        root.geometry("1080x760")
+        root.geometry("960x680")
+        root.minsize(880, 620)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.project_dir = Path(__file__).resolve().parent
@@ -76,10 +77,19 @@ class GameBoyAIGUI:
         self._refresh_models()
 
     def _refresh_run_names(self) -> None:
-        """Populate the run-name combobox with existing runs for the current game."""
+        """Populate the run-name combobox with existing runs for the current game.
+        Ignores names starting with '_' (reserved for internal caches like
+        `_level_states/` which holds per-level save-state files).
+        """
         game = self.game_var.get()
         game_dir = self.project_dir / "models" / game
-        runs = sorted(d.name for d in game_dir.glob("*") if d.is_dir()) if game_dir.exists() else []
+        if game_dir.exists():
+            runs = sorted(
+                d.name for d in game_dir.glob("*")
+                if d.is_dir() and not d.name.startswith("_")
+            )
+        else:
+            runs = []
         self.run_name_combo["values"] = runs
 
     # ---------- UI ----------
@@ -111,7 +121,8 @@ class GameBoyAIGUI:
         self._build_play(play_tab)
 
     def _build_train(self, parent: ttk.Frame) -> None:
-        parent.columnconfigure(1, weight=1)
+        # 2-column params layout so the tab fits on a laptop screen.
+        parent.columnconfigure(0, weight=1)
 
         self.tsteps_var = tk.IntVar(value=500_000)
         self.n_envs_var = tk.IntVar(value=8)
@@ -121,7 +132,6 @@ class GameBoyAIGUI:
         self.batch_var = tk.IntVar(value=64)
         self.device_var = tk.StringVar(value="auto")
         self.resume_var = tk.BooleanVar(value=False)
-        # Advanced (previously CLI-only)
         self.action_repeat_var = tk.IntVar(value=4)
         self.frame_stack_var = tk.IntVar(value=4)
         self.n_epochs_var = tk.IntVar(value=4)
@@ -129,124 +139,153 @@ class GameBoyAIGUI:
         self.ckpt_freq_var = tk.IntVar(value=25_000)
         self.eval_freq_var = tk.IntVar(value=10_000)
         self.n_eval_var = tk.IntVar(value=3)
+        self.obs_type_var = tk.StringVar(value="tiles")
+        self.start_level_var = tk.StringVar(value="default")
+        self.preview_var = tk.BooleanVar(value=False)
 
         # ---- Presets bar ----
         preset_frame = ttk.LabelFrame(parent, text="Preset", padding=6)
-        preset_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        preset_frame.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         preset_frame.columnconfigure(0, weight=1)
         self.preset_var = tk.StringVar(value="")
         self.preset_combo = ttk.Combobox(preset_frame, textvariable=self.preset_var,
                                           state="readonly")
         self.preset_combo.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         self.preset_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_preset())
-        ttk.Button(preset_frame, text="Save as…",
-                   command=self._save_preset).grid(row=0, column=1, padx=2)
-        ttk.Button(preset_frame, text="Delete",
-                   command=self._delete_preset).grid(row=0, column=2, padx=2)
-        ttk.Button(preset_frame, text="Reload list",
-                   command=self._refresh_presets).grid(row=0, column=3, padx=2)
+        self.btn_preset_save = ttk.Button(preset_frame, text="Save as…",
+                                           command=self._save_preset)
+        self.btn_preset_save.grid(row=0, column=1, padx=2)
+        self.btn_preset_delete = ttk.Button(preset_frame, text="Delete",
+                                             command=self._delete_preset)
+        self.btn_preset_delete.grid(row=0, column=2, padx=2)
+        self.btn_preset_reload = ttk.Button(preset_frame, text="Reload",
+                                             command=self._refresh_presets)
+        self.btn_preset_reload.grid(row=0, column=3, padx=2)
 
-        row = 1
-        def add(label, widget):
-            nonlocal row
-            ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=3)
-            widget.grid(row=row, column=1, sticky="ew", pady=3, padx=6)
-            row += 1
+        # ---- Basic + Advanced params, side by side ----
+        params_frame = ttk.Frame(parent)
+        params_frame.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        params_frame.columnconfigure(0, weight=1)
+        params_frame.columnconfigure(1, weight=1)
 
-        add("Total timesteps:", ttk.Spinbox(parent, from_=1000, to=20_000_000,
-                                             increment=10_000, textvariable=self.tsteps_var, width=18))
-        add("Parallel envs:", ttk.Spinbox(parent, from_=1, to=16,
-                                           textvariable=self.n_envs_var, width=18))
-        add("Learning rate:", ttk.Entry(parent, textvariable=self.lr_var, width=20))
-        add("PPO n_steps:", ttk.Spinbox(parent, from_=32, to=8192, increment=32,
-                                          textvariable=self.nsteps_var, width=18))
-        add("PPO batch size:", ttk.Spinbox(parent, from_=8, to=4096, increment=8,
-                                            textvariable=self.batch_var, width=18))
-        add("Entropy coef:", ttk.Spinbox(parent, from_=0.0, to=0.5,
-                                          increment=0.01, textvariable=self.ent_coef_var, width=18))
-        self.obs_type_var = tk.StringVar(value="tiles")
-        add("Obs type:", ttk.Combobox(parent, textvariable=self.obs_type_var,
-                                       values=["tiles", "pixels"], state="readonly", width=17))
-        self.start_level_var = tk.StringVar(value="default")
-        add("Start level:", ttk.Combobox(parent, textvariable=self.start_level_var,
-                                          values=LEVEL_CHOICES, state="readonly", width=17))
-        add("Device:", ttk.Combobox(parent, textvariable=self.device_var,
-                                     values=["auto", "cpu", "mps", "cuda"], state="readonly", width=17))
+        basic = ttk.LabelFrame(params_frame, text="Basic", padding=8)
+        basic.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        basic.columnconfigure(1, weight=1)
+        advanced = ttk.LabelFrame(params_frame, text="Advanced", padding=8)
+        advanced.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        advanced.columnconfigure(1, weight=1)
 
-        # -------- Advanced params (each has a sane default; only tweak if you know why) --------
-        ttk.Separator(parent, orient="horizontal").grid(row=row, column=0, columnspan=2,
-                                                        sticky="ew", pady=(8, 2))
-        row += 1
-        ttk.Label(parent, text="Advanced", font=("", 10, "bold")).grid(
-            row=row, column=0, columnspan=2, sticky="w", pady=(0, 3))
-        row += 1
-        add("Action repeat:", ttk.Spinbox(parent, from_=1, to=16,
-                                            textvariable=self.action_repeat_var, width=18))
-        add("Frame stack:", ttk.Spinbox(parent, from_=1, to=16,
-                                          textvariable=self.frame_stack_var, width=18))
-        add("PPO n_epochs:", ttk.Spinbox(parent, from_=1, to=30,
-                                           textvariable=self.n_epochs_var, width=18))
-        add("Seed:", ttk.Spinbox(parent, from_=0, to=2_147_483_647,
-                                   textvariable=self.seed_var, width=18))
-        add("Checkpoint every N steps:", ttk.Spinbox(parent, from_=100, to=10_000_000, increment=1000,
-                                                       textvariable=self.ckpt_freq_var, width=18))
-        add("Eval every N steps:", ttk.Spinbox(parent, from_=100, to=10_000_000, increment=1000,
-                                                 textvariable=self.eval_freq_var, width=18))
-        add("Eval episodes per check:", ttk.Spinbox(parent, from_=1, to=100,
-                                                      textvariable=self.n_eval_var, width=18))
-        ttk.Separator(parent, orient="horizontal").grid(row=row, column=0, columnspan=2,
-                                                         sticky="ew", pady=(4, 8))
-        row += 1
+        # Widgets that must be disabled while training is running
+        self._train_config_widgets: list[tk.Widget] = []
 
-        self.resume_check = ttk.Checkbutton(parent, text="Resume from newest checkpoint (uses selected run name)",
-                                             variable=self.resume_var)
-        self.resume_check.grid(row=row, column=0, columnspan=2, sticky="w", pady=6)
-        row += 1
+        def _add(parent_frame, row_ref, label, widget):
+            ttk.Label(parent_frame, text=label).grid(row=row_ref[0], column=0,
+                                                     sticky="w", pady=1)
+            widget.grid(row=row_ref[0], column=1, sticky="ew", pady=1, padx=(6, 0))
+            row_ref[0] += 1
+            self._train_config_widgets.append(widget)
 
-        self.preview_var = tk.BooleanVar(value=False)
-        self.preview_check = ttk.Checkbutton(
-            parent,
-            text="Show live preview on Play tab (uses newest best_model — slightly slower)",
-            variable=self.preview_var,
-        )
-        self.preview_check.grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 6))
-        row += 1
+        r = [0]
+        _add(basic, r, "Total timesteps:", ttk.Spinbox(basic, from_=1000, to=100_000_000,
+              increment=10_000, textvariable=self.tsteps_var, width=14))
+        _add(basic, r, "Parallel envs:", ttk.Spinbox(basic, from_=1, to=16,
+              textvariable=self.n_envs_var, width=14))
+        _add(basic, r, "Learning rate:", ttk.Entry(basic, textvariable=self.lr_var, width=16))
+        _add(basic, r, "Entropy coef:", ttk.Spinbox(basic, from_=0.0, to=0.5,
+              increment=0.01, textvariable=self.ent_coef_var, width=14))
+        _add(basic, r, "PPO n_steps:", ttk.Spinbox(basic, from_=32, to=8192, increment=32,
+              textvariable=self.nsteps_var, width=14))
+        _add(basic, r, "PPO batch size:", ttk.Spinbox(basic, from_=8, to=4096, increment=8,
+              textvariable=self.batch_var, width=14))
+        _add(basic, r, "Obs type:", ttk.Combobox(basic, textvariable=self.obs_type_var,
+              values=["tiles", "pixels"], state="readonly", width=13))
+        _add(basic, r, "Start level:", ttk.Combobox(basic, textvariable=self.start_level_var,
+              values=LEVEL_CHOICES, state="readonly", width=13))
+        _add(basic, r, "Device:", ttk.Combobox(basic, textvariable=self.device_var,
+              values=["auto", "cpu", "mps", "cuda"], state="readonly", width=13))
 
-        btns = ttk.Frame(parent)
-        btns.grid(row=row, column=0, columnspan=2, sticky="ew", pady=8)
-        self.btn_train_start = ttk.Button(btns, text="Start training", command=self.start_training)
-        self.btn_train_start.pack(side="left", padx=4)
-        self.btn_train_stop = ttk.Button(btns, text="Stop", command=self.stop_training, state="disabled")
+        r = [0]
+        _add(advanced, r, "Action repeat:", ttk.Spinbox(advanced, from_=1, to=16,
+              textvariable=self.action_repeat_var, width=14))
+        _add(advanced, r, "Frame stack:", ttk.Spinbox(advanced, from_=1, to=16,
+              textvariable=self.frame_stack_var, width=14))
+        _add(advanced, r, "PPO n_epochs:", ttk.Spinbox(advanced, from_=1, to=30,
+              textvariable=self.n_epochs_var, width=14))
+        _add(advanced, r, "Seed:", ttk.Spinbox(advanced, from_=0, to=2_147_483_647,
+              textvariable=self.seed_var, width=14))
+        _add(advanced, r, "Checkpoint / N steps:", ttk.Spinbox(advanced, from_=100, to=10_000_000,
+              increment=1000, textvariable=self.ckpt_freq_var, width=14))
+        _add(advanced, r, "Eval / N steps:", ttk.Spinbox(advanced, from_=100, to=10_000_000,
+              increment=1000, textvariable=self.eval_freq_var, width=14))
+        _add(advanced, r, "Eval episodes:", ttk.Spinbox(advanced, from_=1, to=100,
+              textvariable=self.n_eval_var, width=14))
+
+        # ---- Checkboxes + buttons + progress bar ----
+        controls = ttk.Frame(parent)
+        controls.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        controls.columnconfigure(0, weight=1)
+
+        self.resume_check = ttk.Checkbutton(controls,
+            text="Resume from newest checkpoint (uses selected run name)",
+            variable=self.resume_var)
+        self.resume_check.grid(row=0, column=0, sticky="w")
+        self.preview_check = ttk.Checkbutton(controls,
+            text="Show live preview on Play tab (slower training)",
+            variable=self.preview_var)
+        self.preview_check.grid(row=1, column=0, sticky="w")
+
+        btns = ttk.Frame(controls)
+        btns.grid(row=2, column=0, sticky="ew", pady=(4, 0))
+        self.btn_train_start = ttk.Button(btns, text="Start training",
+                                           command=self.start_training)
+        self.btn_train_start.pack(side="left", padx=(0, 4))
+        self.btn_train_stop = ttk.Button(btns, text="Stop",
+                                          command=self.stop_training, state="disabled")
         self.btn_train_stop.pack(side="left", padx=4)
-        row += 1
 
-        # Progress bar
-        pb_frame = ttk.Frame(parent)
-        pb_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(4, 6))
+        pb_frame = ttk.Frame(controls)
+        pb_frame.grid(row=3, column=0, sticky="ew", pady=(4, 0))
         pb_frame.columnconfigure(0, weight=1)
         self.train_progress = ttk.Progressbar(pb_frame, mode="determinate", maximum=100)
         self.train_progress.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         self.train_progress_label = ttk.Label(pb_frame, text="—", width=22)
         self.train_progress_label.grid(row=0, column=1, sticky="e")
-        row += 1
 
-        stats = ttk.LabelFrame(parent, text="Live stats", padding=8)
-        stats.grid(row=row, column=0, columnspan=2, sticky="ew", pady=8)
-        row += 1
+        row = 3
+
+        # ---- Live stats + training log, side by side ----
+        monitor = ttk.Frame(parent)
+        monitor.grid(row=3, column=0, sticky="nsew", pady=(0, 4))
+        monitor.columnconfigure(0, weight=0)
+        monitor.columnconfigure(1, weight=1)
+        parent.rowconfigure(3, weight=1)
+
+        stats = ttk.LabelFrame(monitor, text="Live stats", padding=8)
+        stats.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
         self.stat_labels: dict[str, ttk.Label] = {}
         stats.columnconfigure(1, weight=1)
-        rows_config = [("status", "idle"), ("total_timesteps", "—"), ("ep_rew_mean", "—"),
-                       ("ep_len_mean", "—"), ("fps", "—"), ("time_elapsed", "—")]
+        rows_config = [
+            ("status", "idle"),
+            ("total_timesteps", "—"),
+            ("ep_rew_mean", "—"),
+            ("ep_len_mean", "—"),
+            ("fps", "—"),
+            ("time_elapsed", "—"),
+            # Game state — populated from the preview thread when preview is on
+            ("world", "—"),
+            ("lives", "—"),
+            ("coins", "—"),
+            ("max_x", "—"),
+        ]
         for i, (k, v) in enumerate(rows_config):
             ttk.Label(stats, text=f"{k}:").grid(row=i, column=0, sticky="w", padx=(0, 12))
             lbl = ttk.Label(stats, text=v, font=("Menlo", 11, "bold"))
             lbl.grid(row=i, column=1, sticky="w")
             self.stat_labels[k] = lbl
 
-        log_frame = ttk.LabelFrame(parent, text="Training log", padding=4)
-        log_frame.grid(row=row, column=0, columnspan=2, sticky="nsew", pady=6)
-        parent.rowconfigure(row, weight=1)
-        self.log_text = tk.Text(log_frame, height=10, wrap="none", font=("Menlo", 10),
+        log_frame = ttk.LabelFrame(monitor, text="Training log", padding=4)
+        log_frame.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        self.log_text = tk.Text(log_frame, height=8, wrap="none", font=("Menlo", 10),
                                 background="#111", foreground="#ddd", insertbackground="#ddd")
         self.log_text.pack(side="left", fill="both", expand=True)
         yscroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
@@ -267,8 +306,12 @@ class GameBoyAIGUI:
         self.model_combo = ttk.Combobox(model_frame, textvariable=self.model_var,
                                          state="readonly", width=32)
         self.model_combo.pack(fill="x", pady=(0, 4))
-        ttk.Button(model_frame, text="Refresh model list",
-                   command=self._refresh_models).pack(fill="x")
+        self.btn_model_refresh = ttk.Button(model_frame, text="Refresh model list",
+                                             command=self._refresh_models)
+        self.btn_model_refresh.pack(fill="x")
+
+        # Play-tab widgets that must be disabled while training is running
+        self._play_widgets: list[tk.Widget] = [self.model_combo, self.btn_model_refresh]
 
         # Options
         opts_frame = ttk.LabelFrame(left, text="Options", padding=8)
@@ -288,6 +331,7 @@ class GameBoyAIGUI:
             ttk.Label(opts_frame, text=label).grid(row=row, column=0, sticky="w", pady=2)
             widget.grid(row=row, column=1, sticky="ew", pady=2, padx=6)
             row += 1
+            self._play_widgets.append(widget)
 
         add("Episodes:", ttk.Spinbox(opts_frame, from_=1, to=100,
                                        textvariable=self.play_episodes_var, width=10))
@@ -307,9 +351,10 @@ class GameBoyAIGUI:
         add("Speed:", ttk.Combobox(opts_frame, textvariable=self.play_speed_label_var,
                                     values=[c[0] for c in SPEED_CHOICES],
                                     state="readonly", width=15))
-        ttk.Checkbutton(opts_frame, text="Stochastic (sample actions)",
-                        variable=self.play_stochastic_var).grid(row=row, column=0,
-                                                                columnspan=2, sticky="w", pady=4)
+        stoch_check = ttk.Checkbutton(opts_frame, text="Stochastic (sample actions)",
+                                       variable=self.play_stochastic_var)
+        stoch_check.grid(row=row, column=0, columnspan=2, sticky="w", pady=4)
+        self._play_widgets.append(stoch_check)
 
         # Buttons
         btns = ttk.Frame(left)
@@ -318,6 +363,9 @@ class GameBoyAIGUI:
         self.btn_play_start.pack(fill="x", pady=2)
         self.btn_play_stop = ttk.Button(btns, text="Stop", command=self.stop_playing, state="disabled")
         self.btn_play_stop.pack(fill="x", pady=2)
+        # Start button gets disabled while training runs (Stop stays as-is
+        # since it only enables if a play episode is actually in progress).
+        self._play_widgets.append(self.btn_play_start)
 
         # Live stats
         pstats = ttk.LabelFrame(left, text="Live episode", padding=8)
@@ -327,11 +375,15 @@ class GameBoyAIGUI:
         self.play_stat_vars = {
             "episode": tk.StringVar(value="—"),
             "reward": tk.StringVar(value="—"),
+            "world": tk.StringVar(value="—"),
             "x": tk.StringVar(value="—"),
             "steps": tk.StringVar(value="—"),
+            "lives": tk.StringVar(value="—"),
+            "coins": tk.StringVar(value="—"),
             "action": tk.StringVar(value="—"),
         }
-        for i, key in enumerate(["episode", "reward", "x", "steps", "action"]):
+        for i, key in enumerate(["episode", "reward", "world", "x", "steps",
+                                  "lives", "coins", "action"]):
             ttk.Label(pstats, text=f"{key}:").grid(row=i, column=0, sticky="w", padx=(0, 8))
             ttk.Label(pstats, textvariable=self.play_stat_vars[key],
                       font=("Menlo", 11, "bold")).grid(row=i, column=1, sticky="w")
@@ -358,10 +410,16 @@ class GameBoyAIGUI:
         """Return (label, path) tuples for models under models/<game>/<run>/."""
         entries: list[tuple[str, Path]] = []
 
+        # Skip internal caches like `_level_states/` (per-level save-states)
+        def _is_run(name: str) -> bool:
+            return not name.startswith("_")
+
         # models/<game>/<run>/logs/best_model.zip
         for p in sorted(self.project_dir.glob("models/*/*/logs/best_model.zip")):
             run = p.parent.parent.name
             game = p.parent.parent.parent.name
+            if not _is_run(run):
+                continue
             if game_filter is None or game == game_filter:
                 entries.append((f"{game}/{run} — best", p))
 
@@ -369,6 +427,8 @@ class GameBoyAIGUI:
         for p in sorted(self.project_dir.glob("models/*/*/checkpoints/final.zip")):
             run = p.parent.parent.name
             game = p.parent.parent.parent.name
+            if not _is_run(run):
+                continue
             if game_filter is None or game == game_filter:
                 entries.append((f"{game}/{run} — final", p))
 
@@ -376,6 +436,8 @@ class GameBoyAIGUI:
         for run_dir in sorted(self.project_dir.glob("models/*/*/")):
             game = run_dir.parent.name
             run = run_dir.name
+            if not _is_run(run):
+                continue
             if game_filter is not None and game != game_filter:
                 continue
             snaps = sorted((run_dir / "checkpoints").glob("ppo_*_steps.zip"),
@@ -390,7 +452,7 @@ class GameBoyAIGUI:
 
     def _refresh_presets(self) -> None:
         self._all_presets = presets.load_all()
-        recommended = "Mario — Balanced tiles (recommended, ~15 min)"
+        recommended = "Mario — Campaign, recommended (~15 min)"
         def sort_key(name):
             return (name != recommended, not presets.is_builtin(name), name.lower())
         names = sorted(self._all_presets.keys(), key=sort_key)
@@ -551,8 +613,7 @@ class GameBoyAIGUI:
         )
         self.btn_train_start.config(state="disabled")
         self.btn_train_stop.config(state="normal")
-        self.preview_check.config(state="disabled")
-        self.resume_check.config(state="disabled")
+        self._set_training_widgets_disabled(True)
         self.stat_labels["status"].config(text="running")
         self._train_target_steps = max(1, int(self.tsteps_var.get()))
         # Baseline = model's prior step count. First observed total_timesteps
@@ -593,9 +654,11 @@ class GameBoyAIGUI:
         action_repeat = int(self.action_repeat_var.get())
         frame_stack = int(self.frame_stack_var.get())
         obs_type = self.obs_type_var.get()
+        # Preview mirrors the training's start_level so what you see matches
+        # what the model is training on: "random" → new random level per
+        # preview episode; specific level → that level; default → 1-1.
         raw_level = self.start_level_var.get()
-        # Preview: if training was random, watch a specific level (1-1) for consistency
-        preview_level = None if raw_level in ("default", "random") else raw_level
+        preview_level = None if raw_level == "default" else raw_level
 
         def _preview_loop():
             from stable_baselines3.common.vec_env import DummyVecEnv as DVE
@@ -653,6 +716,18 @@ class GameBoyAIGUI:
                 # Play one step, mildly paced so we don't spin CPU
                 action, _ = model.predict(obs, deterministic=False)
                 obs, r, done, info = vec.step(action)
+                # Push game state to the Train tab stats
+                if info and isinstance(info[0], dict):
+                    i0 = info[0]
+                    if "world" in i0:
+                        w = i0["world"]
+                        self.stats_queue.put(("stat", "world", f"{w[0]}-{w[1]}"))
+                    if "lives" in i0:
+                        self.stats_queue.put(("stat", "lives", str(i0["lives"])))
+                    if "coins" in i0:
+                        self.stats_queue.put(("stat", "coins", str(i0["coins"])))
+                    if "max_x" in i0:
+                        self.stats_queue.put(("stat", "max_x", str(i0["max_x"])))
                 if done[0]:
                     obs = vec.reset()
                 time.sleep(0.02)  # cap preview at ~50 env-steps/sec
@@ -799,9 +874,18 @@ class GameBoyAIGUI:
                                           else str(act_id)))
                     self.stats_queue.put(("play_stat", "reward", f"{total:.1f}"))
                     self.stats_queue.put(("play_stat", "steps", str(steps)))
-                    if info and isinstance(info[0], dict) and "x" in info[0]:
-                        self.stats_queue.put(("play_stat", "x",
-                                              f"{info[0]['x']} (max {info[0].get('max_x', '?')})"))
+                    if info and isinstance(info[0], dict):
+                        i0 = info[0]
+                        if "x" in i0:
+                            self.stats_queue.put(("play_stat", "x",
+                                                  f"{i0['x']} (max {i0.get('max_x', '?')})"))
+                        if "world" in i0:
+                            w = i0["world"]
+                            self.stats_queue.put(("play_stat", "world", f"{w[0]}-{w[1]}"))
+                        if "lives" in i0:
+                            self.stats_queue.put(("play_stat", "lives", str(i0["lives"])))
+                        if "coins" in i0:
+                            self.stats_queue.put(("play_stat", "coins", str(i0["coins"])))
                     if max_steps and steps >= max_steps:
                         break
                     # Pace to target speed
@@ -858,8 +942,7 @@ class GameBoyAIGUI:
                     self.stat_labels["status"].config(text=f"finished (rc={rc})")
                     self.btn_train_start.config(state="normal")
                     self.btn_train_stop.config(state="disabled")
-                    self.preview_check.config(state="normal")
-                    self.resume_check.config(state="normal")
+                    self._set_training_widgets_disabled(False)
                     self.train_proc = None
                     self.preview_stop.set()
                     # Reset progress bar unless training reached the target cleanly
@@ -904,6 +987,42 @@ class GameBoyAIGUI:
             self.root.after(33, self._pump)
         except tk.TclError:
             pass
+
+    def _set_training_widgets_disabled(self, disabled: bool) -> None:
+        """Enable/disable every training-tab config widget and the Play tab's
+        input widgets while training is running. Prevents the user from
+        mid-run edits and from starting a play session that would compete
+        for CPU with the training subprocess.
+        """
+        # Comboboxes with state='readonly' need 'readonly' (not 'normal') to
+        # re-enable properly; other widgets use 'normal'.
+        def _state_for(w, on: bool):
+            if not on:
+                return "disabled"
+            if isinstance(w, ttk.Combobox):
+                return "readonly"
+            return "normal"
+
+        enabled = not disabled
+        # Training tab config widgets
+        for w in self._train_config_widgets:
+            try:
+                w.config(state=_state_for(w, enabled))
+            except tk.TclError:
+                pass
+        # Preset bar + resume/preview checkboxes on the training tab
+        for w in (self.preset_combo, self.btn_preset_save, self.btn_preset_delete,
+                  self.btn_preset_reload, self.resume_check, self.preview_check):
+            try:
+                w.config(state=_state_for(w, enabled))
+            except tk.TclError:
+                pass
+        # Play tab input widgets (avoid competing for CPU with training)
+        for w in self._play_widgets:
+            try:
+                w.config(state=_state_for(w, enabled))
+            except tk.TclError:
+                pass
 
     def _append_log(self, text: str) -> None:
         self.log_text.insert("end", text)

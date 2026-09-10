@@ -19,20 +19,24 @@ PRESET_FIELDS = (
     "seed", "checkpoint_freq", "eval_freq", "n_eval_episodes",
 )
 
+# All timings estimated on Apple Silicon (M1 Max) at ~1500-2000 fps with
+# tile obs (default n_envs=8). Pixel-obs runs are much slower (~40-70 fps).
+#
+# Modes (controlled by `start_level`):
+#   - "default"      → CAMPAIGN. Mario plays through 1-1, respects lives,
+#                       advances to next level on clear, restarts at 1-1
+#                       when all lives are exhausted. Episodes span
+#                       multiple levels / deaths.
+#   - "random"       → each episode picks a random level from the 10
+#                       usable ones (1-1 … 4-2, skipping 2-3 and 4-3 which
+#                       PyBoy's SML wrapper cannot boot). Death or level
+#                       clear ends the episode → next episode = new level.
+#                       Best for generalisation across worlds.
+#   - "1-1", "2-1"…  → FIXED level. Same level every episode; death or
+#                       clear terminates and next episode replays the same
+#                       state. Best for drilling one hard level.
 BUILTIN_PRESETS: dict[str, dict] = {
-    # Roughly-timed on Apple Silicon (M1 Max) at ~2000 fps with tile obs.
-    "Mario — Balanced tiles (recommended, ~15 min)": {
-        "game": "mario",
-        "obs_type": "tiles",
-        "start_level": "default",
-        "timesteps": 2_000_000,
-        "n_envs": 8,
-        "ent_coef": 0.01,
-        "learning_rate": 2.5e-4,
-        "n_steps": 512,
-        "batch_size": 64,
-        "device": "cpu",
-    },
+    # ---- Campaign (play through the game respecting lives) ----
     "Mario — Quick smoke test (30 s)": {
         "game": "mario",
         "obs_type": "tiles",
@@ -43,9 +47,35 @@ BUILTIN_PRESETS: dict[str, dict] = {
         "learning_rate": 2.5e-4,
         "n_steps": 128,
         "batch_size": 64,
+        "n_epochs": 4,
+        "action_repeat": 4,
+        "frame_stack": 4,
+        "seed": 0,
+        "checkpoint_freq": 4_000,
+        "eval_freq": 4_000,
+        "n_eval_episodes": 1,
         "device": "cpu",
     },
-    "Mario — Extended (~1 h)": {
+    "Mario — Campaign, recommended (~15 min)": {
+        "game": "mario",
+        "obs_type": "tiles",
+        "start_level": "default",
+        "timesteps": 2_000_000,
+        "n_envs": 8,
+        "ent_coef": 0.01,
+        "learning_rate": 2.5e-4,
+        "n_steps": 512,
+        "batch_size": 64,
+        "n_epochs": 4,
+        "action_repeat": 4,
+        "frame_stack": 4,
+        "seed": 0,
+        "checkpoint_freq": 100_000,
+        "eval_freq": 25_000,
+        "n_eval_episodes": 3,
+        "device": "cpu",
+    },
+    "Mario — Campaign, extended (~1 h)": {
         "game": "mario",
         "obs_type": "tiles",
         "start_level": "default",
@@ -55,9 +85,16 @@ BUILTIN_PRESETS: dict[str, dict] = {
         "learning_rate": 2.5e-4,
         "n_steps": 512,
         "batch_size": 64,
+        "n_epochs": 4,
+        "action_repeat": 4,
+        "frame_stack": 4,
+        "seed": 0,
+        "checkpoint_freq": 250_000,
+        "eval_freq": 100_000,
+        "n_eval_episodes": 3,
         "device": "cpu",
     },
-    "Mario — Overnight (~8 h)": {
+    "Mario — Campaign, overnight (~8 h)": {
         "game": "mario",
         "obs_type": "tiles",
         "start_level": "default",
@@ -67,12 +104,20 @@ BUILTIN_PRESETS: dict[str, dict] = {
         "learning_rate": 2.5e-4,
         "n_steps": 512,
         "batch_size": 64,
+        "n_epochs": 4,
+        "action_repeat": 4,
+        "frame_stack": 4,
+        "seed": 0,
+        "checkpoint_freq": 500_000,
+        "eval_freq": 250_000,
+        "n_eval_episodes": 3,
         "device": "cpu",
     },
-    "Mario — Random levels (all 12, ~1 h)": {
-        # Each parallel env picks a random level per episode. Trains a policy
-        # that generalises across worlds 1-1 through 4-3 instead of memorising
-        # one specific level's obstacle pattern.
+    # ---- Random-level training (generalises across 10 usable levels) ----
+    "Mario — Random levels (~1 h)": {
+        # Each episode's level is picked fresh from the 10 usable levels.
+        # Slightly higher entropy (0.02) helps because the state
+        # distribution is wider than campaign-mode.
         "game": "mario",
         "obs_type": "tiles",
         "start_level": "random",
@@ -82,9 +127,16 @@ BUILTIN_PRESETS: dict[str, dict] = {
         "learning_rate": 2.5e-4,
         "n_steps": 512,
         "batch_size": 64,
+        "n_epochs": 4,
+        "action_repeat": 4,
+        "frame_stack": 4,
+        "seed": 0,
+        "checkpoint_freq": 250_000,
+        "eval_freq": 100_000,
+        "n_eval_episodes": 3,
         "device": "cpu",
     },
-    "Mario — Random levels (overnight, ~8 h)": {
+    "Mario — Random levels, overnight (~8 h)": {
         "game": "mario",
         "obs_type": "tiles",
         "start_level": "random",
@@ -94,9 +146,38 @@ BUILTIN_PRESETS: dict[str, dict] = {
         "learning_rate": 2.5e-4,
         "n_steps": 512,
         "batch_size": 64,
+        "n_epochs": 4,
+        "action_repeat": 4,
+        "frame_stack": 4,
+        "seed": 0,
+        "checkpoint_freq": 500_000,
+        "eval_freq": 250_000,
+        "n_eval_episodes": 3,
         "device": "cpu",
     },
-    "Mario — Pixels (slow, CNN, ~2 h for 500k)": {
+    # ---- Single-level drilling (example: 3-2, a tricky one). Copy this
+    #      and change start_level to focus on any specific level. ----
+    "Mario — Practice level 3-2 (~30 min)": {
+        "game": "mario",
+        "obs_type": "tiles",
+        "start_level": "3-2",
+        "timesteps": 4_000_000,
+        "n_envs": 8,
+        "ent_coef": 0.02,
+        "learning_rate": 2.5e-4,
+        "n_steps": 512,
+        "batch_size": 64,
+        "n_epochs": 4,
+        "action_repeat": 4,
+        "frame_stack": 4,
+        "seed": 0,
+        "checkpoint_freq": 100_000,
+        "eval_freq": 50_000,
+        "n_eval_episodes": 3,
+        "device": "cpu",
+    },
+    # ---- Pixel-based (slower but more info; use if tile obs plateaus) ----
+    "Mario — Pixels CNN (~2 h for 500k)": {
         "game": "mario",
         "obs_type": "pixels",
         "start_level": "default",
@@ -106,9 +187,17 @@ BUILTIN_PRESETS: dict[str, dict] = {
         "learning_rate": 2.5e-4,
         "n_steps": 256,
         "batch_size": 256,
+        "n_epochs": 4,
+        "action_repeat": 4,
+        "frame_stack": 4,
+        "seed": 0,
+        "checkpoint_freq": 25_000,
+        "eval_freq": 10_000,
+        "n_eval_episodes": 3,
         "device": "cpu",
     },
-    "Kirby — Default pixels": {
+    # ---- Other games ----
+    "Kirby — Default pixels (~1 h for 500k)": {
         "game": "kirby",
         "obs_type": "pixels",
         "start_level": "default",
@@ -118,6 +207,13 @@ BUILTIN_PRESETS: dict[str, dict] = {
         "learning_rate": 2.5e-4,
         "n_steps": 256,
         "batch_size": 64,
+        "n_epochs": 4,
+        "action_repeat": 4,
+        "frame_stack": 4,
+        "seed": 0,
+        "checkpoint_freq": 25_000,
+        "eval_freq": 10_000,
+        "n_eval_episodes": 3,
         "device": "cpu",
     },
 }

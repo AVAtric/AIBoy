@@ -178,12 +178,28 @@ class MarioEnv(gym.Env):
         + progress_weight * new_max_x_delta   (ONLY reward for new territory;
                                                 re-covering ground gives 0,
                                                 so back-and-forth cannot farm)
-        + score_weight    * dscore            (coins / enemies)
+        + coin_weight    * dcoins             (each coin picked up)
+        + score_weight    * dscore            (coins / enemies / items)
         - time_penalty                        (small per-step cost — pressure
                                                 against noop / oscillation)
 
-    Terminal: life lost → -death_penalty; world change → +completion_bonus.
-    Truncation: no new max_x for stuck_steps, or `game_over()` returns True.
+    Three modes, decided by `start_level`:
+      - None (campaign): play through the game. Death does NOT end the
+        episode — Mario respawns at level start, life count decremented,
+        max_x tracker resets. Level clear also doesn't end the episode —
+        Mario transitions naturally to the next level and max_x resets.
+        Episode ends only on `game_over()` (all lives exhausted) or the
+        stuck timeout.
+      - "W-L" (fixed): each reset loads the save-state for that level. Any
+        death or level clear ends the episode; next reset replays the same
+        level (so lives are effectively infinite for training).
+      - "random": each reset picks a random usable level from
+        SML_ALL_LEVELS and loads its state. Death or level clear ends the
+        episode so the next reset picks a new level — Mario is always
+        training on varied content.
+
+    Rewards fire in every mode: +completion_bonus on level clear,
+    -death_penalty on death (whether or not the episode ends).
     """
 
     metadata = {"render_modes": []}
@@ -258,11 +274,15 @@ class MarioEnv(gym.Env):
         # height scales with A-hold duration up to ~12 frames).
         self.jump_hold_bonus = jump_hold_bonus
         # Starting level:
-        #   None       → SML's default (world 1-1)
+        #   None       → SML's default (world 1-1) → CAMPAIGN mode
         #   (w, l)     → always start there (1-indexed, e.g. (2, 3) = level 2-3)
         #   "random"   → pick a random level from SML_ALL_LEVELS each reset
         self.start_level = parse_start_level(start_level)
         self._level_rng = _random_mod.Random()
+        # Campaign mode = play through the game respecting lives and level
+        # progression (deaths respawn, level-clears advance). Only triggered
+        # when no start_level is set.
+        self._campaign_mode = self.start_level is None
         self._jump_actions = frozenset(i for i, evts in enumerate(self.ACTIONS)
                                         if WindowEvent.PRESS_BUTTON_A in evts)
 
@@ -284,13 +304,28 @@ class MarioEnv(gym.Env):
 
     def _obs(self) -> np.ndarray:
         if self.obs_type == "pixels":
+            # Pixel mode: the raw RGB screen already includes the HUD (lives
+            # counter, coin count, timer, score) so the agent can in principle
+            # read them from pixels.
             return np.asarray(
                 self.pyboy.botsupport_manager().screen().screen_ndarray(), dtype=np.uint8
             )
         # Semantic tile grid from PyBoy's SML wrapper:
-        # -1.0 = Mario, 0.0 = empty, 0.5 = ground/ledge, 0.6 = enemy, 1.0 = pipe/wall.
+        #   -1.0 = Mario, 0.0 = empty, 0.5 = ground/ledge, 0.6 = enemy, 1.0 = pipe/wall
         # Mario is distinct from enemies (unlike custom_minimal_policy).
         arr = np.asarray(self.gw.custom_minimal_enemy(), dtype=np.float32)
+        # The HUD area at the top of the screen collapses to 0.0 in this
+        # representation, so the agent otherwise has NO awareness of lives,
+        # coins, timer or progress. Overlay 4 normalised scalar features
+        # into the top-left cells so the agent knows how careful to be
+        # (low lives), how urgent the level is (low time), and how far
+        # it has already got (max_x this attempt). This doesn't change
+        # the obs shape or the policy architecture — MlpPolicy just sees
+        # a few extra non-zero entries in the flattened vector.
+        arr[0, 0] = min(max(self.gw.lives_left, 0), 9) / 9.0    # lives:  0 .. ~1
+        arr[0, 1] = min(self.gw.coins, 99) / 99.0                # coins:  0 .. ~1
+        arr[0, 2] = min(max(self.gw.time_left, 0), 400) / 400.0  # timer:  0 .. 1
+        arr[0, 3] = min(self._max_x, 4096) / 4096.0              # max_x:  0 .. ~1
         return arr[..., np.newaxis]
 
     def reset(self, *, seed=None, options=None):
@@ -368,16 +403,17 @@ class MarioEnv(gym.Env):
         world = tuple(self.gw.world)
         score = self.gw.score
         coins = self.gw.coins
+        is_game_over = self.gw.game_over()
 
-        terminated = False
+        died = lives < self._last_lives
+        level_cleared = world != self._last_world
+
         reward = 0.0
-        if world != self._last_world:
+        if level_cleared:
             reward += self.completion_bonus
-            terminated = True
-        elif lives < self._last_lives:
+        if died:
             reward -= self.death_penalty
-            terminated = True
-        else:
+        if not (level_cleared or died):
             # Progress reward: only NEW forward territory counts. Re-covering
             # or backtracking gives 0 (not extra negative) so the agent is
             # free to reposition (e.g. back up to jump on a brick) without
@@ -398,18 +434,32 @@ class MarioEnv(gym.Env):
             # is via forward progress, coins, kills, or level completion.
             reward -= self.time_penalty
 
+        # Termination logic depends on mode
+        if self._campaign_mode:
+            # Play through: only game_over ends the episode. Death and level
+            # clear are transitions within the same episode. Reset the max_x
+            # tracker after each transition so the agent can earn progress
+            # reward on the new attempt / new level.
+            terminated = is_game_over
+            if died or level_cleared:
+                self._max_x = x
+                self._stuck = 0
+        else:
+            # Fixed / random: any death or level clear ends the episode.
+            terminated = died or level_cleared
+
         if x > self._max_x:
             self._max_x = x
             self._stuck = 0
-        else:
+        elif not (died or level_cleared):
             self._stuck += 1
 
-        truncated = self._stuck >= self.stuck_steps or self.gw.game_over()
+        truncated = self._stuck >= self.stuck_steps or is_game_over
 
         info = {
             "x": x, "max_x": self._max_x, "lives": lives,
             "world": world, "coins": coins, "score": score,
-            "stuck": self._stuck,
+            "stuck": self._stuck, "game_over": is_game_over,
         }
         self._last_x = x
         self._last_lives = lives
