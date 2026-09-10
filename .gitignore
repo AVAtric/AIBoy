@@ -9,4 +9,7 @@ __pycache__/
 checkpoints/
 logs/
 tensorboard/
+models/
+training_presets.json
+tensorboard/
 *.zip
