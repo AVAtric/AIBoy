@@ -71,32 +71,39 @@ The **GUI** is the easiest way to work with the project. It has two tabs:
   `Mario — Balanced (recommended)`, or `Save as…` your own tweaked config.
   User presets are stored in `training_presets.json`. Built-ins can be used
   but not deleted or overwritten.
-- **Play** — model selector dropdown lists all `logs/*/best_model.zip`,
-  `checkpoints/*/final.zip` and step snapshots. Speed selector supports
-  `0.5×`, `1× (real time)`, `2×`, `4×`, `Unlimited` — pacing is done manually
-  via `time.sleep()` because PyBoy's built-in speed doesn't pace in
-  null-window mode. Game plays inside a 3× upscaled Canvas at ~60Hz.
+- **Play** — model selector dropdown lists all
+  `models/<game>/<run>/logs/best_model.zip`, `.../checkpoints/final.zip` and
+  step snapshots. Speed selector supports `0.5×`, `1× (real time)`, `2×`,
+  `4×`, `Unlimited` — pacing is done manually via `time.sleep()` because
+  PyBoy's built-in speed doesn't pace in null-window mode. Game plays inside
+  a 3× upscaled Canvas at ~60Hz.
+
+The Train tab has a **live-preview checkbox** (off by default for max speed).
+When enabled, a preview thread loads the newest `best_model.zip` as it's
+saved and plays it in the Play-tab canvas — you watch the agent improve
+during training. Also shows a **progress bar** for `total_timesteps`.
 
 ### `train` flags
 
 | Flag                | Default | Notes                                           |
 |---------------------|---------|-------------------------------------------------|
-| `--game`            | mario   | `mario`, `kirby`, `tetris`                      |
-| `--n-envs`          | 4       | Parallel PyBoy instances (SubprocVecEnv)        |
-| `--timesteps`       | 1000000 | Total env steps                                 |
+| `--game`            | mario   | `mario`, `kirby`, `wario`                       |
+| `--obs-type`        | tiles   | `tiles` (fast MLP) or `pixels` (CNN, slow)      |
+| `--n-envs`          | 8       | Parallel PyBoy instances (SubprocVecEnv)        |
+| `--timesteps`       | 500000  | Total env steps                                 |
 | `--action-repeat`   | 4       | Frames each action is held                      |
-| `--frame-stack`     | 4       | Consecutive frames stacked as CNN input         |
-| `--device`          | auto    | `cpu`, `cuda`, `mps`, or `auto`                 |
-| `--resume`          | off     | Continue from newest `checkpoints/<run>/*.zip`  |
-| `--run-name`        | `<game>`| Sub-directory under checkpoints/logs/tensorboard|
+| `--frame-stack`     | 4       | Consecutive frames stacked as input             |
+| `--device`          | cpu     | `cpu` (recommended for tiles), `cuda`, `mps`, `auto` |
+| `--resume`          | off     | Continue from newest `models/<game>/<run>/checkpoints/*.zip` |
+| `--run-name`        | default | Sub-dir under `models/<game>/`                  |
 | `--checkpoint-freq` | 25000   | Env-steps between checkpoints                   |
 | `--eval-freq`       | 10000   | Env-steps between evaluations                   |
 | `--n-eval-episodes` | 3       |                                                 |
 | `--learning-rate`   | 2.5e-4  |                                                 |
 | `--n-steps`         | 256     | PPO rollout length per env                      |
-| `--batch-size`      | 256     |                                                 |
+| `--batch-size`      | 64      |                                                 |
 | `--n-epochs`        | 4       |                                                 |
-| `--ent-coef`        | 0.05    | Entropy coefficient (raise for more exploration)|
+| `--ent-coef`        | 0.01    | Entropy coefficient (raise for more exploration)|
 
 ### `play` flags
 
@@ -104,7 +111,7 @@ The **GUI** is the easiest way to work with the project. It has two tabs:
 |----------------------|---------|-------------------------------------------|
 | `--game`             | mario   |                                           |
 | `--model`            | auto    | Explicit path to a model `.zip`           |
-| `--run-name`         | `<game>`| Used to auto-locate best/final model      |
+| `--run-name`         | default | Used to auto-locate best/final model      |
 | `--episodes`         | 3       |                                           |
 | `--emulation-speed`  | 1       | 1 = real time, 2 = 2x, 0 = unlimited      |
 | `--stochastic`       | off     | Sample from policy instead of argmax      |
@@ -112,9 +119,9 @@ The **GUI** is the easiest way to work with the project. It has two tabs:
 
 Model resolution order for `play`:
 1. `--model <path>` if given
-2. `logs/<run-name>/best_model.zip` (best-eval-reward)
-3. `checkpoints/<run-name>/final.zip`
-4. Newest `checkpoints/<run-name>/ppo_*_steps.zip`
+2. `models/<game>/<run>/logs/best_model.zip` (best-eval-reward)
+3. `models/<game>/<run>/checkpoints/final.zip`
+4. Newest `models/<game>/<run>/checkpoints/ppo_*_steps.zip`
 
 ## Artifacts (per run, grouped by game)
 
@@ -150,8 +157,9 @@ presets.py              # Built-in + user-saved training presets
 training_presets.json   # User-saved presets (created on first save)
 requirements.txt
 README.md
-ROMs/                                  # Your ROM files (gitignored)
-checkpoints/, logs/, tensorboard/      # Training artifacts (gitignored)
+ROMs/                   # Your ROM files (gitignored)
+models/                 # All training artifacts (gitignored)
+  <game>/<run>/{checkpoints,logs,tensorboard}/
 ```
 
 ## Notes on training Mario

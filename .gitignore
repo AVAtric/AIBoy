@@ -5,11 +5,6 @@ ROMs/
 __pycache__/
 *.pyc
 
-# Training artifacts
-checkpoints/
-logs/
-tensorboard/
+# Training artifacts (all live under models/<game>/<run>/)
 models/
 training_presets.json
-tensorboard/
-*.zip

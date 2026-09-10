@@ -55,14 +55,30 @@ class GameBoyAIGUI:
         self.train_proc: subprocess.Popen | None = None
         self.play_stop = threading.Event()
         self.play_thread: threading.Thread | None = None
+        self.preview_stop = threading.Event()
+        self.preview_thread: threading.Thread | None = None
+        self._train_target_steps = 1
+        self._train_baseline_steps: int | None = None
 
         self._model_paths: dict[str, Path] = {}
         self._closing = False
 
         self._build_ui()
+        self._refresh_run_names()
         self._refresh_models()
         self._refresh_presets()
         self._pump()
+
+    def _on_game_changed(self) -> None:
+        self._refresh_run_names()
+        self._refresh_models()
+
+    def _refresh_run_names(self) -> None:
+        """Populate the run-name combobox with existing runs for the current game."""
+        game = self.game_var.get()
+        game_dir = self.project_dir / "models" / game
+        runs = sorted(d.name for d in game_dir.glob("*") if d.is_dir()) if game_dir.exists() else []
+        self.run_name_combo["values"] = runs
 
     # ---------- UI ----------
 
@@ -74,12 +90,14 @@ class GameBoyAIGUI:
         game_combo = ttk.Combobox(top, textvariable=self.game_var, values=sorted(GAMES),
                                    state="readonly", width=10)
         game_combo.pack(side="left", padx=6)
-        game_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_models())
-        ttk.Label(top, text="Run name (blank = same as game):").pack(side="left", padx=(20, 4))
+        game_combo.bind("<<ComboboxSelected>>", lambda e: self._on_game_changed())
+        ttk.Label(top, text="Run name (blank = 'default'):").pack(side="left", padx=(20, 4))
         self.run_name_var = tk.StringVar(value="")
-        run_entry = ttk.Entry(top, textvariable=self.run_name_var, width=16)
-        run_entry.pack(side="left")
-        run_entry.bind("<KeyRelease>", lambda e: self._refresh_models())
+        # Combobox lets the user pick an existing run (for resume) OR type a new name
+        self.run_name_combo = ttk.Combobox(top, textvariable=self.run_name_var, width=16)
+        self.run_name_combo.pack(side="left")
+        self.run_name_combo.bind("<KeyRelease>", lambda e: self._refresh_models())
+        self.run_name_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_models())
 
         nb = ttk.Notebook(self.root)
         nb.pack(fill="both", expand=True, padx=10, pady=(4, 10))
@@ -141,9 +159,18 @@ class GameBoyAIGUI:
                                        values=["tiles", "pixels"], state="readonly", width=17))
         add("Device:", ttk.Combobox(parent, textvariable=self.device_var,
                                      values=["auto", "cpu", "mps", "cuda"], state="readonly", width=17))
-        ttk.Checkbutton(parent, text="Resume from newest checkpoint",
-                        variable=self.resume_var).grid(row=row, column=0, columnspan=2,
-                                                       sticky="w", pady=6)
+        self.resume_check = ttk.Checkbutton(parent, text="Resume from newest checkpoint (uses selected run name)",
+                                             variable=self.resume_var)
+        self.resume_check.grid(row=row, column=0, columnspan=2, sticky="w", pady=6)
+        row += 1
+
+        self.preview_var = tk.BooleanVar(value=False)
+        self.preview_check = ttk.Checkbutton(
+            parent,
+            text="Show live preview on Play tab (uses newest best_model — slightly slower)",
+            variable=self.preview_var,
+        )
+        self.preview_check.grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 6))
         row += 1
 
         btns = ttk.Frame(parent)
@@ -152,6 +179,16 @@ class GameBoyAIGUI:
         self.btn_train_start.pack(side="left", padx=4)
         self.btn_train_stop = ttk.Button(btns, text="Stop", command=self.stop_training, state="disabled")
         self.btn_train_stop.pack(side="left", padx=4)
+        row += 1
+
+        # Progress bar
+        pb_frame = ttk.Frame(parent)
+        pb_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(4, 6))
+        pb_frame.columnconfigure(0, weight=1)
+        self.train_progress = ttk.Progressbar(pb_frame, mode="determinate", maximum=100)
+        self.train_progress.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.train_progress_label = ttk.Label(pb_frame, text="—", width=22)
+        self.train_progress_label.grid(row=0, column=1, sticky="e")
         row += 1
 
         stats = ttk.LabelFrame(parent, text="Live stats", padding=8)
@@ -311,7 +348,7 @@ class GameBoyAIGUI:
 
     def _refresh_presets(self) -> None:
         self._all_presets = presets.load_all()
-        recommended = "Mario — Balanced tiles (recommended)"
+        recommended = "Mario — Balanced tiles (recommended, ~15 min)"
         def sort_key(name):
             return (name != recommended, not presets.is_builtin(name), name.lower())
         names = sorted(self._all_presets.keys(), key=sort_key)
@@ -422,7 +459,7 @@ class GameBoyAIGUI:
             messagebox.showwarning("Training", "Training is already running.")
             return
         game = self.game_var.get()
-        run_name = self.run_name_var.get().strip() or game
+        run_name = self.run_name_var.get().strip() or "default"
         cmd = [
             sys.executable, "-u", "main.py", "train",
             "--game", game,
@@ -446,8 +483,20 @@ class GameBoyAIGUI:
         )
         self.btn_train_start.config(state="disabled")
         self.btn_train_stop.config(state="normal")
+        self.preview_check.config(state="disabled")
+        self.resume_check.config(state="disabled")
         self.stat_labels["status"].config(text="running")
+        self._train_target_steps = max(1, int(self.tsteps_var.get()))
+        # Baseline = model's prior step count. First observed total_timesteps
+        # will be (baseline + rollout_size), so we subtract rollout_size to find it.
+        self._train_rollout_size = max(1, int(self.nsteps_var.get()) * int(self.n_envs_var.get()))
+        self._train_baseline_steps = None
+        self.train_progress["value"] = 0
+        self.train_progress_label.config(text=f"0 / {self._train_target_steps:,}")
         threading.Thread(target=self._read_train_stdout, daemon=True).start()
+
+        if self.preview_var.get():
+            self._start_preview(game, run_name)
 
     def _read_train_stdout(self) -> None:
         assert self.train_proc is not None and self.train_proc.stdout is not None
@@ -463,11 +512,88 @@ class GameBoyAIGUI:
         if self.train_proc is None:
             return
         self._append_log("[gui] stopping training...\n")
+        self.preview_stop.set()
         self.train_proc.terminate()
         try:
             self.train_proc.wait(timeout=15)
         except subprocess.TimeoutExpired:
             self.train_proc.kill()
+
+    def _start_preview(self, game: str, run_name: str) -> None:
+        """Watch the newest saved model play alongside training, in the Play tab canvas."""
+        self.preview_stop.clear()
+        action_repeat = 4
+        frame_stack = 4
+        obs_type = self.obs_type_var.get()
+
+        def _preview_loop():
+            from stable_baselines3.common.vec_env import DummyVecEnv as DVE
+            from stable_baselines3.common.monitor import Monitor as Mon
+            model_path = self.project_dir / "models" / game / run_name / "logs" / "best_model.zip"
+            model = None
+            model_mtime = 0.0
+            vec = None
+            self.stats_queue.put(("log", f"[preview] waiting for first best_model at {model_path}\n"))
+            while (
+                not self.preview_stop.is_set()
+                and self.train_proc is not None
+                and self.train_proc.poll() is None
+            ):
+                if not model_path.exists():
+                    time.sleep(2)
+                    continue
+                mt = model_path.stat().st_mtime
+                if model is None or mt > model_mtime:
+                    try:
+                        if vec is not None:
+                            vec.close()
+                        spec = GAMES[game]
+                        rom = self.project_dir / "ROMs" / spec.rom_file
+                        pyboy = PyBoy(str(rom), window_type="null",
+                                      game_wrapper=True, disable_renderer=False)
+                        pyboy.set_emulation_speed(0)
+
+                        def _grab():
+                            arr = pyboy.botsupport_manager().screen().screen_ndarray()
+                            try:
+                                self.frame_queue.put_nowait(np.asarray(arr, dtype=np.uint8))
+                            except queue.Full:
+                                pass
+
+                        base = MarioEnv(pyboy, frame_skip=action_repeat,
+                                        obs_type=obs_type, tick_callback=_grab)
+                        vec = DVE([lambda env=Mon(base): env])
+                        if obs_type == "pixels":
+                            vec = VecTransposeImage(vec)
+                        if frame_stack > 1:
+                            order = "first" if obs_type == "pixels" else "last"
+                            vec = VecFrameStack(vec, n_stack=frame_stack, channels_order=order)
+                        model = PPO.load(str(model_path), env=vec, device="cpu")
+                        model_mtime = mt
+                        obs = vec.reset()
+                        done = [False]
+                        self.stats_queue.put(("log", f"[preview] loaded {model_path.name}\n"))
+                    except Exception as e:
+                        self.stats_queue.put(("log", f"[preview] load err: {e}\n"))
+                        time.sleep(3)
+                        continue
+
+                # Play one step, mildly paced so we don't spin CPU
+                action, _ = model.predict(obs, deterministic=False)
+                obs, r, done, info = vec.step(action)
+                if done[0]:
+                    obs = vec.reset()
+                time.sleep(0.02)  # cap preview at ~50 env-steps/sec
+
+            if vec is not None:
+                try:
+                    vec.close()
+                except Exception:
+                    pass
+            self.stats_queue.put(("log", "[preview] stopped\n"))
+
+        self.preview_thread = threading.Thread(target=_preview_loop, daemon=True)
+        self.preview_thread.start()
 
     # ---------- Playing ----------
 
@@ -483,8 +609,9 @@ class GameBoyAIGUI:
         if not label:
             messagebox.showerror(
                 "Play",
-                f"No trained model found. Train first, or place a .zip in\n"
-                f"logs/<run>/best_model.zip or checkpoints/<run>/final.zip"
+                f"No trained model found for '{self.game_var.get()}'. Train first, or\n"
+                f"place a .zip at models/{self.game_var.get()}/<run>/logs/best_model.zip\n"
+                f"or models/{self.game_var.get()}/<run>/checkpoints/final.zip"
             )
             return
         model_path = self._model_paths.get(label)
@@ -626,13 +753,40 @@ class GameBoyAIGUI:
                     _, key, val = item
                     if key in self.stat_labels:
                         self.stat_labels[key].config(text=val)
+                    if key == "total_timesteps":
+                        try:
+                            done_abs = int(val)
+                            if self._train_baseline_steps is None:
+                                # Fresh: first obs = rollout_size, baseline = 0
+                                # Resume: first obs = prev + rollout_size, baseline = prev
+                                self._train_baseline_steps = max(
+                                    0, done_abs - self._train_rollout_size
+                                )
+                            new_steps = done_abs - self._train_baseline_steps
+                            pct = min(100.0, 100.0 * new_steps / max(1, self._train_target_steps))
+                            self.train_progress["value"] = pct
+                            self.train_progress_label.config(
+                                text=f"{new_steps:,} / {self._train_target_steps:,}"
+                            )
+                        except ValueError:
+                            pass
                 elif kind == "train_done":
                     rc = item[1]
                     self.stat_labels["status"].config(text=f"finished (rc={rc})")
                     self.btn_train_start.config(state="normal")
                     self.btn_train_stop.config(state="disabled")
+                    self.preview_check.config(state="normal")
+                    self.resume_check.config(state="normal")
                     self.train_proc = None
-                    self._refresh_models()  # new checkpoints may have arrived
+                    self.preview_stop.set()
+                    # Reset progress bar unless training reached the target cleanly
+                    if rc == 0:
+                        self.train_progress["value"] = 100
+                    else:
+                        self.train_progress["value"] = 0
+                        self.train_progress_label.config(text="cancelled")
+                    self._refresh_models()      # new checkpoints may have arrived
+                    self._refresh_run_names()   # new run dir may have appeared
                 elif kind == "play_status":
                     self.play_status_var.set(item[1])
                 elif kind == "play_stat":
@@ -678,6 +832,7 @@ class GameBoyAIGUI:
     def _on_close(self) -> None:
         self._closing = True
         self.play_stop.set()
+        self.preview_stop.set()
         if self.train_proc is not None and self.train_proc.poll() is None:
             self.train_proc.terminate()
             try:

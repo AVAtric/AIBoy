@@ -141,6 +141,9 @@ def cmd_train(args: argparse.Namespace) -> None:
         tb_log = None
 
     resumed_from = latest_checkpoint(paths["checkpoints"]) if args.resume else None
+    if args.resume and resumed_from is None:
+        print(f"[train] --resume requested but no checkpoint found in "
+              f"{paths['checkpoints']} — starting fresh.")
     if resumed_from is not None:
         print(f"[train] resuming from {resumed_from}")
         print(f"[train] WARNING: --resume loads the saved model's hyperparameters. "

@@ -18,43 +18,55 @@ PRESET_FIELDS = (
 )
 
 BUILTIN_PRESETS: dict[str, dict] = {
-    "Mario — Balanced tiles (recommended)": {
+    # Roughly-timed on Apple Silicon (M1 Max) at ~2000 fps with tile obs.
+    "Mario — Balanced tiles (recommended, ~15 min)": {
         "game": "mario",
         "obs_type": "tiles",
-        "timesteps": 300_000,
+        "timesteps": 2_000_000,
         "n_envs": 8,
         "ent_coef": 0.01,
-        "learning_rate": 3e-4,
-        "n_steps": 256,
+        "learning_rate": 2.5e-4,
+        "n_steps": 512,
         "batch_size": 64,
         "device": "cpu",
     },
-    "Mario — Quick tile smoke test (30 s)": {
+    "Mario — Quick smoke test (30 s)": {
         "game": "mario",
         "obs_type": "tiles",
         "timesteps": 4_000,
         "n_envs": 2,
         "ent_coef": 0.01,
-        "learning_rate": 3e-4,
+        "learning_rate": 2.5e-4,
         "n_steps": 128,
         "batch_size": 64,
         "device": "cpu",
     },
-    "Mario — Long tile run (overnight)": {
+    "Mario — Extended (~1 h)": {
         "game": "mario",
         "obs_type": "tiles",
-        "timesteps": 2_000_000,
+        "timesteps": 8_000_000,
         "n_envs": 8,
-        "ent_coef": 0.02,
-        "learning_rate": 3e-4,
+        "ent_coef": 0.01,
+        "learning_rate": 2.5e-4,
         "n_steps": 512,
         "batch_size": 64,
         "device": "cpu",
     },
-    "Mario — Pixels (slow, CNN)": {
+    "Mario — Overnight (~8 h)": {
+        "game": "mario",
+        "obs_type": "tiles",
+        "timesteps": 60_000_000,
+        "n_envs": 8,
+        "ent_coef": 0.01,
+        "learning_rate": 2.5e-4,
+        "n_steps": 512,
+        "batch_size": 64,
+        "device": "cpu",
+    },
+    "Mario — Pixels (slow, CNN, ~2 h for 500k)": {
         "game": "mario",
         "obs_type": "pixels",
-        "timesteps": 1_000_000,
+        "timesteps": 500_000,
         "n_envs": 4,
         "ent_coef": 0.02,
         "learning_rate": 2.5e-4,
