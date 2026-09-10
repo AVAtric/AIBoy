@@ -1,2 +1,12 @@
-ROMs
-.idea
+ROMs/
+.claude/
+.idea/
+.DS_Store
+__pycache__/
+*.pyc
+
+# Training artifacts
+checkpoints/
+logs/
+tensorboard/
+*.zip
