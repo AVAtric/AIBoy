@@ -1,47 +1,64 @@
+import os
+from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import VecTransposeImage, DummyVecEnv
+
+
 from pyboy import PyBoy, WindowEvent
 
-class WarioGameWrapper:
-    def __init__(self, pyboy):
-        self.pyboy = pyboy
-        # Define memory addresses from RAM map
-        self.WARIO_STATUS_ADDR = 0xA80A  # Example address for Wario's status
-        # Add more constants as needed...
+filename = "ROMs/mario.gb"
 
-    def get_wario_status(self):
-        """Read Wario's current status from memory."""
-        status = self.pyboy.get_memory_value(self.WARIO_STATUS_ADDR)
-        return status  # Add logic to interpret status
+pyboy = PyBoy(filename, window_type="SDL2", game_wrapper=True)
+eval_pyboy = PyBoy(filename, window_type="headless", game_wrapper=True, disable_renderer=True)
+pyboy.game_wrapper().start_game()
+pyboy.send_input(WindowEvent.PRESS_ARROW_RIGHT)
 
-    def set_wario_status(self, status):
-        """Write a new status for Wario to memory."""
-        self.pyboy.set_memory_value(self.WARIO_STATUS_ADDR, status)
+pyboy.set_emulation_speed(0)
+eval_pyboy.set_emulation_speed(0)
 
-    def get_current_level(self):
-        """Read the current level ID from memory."""
-        # Implement based on RAM map details
+assert pyboy.cartridge_title() == "SUPER MARIOLAN"
+assert eval_pyboy.cartridge_title() == "SUPER MARIOLAN"
 
-    def set_current_level(self, level_id):
-        """Set the current level by writing the level ID to memory."""
-        # Implement based on RAM map details
+env = pyboy.openai_gym(observation_type="raw", action_type="all")
 
-    # Add more functions based on game needs and RAM map details...
+eval_env = DummyVecEnv([lambda: Monitor(eval_pyboy.openai_gym(observation_type="raw", action_type="all"))])
+eval_env = VecTransposeImage(eval_env)
 
-# Usage example
-rom_path = "path_to_your_rom.gb"  # Replace with your ROM path
-pyboy = PyBoy(rom_path, window_type="headless")  # Use "headless" for non-interactive mode
-pyboy.set_emulation_speed(0)  # 0 for as fast as your computer can run
-game_wrapper = WarioGameWrapper(pyboy)
+best_model_path = "logs/best_model.zip"
+if os.path.exists(best_model_path):
+    print("Loading best model...")
+    model = PPO.load(best_model_path, env=env)
+else:
+    # Custom MLP policy with more layers
+    policy_kwargs = dict(
+        net_arch=dict(pi=[256, 256, 256], vf=[256, 256, 256])
+    )
 
-# Main loop
-while not pyboy.tick():
-    # Example: Check Wario's status
-    status = game_wrapper.get_wario_status()
-    print(f"Wario's status: {status}")
+    model = PPO('MlpPolicy', env, verbose=1, device="mps", policy_kwargs=policy_kwargs,
+                learning_rate=2.5e-4, n_steps=8192, batch_size=64, n_epochs=10,
+                gamma=0.99, gae_lambda=0.95)
+'''
+checkpoint_callback = CheckpointCallback(save_freq=1000, save_path='./checkpoints/',
+                                         name_prefix='rl_model')
 
-    # Example: Change Wario's status or level
-    # game_wrapper.set_wario_status(new_status)
-    # game_wrapper.set_current_level(new_level_id)
+eval_callback = EvalCallback(eval_env, best_model_save_path='./logs/', log_path='./logs/',
+                             eval_freq=1600, n_eval_episodes=1, deterministic=True)
 
-    # Add your game logic here...
+model.learn(total_timesteps=int(4e5), callback=[eval_callback])
 
-pyboy.stop()
+del model
+'''
+
+# Load the trained agent
+model = PPO.load("logs/best_model", device="mps")
+
+# Enjoy trained agent
+obs = env.reset()
+done = False
+rewards = 0
+while not done:
+    action, _states = model.predict(obs)
+    obs, rewards, done, info = env.step(action)
+
+print(f"Final reward: {rewards}")
