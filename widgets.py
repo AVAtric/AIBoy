@@ -13,7 +13,7 @@ import tkinter as tk
 from dataclasses import dataclass
 from tkinter import ttk
 
-from games import level_choices
+from games import OBS_TYPES, level_choices
 from presets import PRESET_DEFAULTS
 from runs import cpu_count
 
@@ -86,7 +86,7 @@ FIELDS: tuple[FieldSpec, ...] = (
     # Basic: what and how long
     FieldSpec("timesteps", "Timesteps", "int", "basic", 1000, 200_000_000, 10_000),
     FieldSpec("n_envs", f"Envs ({cpu_count()} cores)", "int", "basic", 1, 32),
-    FieldSpec("obs_type", "Obs type", "choice", "basic", choices=("tiles", "pixels")),
+    FieldSpec("obs_type", "Obs type", "choice", "basic", choices=tuple(OBS_TYPES)),
     FieldSpec("start_level", "Start level", "choice", "basic", choices=tuple(level_choices())),
     FieldSpec("device", "Device", "choice", "basic", choices=("cpu", "auto", "mps", "cuda")),
     FieldSpec("seed", "Seed", "int", "basic", 0, 2_147_483_647),

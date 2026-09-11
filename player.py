@@ -185,7 +185,7 @@ class EmbeddedPlayer:
         if "world" in i0:
             w = i0["world"]
             self._emit("play_stat", "world", f"{w[0]}-{w[1]}")
-        for key in ("lives", "coins"):
+        for key in ("lives", "coins", "power"):
             if key in i0:
                 self._emit("play_stat", key, str(i0[key]))
 

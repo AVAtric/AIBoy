@@ -11,6 +11,7 @@ import json
 import random
 import time
 import zlib
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -185,27 +186,124 @@ def format_steps(n: int) -> str:
     return f"{n / 1_000_000:.2f}M"
 
 
-def eta_seconds(done: float, total: float, elapsed: float) -> float | None:
-    """Remaining seconds at the average rate so far; None until there is
-    enough progress (>= 1% and a few seconds) to say anything sensible."""
-    if total <= 0 or done <= 0 or elapsed < 3.0 or done / total < 0.01:
-        return None
-    if done >= total:
-        return 0.0
-    return elapsed * (total - done) / done
+class RateEstimator:
+    """Throughput over the most recent progress reports.
+
+    Feed it (time, units_done) at every report. The rate is measured between
+    the oldest and newest sample in the window, so it excludes everything
+    before the first report (process start-up, emulator boot, save-state
+    bootstrapping) and follows changes in throughput (a preview running,
+    evaluation pauses) within about a window's worth of reports.
+    """
+
+    def __init__(self, window: int = 20, min_span: float = 2.0):
+        self._samples: deque[tuple[float, float]] = deque(maxlen=window)
+        self._min_span = min_span
+
+    def reset(self) -> None:
+        self._samples.clear()
+
+    def add(self, t: float, done: float) -> None:
+        if self._samples and done < self._samples[-1][1]:
+            self.reset()                     # counter went backwards: new run
+        self._samples.append((t, done))
+
+    def rate(self) -> float | None:
+        """Units per second, or None until two reports at least `min_span`
+        seconds apart exist."""
+        if len(self._samples) < 2:
+            return None
+        (t0, d0), (t1, d1) = self._samples[0], self._samples[-1]
+        if t1 - t0 < self._min_span or d1 <= d0:
+            return None
+        return (d1 - d0) / (t1 - t0)
+
+    def eta(self, remaining: float) -> float | None:
+        rate = self.rate()
+        if rate is None:
+            return None
+        return max(0.0, remaining / rate)
 
 
-def progress_text(done: int, total: int, elapsed: float) -> str:
+def format_eta(seconds: float | None) -> str:
+    if seconds is None:
+        return ""
+    return " · ETA " + ("done" if seconds <= 0 else format_duration(seconds))
+
+
+def progress_text(done: int, total: int, eta: float | None) -> str:
     """'1.25M / 2.00M · 62% · ETA 9 min' for a progress label."""
     pct = min(100.0, 100.0 * done / max(1, total))
-    text = f"{format_steps(done)} / {format_steps(total)} · {pct:.0f}%"
-    eta = eta_seconds(done, total, elapsed)
-    if eta is not None:
-        text += " · ETA " + ("done" if eta == 0 else format_duration(eta))
-    return text
+    return f"{format_steps(done)} / {format_steps(total)} · {pct:.0f}%" + format_eta(eta)
+
+
+class SweepEta:
+    """Time-to-finish for a sweep of trials.
+
+    Knows which planned trials will be reused (instant), measures how long
+    each trained trial actually took, and follows the current trial's live
+    step rate. Before any trial has finished, the current trial's projected
+    duration stands in for the average.
+    """
+
+    TRIAL_TAIL = 3.0        # final evaluation + model save after the last step
+
+    def __init__(self, n_trials_to_train: int, trial_steps: int):
+        self.remaining_to_train = n_trials_to_train    # not yet started, will be trained
+        self.trial_steps = trial_steps
+        self.durations: list[float] = []
+        self._rate = RateEstimator(window=15)
+        self._trial_started: float | None = None
+
+    def trial_started(self, now: float) -> None:
+        self._trial_started = now
+        self._rate.reset()
+        self.remaining_to_train = max(0, self.remaining_to_train - 1)
+
+    def trial_finished(self, now: float) -> None:
+        if self._trial_started is not None:
+            self.durations.append(now - self._trial_started)
+        self._trial_started = None
+
+    def report(self, now: float, steps: int) -> float | None:
+        """ETA in seconds after a progress report of the current trial."""
+        self._rate.add(now, steps)
+        avg = sum(self.durations) / len(self.durations) if self.durations else None
+        current = self._rate.eta(max(0, self.trial_steps - steps))
+        if current is not None:
+            current += self.TRIAL_TAIL
+        elif avg is not None and self._trial_started is not None:
+            current = max(0.0, avg - (now - self._trial_started))
+        else:
+            return None
+        if avg is None and self._trial_started is not None:
+            avg = (now - self._trial_started) + current
+        return current + self.remaining_to_train * (avg or 0.0)
+
+    def between_trials(self) -> float | None:
+        """ETA while no trial is running (after one finished)."""
+        if not self.durations:
+            return None
+        return self.remaining_to_train * (sum(self.durations) / len(self.durations))
 
 
 # ------------------------- trial results -------------------------
+
+METRIC_BEST = "best eval reward"
+METRIC_FINAL = "final eval reward"
+METRIC_MEAN = "mean eval reward"
+METRIC_PER_MINUTE = "reward per compute-minute"
+METRICS = (METRIC_BEST, METRIC_FINAL, METRIC_MEAN, METRIC_PER_MINUTE)
+METRIC_NOTES = {
+    METRIC_BEST: "Highest evaluation reward reached during the trial.",
+    METRIC_FINAL: "Evaluation reward at the end of the trial.",
+    METRIC_MEAN: "Average over all evaluations (rewards a fast, steady learner).",
+    METRIC_PER_MINUTE: "Best eval reward divided by the trial's wall-clock minutes: how much "
+                       "reward each minute of compute bought. Candidates that train slower "
+                       "(more epochs, smaller batches, pixels) pay for it here. Negative "
+                       "rewards count as zero.",
+}
+
 
 @dataclass
 class TrialMetrics:
@@ -215,14 +313,21 @@ class TrialMetrics:
     ep_len: float
     timesteps: int
     n_evals: int
+    duration: float | None = None      # wall-clock seconds the trial took (None = unknown)
+
+    @property
+    def per_minute(self) -> float:
+        """Best reward per compute-minute; negative rewards count as zero."""
+        if not self.duration or self.duration <= 0:
+            return float("nan")
+        return max(self.best, 0.0) / (self.duration / 60.0)
 
     def by_name(self, metric: str) -> float:
-        return {"best eval reward": self.best,
-                "final eval reward": self.final,
-                "mean eval reward": self.mean}[metric]
+        return {METRIC_BEST: self.best, METRIC_FINAL: self.final,
+                METRIC_MEAN: self.mean, METRIC_PER_MINUTE: self.per_minute}[metric]
 
 
-def read_trial_metrics(eval_file: Path) -> TrialMetrics | None:
+def read_trial_metrics(eval_file: Path, duration: float | None = None) -> TrialMetrics | None:
     """Summarise SB3's evaluations.npz. None if missing/unreadable."""
     if not eval_file.exists():
         return None
@@ -234,7 +339,7 @@ def read_trial_metrics(eval_file: Path) -> TrialMetrics | None:
         return TrialMetrics(
             best=float(means[best_i]), final=float(means[-1]), mean=float(means.mean()),
             ep_len=float(lens[best_i]), timesteps=int(data["timesteps"][-1]),
-            n_evals=int(len(means)),
+            n_evals=int(len(means)), duration=duration,
         )
     except Exception:
         return None
@@ -254,6 +359,25 @@ def write_trial_manifest(run_dir: Path, config: dict, trial_steps: int) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     payload = {"config": config, "trial_steps": trial_steps, "created_at": time.time()}
     (run_dir / MANIFEST_NAME).write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def finish_trial_manifest(run_dir: Path, duration: float) -> None:
+    """Record how long the trial took, so a reused trial keeps its measured
+    compute time for the reward-per-minute metric."""
+    data = read_trial_manifest(run_dir) or {}
+    data["duration"] = float(duration)
+    data["finished_at"] = time.time()
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / MANIFEST_NAME).write_text(json.dumps(data, indent=2, sort_keys=True))
+
+
+def trial_duration(run_dir: Path, config: dict, trial_steps: int) -> float:
+    """Measured wall-clock seconds from the manifest; for trials that predate
+    duration recording, the throughput estimate for this config."""
+    manifest = read_trial_manifest(run_dir)
+    if manifest and isinstance(manifest.get("duration"), (int, float)) and manifest["duration"] > 0:
+        return float(manifest["duration"])
+    return estimate_seconds(1, trial_steps, config)
 
 
 def read_trial_manifest(run_dir: Path) -> dict | None:
@@ -328,9 +452,11 @@ class ConfigResult:
         return describe_overrides(self.overrides)
 
     def score_text(self) -> str:
-        if not self.values:
+        if not self.values or np.isnan(self.score):
             return "—"
-        return f"{self.score:.0f} ± {self.spread:.0f}" if len(self.values) > 1 else f"{self.score:.0f}"
+        fmt = "{:.0f}" if abs(self.score) >= 100 else "{:.1f}"
+        text = fmt.format(self.score)
+        return f"{text} ± {fmt.format(self.spread)}" if len(self.values) > 1 else text
 
 
 def results_file(project_dir: Path, game: str, prefix: str) -> Path:
@@ -355,12 +481,16 @@ def full_config(base: dict, overrides: dict) -> dict:
     return {**PRESET_DEFAULTS, **base, **overrides}
 
 
+def _sortable(score: float) -> float:
+    return float("-inf") if np.isnan(score) else score
+
+
 def best_result(results) -> ConfigResult | None:
     """Highest-scoring config that actually produced a score."""
-    scored = [r for r in results if r.values]
+    scored = [r for r in results if r.values and not np.isnan(r.score)]
     return max(scored, key=lambda r: r.score) if scored else None
 
 
 def rank_results(results) -> list[ConfigResult]:
     """Best first; unscored configs last in index order."""
-    return sorted(results, key=lambda r: (-r.score, r.index))
+    return sorted(results, key=lambda r: (-_sortable(r.score), r.index))

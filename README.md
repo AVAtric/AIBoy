@@ -63,13 +63,20 @@ The window opens on the **Wizard** tab.
    search**. Each candidate trains briefly and is scored by its best
    evaluation reward; the table fills in best-first. Click **Continue with
    best**. Or click **Skip search** to use the preset as is.
-2. **Preset.** Review the configuration (tuned values highlighted), give it
-   a name, **Save preset & continue**. It now appears in the Train tab's
-   preset list for future runs.
-3. **Train.** Choose a run name and the total number of timesteps, optionally
-   tick *live preview*, and **Start training**. Progress, reward, fps and
-   elapsed time update live. **Stop** ends the run early and still saves
-   the model.
+   Tick **Auto-complete** and the wizard does the remaining steps by
+   itself: it saves the best candidate as a preset, starts training and
+   switches to the screen when the model is ready. One click, come back to
+   a playing agent.
+2. **Preset.** Review the configuration (tuned values highlighted). The
+   suggested name is the goal plus the tuned values, e.g.
+   `Campaign, recommended · ent 0.03 · lr 0.0003`. **Save preset &
+   continue** puts it in the Train tab's preset list for future runs.
+3. **Train.** The run name is derived from the preset name
+   (`campaign-recommended-ent0.03-lr0.0003`, numbered if it already
+   exists); change it if you like, set the total number of timesteps,
+   optionally tick *live preview*, and **Start training**. Progress,
+   reward, fps, ETA and elapsed time update live. **Stop** ends the run
+   early and still saves the model.
 4. **Watch.** When training finishes the wizard switches here and the agent
    plays on the screen panel with the exact observation setup it was trained
    with. **Play again**, or **Start over** with a new agent.
@@ -132,7 +139,14 @@ trial*). Trials are named `<prefix>-<config>[-s<seed>]` under `models/mario/`.
   same sweep yields the same candidates (this is what makes resuming safe).
 - **Seeds / config** — PPO varies a lot between seeds; with 2–3 seeds the
   table shows `mean ± std`.
-- **Metric** — best, final or mean evaluation reward.
+- **Metric** — best, final or mean evaluation reward, or **reward per
+  compute-minute**: best reward divided by the trial's measured wall-clock
+  minutes, so candidates that learn slightly better but train slower (more
+  epochs, smaller batches, pixel observations) are ranked by what each
+  minute of compute actually bought. Negative rewards count as zero.
+  Switching the metric re-ranks the results already in the table; the time
+  of each trial is recorded in its `trial.json` (trials from before this
+  was recorded use the throughput estimate).
 - **Reuse finished trials** — a trial whose run directory already reached
   its target *and* whose recorded config (`trial.json`) matches is reused
   instead of retrained. Stop a sweep and start it again to resume.
@@ -153,7 +167,8 @@ raw log scrolls on the right. The status bar at the bottom of the window
 always shows what is running.
 
 - **Resume from newest checkpoint** continues the selected run. The saved
-  model's architecture, `n_steps` and `batch_size` are kept; `ent_coef`,
+  model's architecture, `n_steps` and `batch_size` are kept, and so are the
+  observation settings recorded in the run's `run.json`; `ent_coef`,
   `learning_rate` and `n_epochs` are taken from the fields. The hint under
   the run name shows the target folder and whether it already exists.
 - A **modified** marker appears under the preset selector as soon as a
@@ -284,18 +299,25 @@ the model was trained with.
   Mario reaches full jump height.
 - **11 discrete actions:** NOOP, RIGHT, LEFT, JUMP, RIGHT+JUMP, RIGHT+RUN,
   RIGHT+RUN+JUMP, LEFT+JUMP, LEFT+RUN, LEFT+RUN+JUMP, DOWN.
-- **Two observation types.** `tiles` (default): a 16×20 semantic grid from
-  PyBoy (`-1` Mario, `0` empty, `0.5` ground, `0.6` enemy, `1` pipe/wall)
-  with six normalised scalars (lives, coins, timer, x position, world,
-  level) written into the top-left cells; trained with an MLP, ~10× faster
-  than pixels on CPU. `pixels`: the raw 144×160 RGB screen with a CNN.
+- **Two observation types.** `tiles` (default): a 16×20 semantic grid
+  from PyBoy (`-1` Mario, `0` empty, `0.5` ground, `0.6` enemy, `1`
+  pipe/wall) with seven normalised scalars written into the top-left cells:
+  lives, coins, timer, x position, world, level, and Mario's **power-up**
+  (0 small, 0.5 super, 1 superball, read from the game's RAM at `FF99` /
+  `FFB5`). Trained with an MLP, ~10× faster than pixels on CPU. `pixels`:
+  the raw 144×160 RGB screen with a CNN. The score is deliberately not part
+  of the observation: it only grows and nothing the agent does depends on
+  it.
 - **Shaped reward per step:**
   `3 × new forward distance` (only new territory counts, so backtracking
-  cannot farm) `+ 5 × coins collected` `+ 0.05 × score gained` (enemies,
-  items; the game also adds 100 score per coin, so a coin is worth 10 in
-  total) `− 0.03` per step. A death gives `− 500` and a level clear
-  `+ 1000` (`+ 3000` more for finishing a marathon); those steps carry no
-  other terms.
+  cannot farm) `+ 5 × coins collected` `+ 0.05 × score gained` `− 0.03`
+  per step. A death gives `− 500` and a level clear `+ 1000` (`+ 3000`
+  more for finishing a marathon); those steps carry no other terms.
+  Measured in the emulator, the score term pays: **5 per enemy kill**
+  (100 points), **5 extra per coin** (coins also score 100, so a coin is
+  worth 10 in total), **50 for a mushroom or flower** (1000 points), and in
+  campaign mode 5 per step of the level-end timer countdown (finishing
+  with more time left pays more).
 - **Instant event detection.** The game-state byte at `0xFFB3` credits a
   clear the step Mario touches the goal and a death the step he dies,
   instead of 20–70 steps later when PyBoy's counters catch up. Episodes that

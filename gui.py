@@ -34,7 +34,7 @@ from PIL import Image, ImageTk
 import presets
 import runs
 import tuning
-from games import RomInfo, discover_roms, level_choices, probe_rom
+from games import OBS_TYPES, RomInfo, discover_roms, level_choices, probe_rom
 from player import CANVAS_H, CANVAS_W, GAME_H, GAME_W, SPEED_CHOICES, EmbeddedPlayer, LatestFrame
 from presets_tab import PresetsTab
 from widgets import MONO, MONO_BOLD, THEME, ConfigForm, make_table, setup_styles
@@ -99,12 +99,12 @@ class GameBoyAIGUI:
         self.tune_stop = threading.Event()
         self.tune_thread: threading.Thread | None = None
         self.tune_proc: subprocess.Popen | None = None
+        self._last_trial_seconds = 0.0
         self.tb_proc: subprocess.Popen | None = None
         self._train_target_steps = 1
         self._train_rollout_size = 1
         self._train_baseline_steps: int | None = None
-        self._train_started_at = 0.0
-        self._tune_started_at = 0.0
+        self._train_rate = tuning.RateEstimator()
 
         self._model_paths: dict[str, Path] = {}
         self._all_presets: dict[str, dict] = {}
@@ -404,10 +404,10 @@ class GameBoyAIGUI:
         # Live episode, two columns.
         stats = ttk.Frame(parent)
         stats.pack(fill="x", pady=(0, 6))
-        keys = ["episode", "reward", "world", "x", "steps", "lives", "coins", "action"]
+        keys = ["episode", "reward", "world", "x", "steps", "lives", "coins", "power", "action"]
         self.play_stat_vars = {k: tk.StringVar(value="—") for k in keys}
         for i, key in enumerate(keys):
-            col, row = divmod(i, 4)
+            col, row = divmod(i, 5)
             ttk.Label(stats, text=f"{key}:", foreground=THEME.muted).grid(
                 row=row, column=col * 2, sticky="w", padx=(0 if col == 0 else 16, 6))
             ttk.Label(stats, textvariable=self.play_stat_vars[key], font=MONO_BOLD, width=15,
@@ -515,7 +515,7 @@ class GameBoyAIGUI:
                                                       pady=(0, 6))
         r += 1
         row("Obs type:", ttk.Combobox(body, textvariable=self.play_obs_type_var,
-                                      values=["tiles", "pixels"], state="readonly", width=8))
+                                      values=list(OBS_TYPES), state="readonly", width=8))
         row("Start level:", ttk.Combobox(body, textvariable=self.play_level_var,
                                          values=LEVEL_CHOICES, state="readonly", width=10))
         row("Action repeat:", ttk.Spinbox(body, from_=1, to=16,
@@ -572,16 +572,21 @@ class GameBoyAIGUI:
             cfg_frame, from_=1, to=50, width=6, textvariable=self.tune_evals_var))
         self.tune_run_prefix_var = tk.StringVar(value="tune")
         _field(2, 0, "Run-name prefix:", ttk.Entry(cfg_frame, textvariable=self.tune_run_prefix_var))
-        self.tune_metric_var = tk.StringVar(value="best eval reward")
-        _field(2, 1, "Metric:", ttk.Combobox(
-            cfg_frame, textvariable=self.tune_metric_var, state="readonly", width=16,
-            values=["best eval reward", "final eval reward", "mean eval reward"]))
+        self.tune_metric_var = tk.StringVar(value=tuning.METRIC_BEST)
+        metric_combo = ttk.Combobox(cfg_frame, textvariable=self.tune_metric_var, state="readonly",
+                                    width=24, values=list(tuning.METRICS))
+        metric_combo.bind("<<ComboboxSelected>>", lambda e: self._on_metric_changed())
+        _field(2, 1, "Metric:", metric_combo)
+        self.tune_metric_note = ttk.Label(cfg_frame, text=tuning.METRIC_NOTES[tuning.METRIC_BEST],
+                                          foreground=THEME.muted, wraplength=640)
+        self.tune_metric_note.grid(row=4, column=0, columnspan=4, sticky="w", pady=(2, 0))
         self.tune_skip_done_var = tk.BooleanVar(value=True)
         skip_cb = ttk.Checkbutton(
             cfg_frame, variable=self.tune_skip_done_var,
             text="Reuse finished trials with the same prefix and config (resumes a sweep)")
         skip_cb.grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
         self._tune_config_widgets.append(skip_cb)
+
 
         sweep_frame = ttk.LabelFrame(parent, text="Sweep", padding=6)
         sweep_frame.grid(row=1, column=0, sticky="ew", pady=(0, 6))
@@ -673,6 +678,30 @@ class GameBoyAIGUI:
         self.btn_tune_delete.pack(side="right")
 
         self.apply_tune_template()
+
+    def _on_metric_changed(self) -> None:
+        """Re-rank the current results under the newly chosen metric."""
+        metric = self.tune_metric_var.get()
+        self.tune_metric_note.config(text=tuning.METRIC_NOTES.get(metric, ""))
+        self.tune_tree.heading("score", text=metric)
+        self._rescore_results(metric)
+
+    def _rescore_results(self, metric: str) -> None:
+        """Recompute every finished config's score from its trial files."""
+        for res in self._tune_results.values():
+            values, ep_lens = [], []
+            for run_name in res.runs:
+                run_dir = runs.run_paths(self.game, run_name)["base"]
+                m = tuning.read_trial_metrics(
+                    run_dir / "logs" / "evaluations.npz",
+                    duration=tuning.trial_duration(run_dir, res.config, res.timesteps or 1))
+                if m is not None:
+                    values.append(m.by_name(metric))
+                    ep_lens.append(m.ep_len)
+            res.metric, res.values, res.ep_lens = metric, values, ep_lens
+        self.render_tune_results()
+        if self.wizard is not None:
+            self.wizard.on_tune_result()
 
     # ---------- Tuning: sweep editing ----------
 
@@ -774,7 +803,6 @@ class GameBoyAIGUI:
         self.tune_progress_var.set(0)
         self.tune_progress_text.set(f"0/{n_trials}")
         self.tune_live_var.set("starting…")
-        self._tune_started_at = time.time()
         self.btn_tune_start.config(state="disabled")
         self.btn_tune_stop.config(state="normal")
         self.btn_train_start.config(state="disabled")
@@ -791,9 +819,10 @@ class GameBoyAIGUI:
         self.root.after(STOP_GRACE_SECONDS * 1000, lambda: kill_if_alive(proc))
 
     def _run_trial(self, cmd: list[str], label: str, trial_steps: int,
-                   done_trials: int, total: int) -> int | None:
+                   done_trials: int, total: int, eta: tuning.SweepEta) -> int | None:
         """Run one training subprocess, streaming its SB3 stats into the
         live-status line and the progress bar. Returns the exit code."""
+        eta.trial_started(time.time())
         try:
             self.tune_proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -818,13 +847,16 @@ class GameBoyAIGUI:
             except ValueError:
                 continue
             frac = (done_trials + min(1.0, steps / trial_steps)) / total
-            self.stats_queue.put(("tune_progress", frac, f"{done_trials}/{total}"))
+            self.stats_queue.put(("tune_progress", frac, f"{done_trials}/{total}",
+                                  eta.report(time.time(), steps)))
             self.stats_queue.put(("tune_live",
                 f"{label} · {steps:,}/{trial_steps:,} steps · "
                 f"ep_rew_mean {stats.get('ep_rew_mean', '—')} · "
                 f"ep_len_mean {stats.get('ep_len_mean', '—')} · {stats.get('fps', '—')} fps"))
         rc = self.tune_proc.wait()
         self.tune_proc = None
+        eta.trial_finished(time.time())
+        self._last_trial_seconds = eta.durations[-1] if eta.durations else 0.0
         return rc
 
     def _tuning_loop(self, plan: dict) -> None:
@@ -841,6 +873,18 @@ class GameBoyAIGUI:
                 "trial_steps": trial_steps, "seeds": n_seeds, "search": plan["search"],
                 "sweep": plan["sweep"]}
         cancelled = False
+
+        # Which planned trials already exist and will be reused (instant)?
+        # Knowing this up front keeps the ETA from counting them as work.
+        def _reusable(i: int, s: int, cfg: dict) -> bool:
+            run_dir = runs.run_paths(game, tuning.trial_run_name(prefix, i, s, n_seeds))["base"]
+            return plan["skip_done"] and tuning.trial_is_complete(run_dir, trial_steps, cfg)
+
+        planned = [(i, s, {**tuning.full_config(base, ov), "seed": int(base.get("seed", 0)) + s})
+                   for i, ov in enumerate(combos, start=1) for s in range(n_seeds)]
+        to_train = sum(0 if _reusable(i, s, cfg) else 1 for i, s, cfg in planned)
+        eta = tuning.SweepEta(to_train, trial_steps)
+
         for i, overrides in enumerate(combos, start=1):
             cfg = tuning.full_config(base, overrides)
             res = tuning.ConfigResult(index=i, overrides=overrides, config=cfg, metric=metric)
@@ -853,7 +897,8 @@ class GameBoyAIGUI:
                 run_dir = runs.run_paths(game, run_name)["base"]
                 seed_cfg = {**cfg, "seed": int(cfg.get("seed", 0)) + s}
                 label = f"config {i}/{len(combos)}" + (f" seed {s + 1}/{n_seeds}" if n_seeds > 1 else "")
-                self.stats_queue.put(("tune_progress", done_trials / total, f"{done_trials}/{total}"))
+                self.stats_queue.put(("tune_progress", done_trials / total, f"{done_trials}/{total}",
+                                      eta.between_trials()))
                 if plan["skip_done"] and tuning.trial_is_complete(run_dir, trial_steps, seed_cfg):
                     res.reused += 1
                     self.stats_queue.put(("tune_status", f"{label}: reusing finished run {run_name}"))
@@ -866,13 +911,19 @@ class GameBoyAIGUI:
                         self.stats_queue.put(("tune_status", f"{label}: could not write manifest: {e}"))
                     self.stats_queue.put(("tune_status",
                                           f"{label}: {res.label or 'base config'}  →  {run_name}"))
-                    rc = self._run_trial(cmd, label, trial_steps, done_trials, total)
+                    rc = self._run_trial(cmd, label, trial_steps, done_trials, total, eta)
                     if self.tune_stop.is_set():
                         cancelled = True
                         break
                     if rc not in (0, None):
                         self.stats_queue.put(("tune_status", f"{label}: trainer exited with rc={rc}"))
-                m = tuning.read_trial_metrics(run_dir / "logs" / "evaluations.npz")
+                    try:
+                        tuning.finish_trial_manifest(run_dir, self._last_trial_seconds)
+                    except OSError:
+                        pass
+                m = tuning.read_trial_metrics(
+                    run_dir / "logs" / "evaluations.npz",
+                    duration=tuning.trial_duration(run_dir, seed_cfg, trial_steps))
                 if m is not None:
                     res.values.append(m.by_name(metric))
                     res.ep_lens.append(m.ep_len)
@@ -891,7 +942,8 @@ class GameBoyAIGUI:
                     self.stats_queue.put(("tune_status", f"could not save results: {e}"))
             if cancelled:
                 break
-        self.stats_queue.put(("tune_progress", done_trials / max(1, total), f"{done_trials}/{total}"))
+        self.stats_queue.put(("tune_progress", done_trials / max(1, total), f"{done_trials}/{total}",
+                              None))
         rel = out_path.relative_to(PROJECT_DIR)
         text = "cancelled" if cancelled else f"done — results in {rel}"
         self.stats_queue.put(("tune_done", text, cancelled))
@@ -936,9 +988,10 @@ class GameBoyAIGUI:
             messagebox.showerror("Tune", f"Could not read {path}:\n{e}")
             return
         self._tune_results = {r.index: r for r in results}
-        if meta.get("metric"):
+        if meta.get("metric") in tuning.METRICS:
             self.tune_metric_var.set(meta["metric"])
             self.tune_tree.heading("score", text=meta["metric"])
+            self.tune_metric_note.config(text=tuning.METRIC_NOTES[meta["metric"]])
         if meta.get("sweep"):
             self.tune_sweep_text.delete("1.0", "end")
             self.tune_sweep_text.insert("1.0", json.dumps(meta["sweep"], indent=2))
@@ -1200,8 +1253,8 @@ class GameBoyAIGUI:
                 f"level {cfg.get('start_level')}, repeat {cfg.get('action_repeat')}, "
                 f"stack {cfg.get('frame_stack')}")
         else:
-            self.model_note_var.set("no run.json for this model (older run) — make sure obs "
-                                    "type, action repeat, frame stack and level match training")
+            self.model_note_var.set("no run.json for this model (older run) — check obs type, "
+                                    "action repeat, frame stack and level under Advanced…")
 
     def select_model(self, path: Path) -> bool:
         """Select the Play-tab model whose file is `path`. False if unknown."""
@@ -1260,9 +1313,9 @@ class GameBoyAIGUI:
         # first reported total_timesteps is baseline + one rollout.
         self._train_rollout_size = max(1, cfg["n_steps"] * cfg["n_envs"])
         self._train_baseline_steps = None
-        self._train_started_at = time.time()
+        self._train_rate.reset()
         self.train_progress_var.set(0)
-        self.train_progress_text.set(tuning.progress_text(0, self._train_target_steps, 0.0))
+        self.train_progress_text.set(tuning.progress_text(0, self._train_target_steps, None))
         threading.Thread(target=self._read_train_stdout, daemon=True).start()
 
         if self.preview_var.get():
@@ -1449,12 +1502,9 @@ class GameBoyAIGUI:
         elif kind == "tune_live":
             self.tune_live_var.set(item[1])
         elif kind == "tune_progress":
-            _, frac, label = item
+            _, frac, label, eta = item
             self.tune_progress_var.set(100.0 * frac)
-            eta = tuning.eta_seconds(frac, 1.0, time.time() - self._tune_started_at)
-            if eta is not None and frac < 1.0:
-                label += f" · ETA {tuning.format_duration(eta)}"
-            self.tune_progress_text.set(label)
+            self.tune_progress_text.set(label + (tuning.format_eta(eta) if frac < 1.0 else ""))
         elif kind == "tune_result":
             r = item[1]
             self._tune_results[r.index] = r
@@ -1490,8 +1540,11 @@ class GameBoyAIGUI:
         new_steps = done_abs - self._train_baseline_steps
         pct = min(100.0, 100.0 * new_steps / max(1, self._train_target_steps))
         self.train_progress_var.set(pct)
-        self.train_progress_text.set(tuning.progress_text(
-            new_steps, self._train_target_steps, time.time() - self._train_started_at))
+        # Rate over recent rollouts only: start-up is excluded automatically
+        # because the first sample is the first report, not the launch.
+        self._train_rate.add(time.time(), new_steps)
+        eta = self._train_rate.eta(self._train_target_steps - new_steps)
+        self.train_progress_text.set(tuning.progress_text(new_steps, self._train_target_steps, eta))
 
     def _on_train_done(self, rc: int) -> None:
         if rc == 0:

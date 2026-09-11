@@ -23,11 +23,11 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 from env import (
-    GAMES, SUPPORTED_GAMES, env_factory, level_choices, make_pyboy_env,
+    GAMES, OBS_TYPES, SUPPORTED_GAMES, env_factory, level_choices, make_pyboy_env,
     prepare_level_states, wrap_vec_env,
 )
-from runs import (cpu_count, latest_checkpoint, recommended_n_envs, resolve_model_path,
-                  run_paths, write_run_config)
+from runs import (cpu_count, latest_checkpoint, read_run_config, recommended_n_envs,
+                  resolve_model_path, run_paths, write_run_config)
 
 PROJECT_DIR = Path(__file__).resolve().parent
 
@@ -67,7 +67,7 @@ def _tune_torch_threads(obs_type: str, device: str) -> None:
     small AND its threads compete with the SubprocVecEnv workers for cores.
     One thread gives ~15% more fps in practice. Pixel obs (CnnPolicy) keeps
     the default."""
-    if device == "cpu" and obs_type == "tiles":
+    if device == "cpu" and obs_type != "pixels":
         import torch
         torch.set_num_threads(1)
 
@@ -98,6 +98,15 @@ def cmd_train(args: argparse.Namespace) -> None:
         args.n_envs = cpu_count()
     run_name = args.run_name or "default"
     paths = run_paths(args.game, run_name)
+    if args.resume:
+        # A resumed model must keep seeing the observations it was trained
+        # on; the run's manifest is the authority for those settings.
+        recorded = read_run_config(args.game, run_name) or {}
+        for key in ("obs_type", "frame_stack", "action_repeat"):
+            if key in recorded and recorded[key] != getattr(args, key):
+                print(f"[train] --resume: using {key}={recorded[key]} recorded for run "
+                      f"'{run_name}' instead of {getattr(args, key)}")
+                setattr(args, key, recorded[key])
     for d in ("checkpoints", "logs", "tensorboard"):
         paths[d].mkdir(parents=True, exist_ok=True)
 
@@ -258,8 +267,9 @@ def _add_common(p: argparse.ArgumentParser) -> None:
                         f"experimental (PyBoy's generic wrapper, pixels only, no level modes).")
     p.add_argument("--action-repeat", type=int, default=4, help="Frames each action is held")
     p.add_argument("--frame-stack", type=int, default=4, help="Consecutive frames stacked as obs")
-    p.add_argument("--obs-type", default="tiles", choices=["pixels", "tiles"],
-                   help="tiles = 16x20 game_area (fast, MLP); pixels = 144x160x3 RGB (slow, CNN)")
+    p.add_argument("--obs-type", default="tiles", choices=list(OBS_TYPES),
+                   help="tiles = 16x20 tile grid + HUD + power-up (fast, MLP; default); "
+                        "pixels = 144x160x3 RGB (slow, CNN)")
     p.add_argument("--start-level", default="default", choices=level_choices(),
                    help="Level mode: 'default' (campaign, respect lives), "
                         "'random' (new random level per episode), "

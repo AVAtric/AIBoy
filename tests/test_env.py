@@ -52,6 +52,47 @@ class LevelSpecTests(unittest.TestCase):
                 self.assertFalse(bad, f"{mod}.py imports {bad} at module level")
 
 
+class ObservationTests(unittest.TestCase):
+    def test_obs_types(self):
+        self.assertEqual(games.OBS_TYPES, ("tiles", "pixels"))
+        self.assertEqual(games.POWER_NAMES[games.POWER_SUPERBALL], "superball")
+
+    @unittest.skipUnless((games.ROM_DIR / "mario.gb").exists(), "needs ROMs/mario.gb")
+    def test_tiles_overlay_includes_power_up(self):
+        import numpy as np
+        from pyboy import PyBoy
+        pb = PyBoy(str(games.ROM_DIR / "mario.gb"), window_type="null", game_wrapper=True,
+                   disable_renderer=True)
+        try:
+            e = env.MarioEnv(pb, obs_type="tiles")
+            e.reset()
+            obs = e._obs()
+            self.assertEqual(obs.shape, (16, 20, 1))
+            self.assertEqual(obs[0, 6, 0], 0.0)                    # small Mario reads 0
+            self.assertGreater(obs[0, 2, 0], 0.9)                  # timer near full
+            self.assertEqual(e.power_state(), games.POWER_SMALL)
+            pb.set_memory_value(games.ADDR_POWERUP_STATE, 1)       # growing -> super
+            for _ in range(30):
+                pb.tick()
+            self.assertEqual(e.power_state(), games.POWER_SUPER)
+            self.assertEqual(e._obs()[0, 6, 0], 0.5)
+            pb.set_memory_value(games.ADDR_SUPERBALL, 1)
+            self.assertEqual(e.power_state(), games.POWER_SUPERBALL)
+            self.assertEqual(e._obs()[0, 6, 0], 1.0)
+            _, _, _, _, info = e.step(0)
+            self.assertEqual(info["power"], "superball")
+            self.assertTrue(np.isfinite(e._obs()).all())
+        finally:
+            pb.stop(save=False)
+
+    def test_invalid_obs_type_rejected(self):
+        class FakePyBoy:
+            def game_wrapper(self):
+                return None
+        with self.assertRaises(ValueError):
+            env.MarioEnv(FakePyBoy(), obs_type="voxels")
+
+
 class FormFieldTests(unittest.TestCase):
     def test_form_fields_match_preset_fields(self):
         import widgets

@@ -56,14 +56,44 @@ class SweepTests(unittest.TestCase):
         self.assertEqual(tuning.format_steps(4000), "4,000")
         self.assertEqual(tuning.format_steps(250_000), "250k")
         self.assertEqual(tuning.format_steps(1_250_000), "1.25M")
-        self.assertIsNone(tuning.eta_seconds(0, 100, 10))          # nothing done yet
-        self.assertIsNone(tuning.eta_seconds(50, 100, 1))          # too early to say
-        self.assertAlmostEqual(tuning.eta_seconds(25, 100, 60), 180)
-        self.assertEqual(tuning.eta_seconds(100, 100, 60), 0.0)
-        self.assertEqual(tuning.progress_text(0, 2_000_000, 0.0), "0 / 2.00M · 0%")
-        self.assertEqual(tuning.progress_text(500_000, 2_000_000, 120.0),
+        self.assertEqual(tuning.progress_text(0, 2_000_000, None), "0 / 2.00M · 0%")
+        self.assertEqual(tuning.progress_text(500_000, 2_000_000, 360.0),
                          "500k / 2.00M · 25% · ETA 6 min")
-        self.assertTrue(tuning.progress_text(2_000_000, 2_000_000, 300).endswith("ETA done"))
+        self.assertTrue(tuning.progress_text(2_000_000, 2_000_000, 0.0).endswith("ETA done"))
+
+    def test_rate_estimator_ignores_startup_and_follows_recent_rate(self):
+        est = tuning.RateEstimator(window=5)
+        self.assertIsNone(est.rate())
+        est.add(100.0, 5000)                 # first report 100 s after launch: launch time irrelevant
+        self.assertIsNone(est.rate())         # one sample is not a rate
+        est.add(101.0, 10000)
+        self.assertIsNone(est.rate())         # span below min_span
+        est.add(102.0, 15000)
+        self.assertAlmostEqual(est.rate(), 5000.0)
+        self.assertAlmostEqual(est.eta(50_000), 10.0)
+        for t in range(103, 110):             # throughput halves; window slides to the new rate
+            est.add(float(t), 15000 + (t - 102) * 2500)
+        self.assertAlmostEqual(est.rate(), 2500.0)
+        est.add(200.0, 100)                   # counter reset (new run) clears the window
+        self.assertIsNone(est.rate())
+
+    def test_sweep_eta(self):
+        eta = tuning.SweepEta(n_trials_to_train=3, trial_steps=1000)
+        self.assertIsNone(eta.between_trials())
+        eta.trial_started(0.0)
+        self.assertIsNone(eta.report(1.0, 100))               # no rate yet
+        # 100 steps/s -> current trial needs 7 s + tail; two more trials like this one
+        e = eta.report(3.0, 300)
+        self.assertIsNotNone(e)
+        projected_trial = 3.0 + 7.0 + tuning.SweepEta.TRIAL_TAIL
+        self.assertAlmostEqual(e, (7.0 + tuning.SweepEta.TRIAL_TAIL) + 2 * projected_trial)
+        eta.trial_finished(12.0)
+        self.assertAlmostEqual(eta.between_trials(), 2 * 12.0)  # measured duration drives the rest
+        eta.trial_started(20.0)
+        self.assertAlmostEqual(eta.report(21.0, 50), 11.0 + 1 * 12.0)   # avg minus elapsed, plus one more
+        eta.trial_finished(32.0)
+        eta.trial_started(40.0); eta.trial_finished(52.0)
+        self.assertAlmostEqual(eta.between_trials(), 0.0)
 
     def test_format_duration(self):
         self.assertEqual(tuning.format_duration(30), "30 s")
@@ -91,6 +121,38 @@ class ResultTests(unittest.TestCase):
             self.assertEqual(m.by_name("best eval reward"), 60)
             self.assertIsNone(tuning.read_trial_metrics(run / "missing.npz"))
 
+    def test_per_minute_metric_and_duration_manifest(self):
+        m = tuning.TrialMetrics(best=600.0, final=1.0, mean=1.0, ep_len=1.0, timesteps=1,
+                                n_evals=1, duration=120.0)
+        self.assertAlmostEqual(m.by_name(tuning.METRIC_PER_MINUTE), 300.0)
+        m.best = -50.0
+        self.assertEqual(m.per_minute, 0.0)                       # failures earn nothing
+        m.duration = None
+        self.assertTrue(np.isnan(m.per_minute))
+        self.assertEqual(set(tuning.METRIC_NOTES), set(tuning.METRICS))
+        with tempfile.TemporaryDirectory() as d:
+            run = Path(d) / "t"
+            cfg = {"n_envs": 10, "obs_type": "tiles"}
+            self.assertAlmostEqual(tuning.trial_duration(run, cfg, 100_000),
+                                   tuning.estimate_seconds(1, 100_000, cfg))   # no manifest: estimate
+            tuning.write_trial_manifest(run, cfg, 100_000)
+            tuning.finish_trial_manifest(run, 42.5)
+            self.assertEqual(tuning.trial_duration(run, cfg, 100_000), 42.5)
+            self.assertEqual(tuning.read_trial_manifest(run)["config"], cfg)   # config kept
+            self._write_evals(run, [95_000], [[600.0]])
+            got = tuning.read_trial_metrics(run / "logs" / "evaluations.npz",
+                                            duration=tuning.trial_duration(run, cfg, 100_000))
+            self.assertAlmostEqual(got.per_minute, 600.0 / (42.5 / 60))
+
+    def test_nan_scores_rank_last(self):
+        a = tuning.ConfigResult(index=1, overrides={}, config={}, metric="m", values=[float("nan")],
+                                runs=["r"])
+        b = tuning.ConfigResult(index=2, overrides={}, config={}, metric="m", values=[5.0], runs=["r"])
+        self.assertEqual([r.index for r in tuning.rank_results([a, b])], [2, 1])
+        self.assertIs(tuning.best_result([a, b]), b)
+        self.assertEqual(a.score_text(), "—")
+        self.assertEqual(b.score_text(), "5.0")
+
     def test_trial_reuse_requires_matching_manifest(self):
         with tempfile.TemporaryDirectory() as d:
             run = Path(d) / "tune-001"
@@ -110,7 +172,7 @@ class ResultTests(unittest.TestCase):
                                 values=[40.0], ep_lens=[80.0], runs=["r2"])
         c = tuning.ConfigResult(index=3, overrides={}, config={}, metric="m")
         self.assertEqual(a.score, 15.0)
-        self.assertEqual(a.score_text(), "15 ± 5")
+        self.assertEqual(a.score_text(), "15.0 ± 5.0")
         self.assertEqual(c.score_text(), "—")
         self.assertIs(tuning.best_result([a, b, c]), b)
         self.assertEqual([r.index for r in tuning.rank_results([c, a, b])], [2, 1, 3])

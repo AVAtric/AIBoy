@@ -50,6 +50,20 @@ ADDR_GAME_STATE = 0xFFB3
 SML_CLEAR_STATES = frozenset({0x05, 0x06, 0x07})
 SML_DEATH_STATES = frozenset({0x01, 0x04})
 
+# Mario's power-up, mapped by writing values and watching the sprite:
+#   0xFF99  power-up state machine: 0 small, 1 growing, 2 super,
+#           3 / 4 hit and shrinking back to small
+#   0xFFB5  non-zero while Mario has the superball (pressing B throws one)
+ADDR_POWERUP_STATE = 0xFF99
+ADDR_SUPERBALL = 0xFFB5
+POWER_SMALL, POWER_SUPER, POWER_SUPERBALL = 0, 1, 2
+POWER_NAMES = ("small", "super", "superball")
+
+# Observation types. "tiles" is the 16x20 tile grid with seven HUD scalars
+# (lives, coins, timer, x, world, level, power-up) in the top-left cells;
+# "pixels" is the raw screen (CNN).
+OBS_TYPES = ("tiles", "pixels")
+
 # Where per-level save-state files live. Gitignored via models/.
 LEVEL_STATES_DIR = Path("models") / "mario" / "_level_states"
 

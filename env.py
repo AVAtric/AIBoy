@@ -14,10 +14,12 @@ from stable_baselines3.common.vec_env import VecEnv, VecFrameStack, VecTranspose
 # Light, emulator-free facts live in games.py; re-exported here so existing
 # `from env import ...` call sites keep working.
 from games import (  # noqa: F401
-    ADDR_GAME_STATE, GAMES, LEVEL_MODES, LEVEL_STATES_DIR, MULTI_LEVEL_MODES, ROM_DIR,
-    ROM_SUFFIXES, SML_ALL_LEVELS, SML_BROKEN_LEVELS, SML_CLEAR_STATES, SML_DEATH_STATES,
-    SUPPORTED_GAMES, GameSpec, RomInfo, _level_state_path, discover_roms, ensure_level_states,
-    level_choices, level_targets, parse_start_level, prepare_level_states, probe_rom,
+    ADDR_GAME_STATE, ADDR_POWERUP_STATE, ADDR_SUPERBALL, GAMES, LEVEL_MODES, LEVEL_STATES_DIR,
+    MULTI_LEVEL_MODES, OBS_TYPES, POWER_NAMES, POWER_SMALL, POWER_SUPER, POWER_SUPERBALL,
+    ROM_DIR, ROM_SUFFIXES, SML_ALL_LEVELS, SML_BROKEN_LEVELS, SML_CLEAR_STATES,
+    SML_DEATH_STATES, SUPPORTED_GAMES, GameSpec, RomInfo, _level_state_path,
+    discover_roms, ensure_level_states, level_choices, level_targets, parse_start_level,
+    prepare_level_states, probe_rom,
 )
 
 
@@ -65,7 +67,9 @@ class MarioEnv(gym.Env):
         `custom_minimal_enemy()` — values in {-1.0=Mario, 0.0=empty,
         0.5=ground/ledge, 0.6=enemy, 1.0=pipe/wall}. Mario is distinguished
         from enemies (unlike custom_minimal_policy() where both are 0.6).
-        216× smaller than pixels, trains ~10× faster on CPU.
+        216× smaller than pixels, trains ~10× faster on CPU. Seven HUD
+        scalars (lives, coins, timer, x, world, level, power-up) are written
+        into cells (0, 0..6); see `_obs`.
 
     Per-step reward:
         + progress_weight * new_max_x_delta   (ONLY reward for new territory;
@@ -172,8 +176,8 @@ class MarioEnv(gym.Env):
         start_level=None,
     ):
         super().__init__()
-        if obs_type not in ("pixels", "tiles"):
-            raise ValueError(f"obs_type must be 'pixels' or 'tiles', got {obs_type!r}")
+        if obs_type not in OBS_TYPES:
+            raise ValueError(f"obs_type must be one of {OBS_TYPES}, got {obs_type!r}")
         self.pyboy = pyboy
         self.gw = pyboy.game_wrapper()
         self.frame_skip = frame_skip
@@ -281,7 +285,20 @@ class MarioEnv(gym.Env):
         arr[0, 3] = min(self.gw.level_progress, 4096) / 4096.0       # current x in level
         arr[0, 4] = min(max(int(w) - 1, 0), 3) / 3.0                 # world:  0, 1/3, 2/3, 1
         arr[0, 5] = min(max(int(l) - 1, 0), 2) / 2.0                 # level:  0, 1/2, 1
+        # Power-up decides what Mario can survive and do (take a hit, break
+        # bricks, throw superballs), so the policy should know it. Small
+        # Mario reads 0, so models trained before this cell existed see the
+        # exact same input until Mario picks up a mushroom.
+        arr[0, 6] = self.power_state() / 2.0                         # small 0, super .5, superball 1
         return arr[..., np.newaxis]
+
+    def power_state(self) -> int:
+        """POWER_SMALL / POWER_SUPER / POWER_SUPERBALL from the game's RAM.
+        Transitions count as their destination: growing -> super, hit -> small."""
+        state = self.pyboy.get_memory_value(ADDR_POWERUP_STATE)
+        if state in (1, 2):
+            return POWER_SUPERBALL if self.pyboy.get_memory_value(ADDR_SUPERBALL) else POWER_SUPER
+        return POWER_SMALL
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -527,6 +544,7 @@ class MarioEnv(gym.Env):
             "world": world, "coins": coins, "score": score,
             "stuck": self._stuck, "game_over": is_game_over,
             "game_state": game_state, "died": died, "level_cleared": level_cleared,
+            "power": POWER_NAMES[self.power_state()],
         }
         self._last_x = x
         self._last_lives = lives

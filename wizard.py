@@ -13,6 +13,7 @@ GUI's `_pump` reports completion back through the `on_*` hooks below.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import tkinter as tk
@@ -26,7 +27,9 @@ from widgets import MONO, MONO_BOLD, THEME, make_table
 STEPS = ("Tune", "Preset", "Train", "Watch")
 TITLE = ("Helvetica", 15, "bold")
 
-WIZARD_PREFIX = "wizard"        # run-name prefix of tuning trials
+# Run-name prefix of the wizard's tuning trials. Overridable so automated
+# tests never share trial directories with a real wizard session.
+WIZARD_PREFIX = os.environ.get("GAMEBOY_WIZARD_PREFIX", "wizard")
 INTRO = {
     0: "Pick a training goal and a group of hyperparameters to compare. Every "
        "candidate is trained briefly and scored on its best evaluation reward. "
@@ -57,11 +60,48 @@ def describe_preset(cfg: dict) -> str:
             f"· ≈ {tuning.format_duration(eta)} · {cfg.get('n_envs', '?')} envs")
 
 
+SHORT_KEYS = {"learning_rate": "lr", "ent_coef": "ent", "n_steps": "steps", "batch_size": "batch",
+              "n_epochs": "epochs", "gamma": "gamma", "gae_lambda": "gae", "clip_range": "clip",
+              "n_envs": "envs", "action_repeat": "repeat", "frame_stack": "stack",
+              "obs_type": "obs", "start_level": "level", "device": "device"}
+
+
+def compact_overrides(overrides: dict) -> str:
+    """'ent 0.03 · lr 0.0003' — readable summary of tuned values."""
+    parts = []
+    for key, value in overrides.items():
+        text = f"{value:g}" if isinstance(value, float) else str(value)
+        parts.append(f"{SHORT_KEYS.get(key, key)} {text}")
+    return " · ".join(parts)
+
+
 def default_preset_name(goal: str, overrides: dict) -> str:
-    name = f"Wizard — {short_goal(goal)}"
-    if overrides:
-        name += " · " + tuning.describe_overrides(overrides)
-    return name[:90]
+    """Preset name for a wizard result: the goal plus the tuned values, e.g.
+    'Campaign, recommended · ent 0.03 · lr 0.0003'."""
+    base = short_goal(goal)
+    return (f"{base} · {compact_overrides(overrides)}" if overrides else f"{base} (wizard)")[:90]
+
+
+def run_slug(name: str) -> str:
+    """Directory-safe run name from a preset name:
+    'Campaign, recommended · ent 0.03 · lr 0.0003' -> 'campaign-recommended-ent0.03-lr0.0003'."""
+    text = name.lower().replace("(wizard)", "")
+    for key, short in SHORT_KEYS.items():
+        text = text.replace(f"{short} ", short)          # 'ent 0.03' -> 'ent0.03'
+    text = re.sub(r"[^a-z0-9.\-]+", "-", text)
+    text = re.sub(r"-{2,}", "-", text).strip("-.")
+    return text or "wizard"
+
+
+def unique_run_name(game: str, base: str) -> str:
+    """`base`, or `base-2`, `base-3`, … if runs with that name already exist."""
+    existing = set(runs.list_runs(game))
+    if base not in existing:
+        return base
+    n = 2
+    while f"{base}-{n}" in existing:
+        n += 1
+    return f"{base}-{n}"
 
 
 class WizardTab:
@@ -74,6 +114,7 @@ class WizardTab:
         self.overrides: dict = {}
         self.preset_name = ""
         self.run_name = ""
+        self._auto_run_name = ""       # last run name the wizard filled in itself
         self._inputs: list[tk.Widget] = []
         self._presets: dict[str, dict] = {}
         self._build(parent)
@@ -165,7 +206,13 @@ class WizardTab:
         self.summary_var = tk.StringVar(value="")
         ttk.Label(form, textvariable=self.summary_var, font=MONO).grid(
             row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        self._register(self.goal_combo, self.template_combo, steps_spin, seeds_spin)
+        self.auto_var = tk.BooleanVar(value=False)
+        auto_cb = ttk.Checkbutton(
+            form, variable=self.auto_var,
+            text="Auto-complete: after the search, save the best as a preset, start training "
+                 "and switch to the screen when it is done")
+        auto_cb.grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self._register(self.goal_combo, self.template_combo, steps_spin, seeds_spin, auto_cb)
 
         btns = ttk.Frame(pane)
         btns.grid(row=2, column=0, sticky="ew", pady=(10, 6))
@@ -347,8 +394,12 @@ class WizardTab:
             if not self.preset_name_var.get().strip():
                 self.preset_name_var.set(default_preset_name(self.goal_name, self.overrides))
         elif step == 2:
-            if not self.run_name_var.get().strip():
-                self.run_name_var.set(time.strftime("wizard-%Y%m%d-%H%M"))
+            current = self.run_name_var.get().strip()
+            if not current or current == self._auto_run_name:
+                # Reuse the preset's name (saved or just chosen) for the run.
+                base = self.preset_name or default_preset_name(self.goal_name, self.overrides)
+                self._auto_run_name = unique_run_name(self.app.game, run_slug(base))
+                self.run_name_var.set(self._auto_run_name)
             self.timesteps_var.set(int(self.config.get("timesteps", 2_000_000)))
             self._update_train_eta()
             self.train_result_var.set("")
@@ -366,6 +417,7 @@ class WizardTab:
         if not self.app.busy():
             self.app.clear_screen()
         self.config, self.overrides, self.preset_name, self.run_name = {}, {}, "", ""
+        self._auto_run_name = ""
         self.preset_name_var.set("")
         self.run_name_var.set("")
         self.train_result_var.set("")
@@ -431,7 +483,7 @@ class WizardTab:
         except (tk.TclError, ValueError):
             pass
         app.tune_run_prefix_var.set(WIZARD_PREFIX)
-        app.tune_metric_var.set("best eval reward")
+        app.tune_metric_var.set(tuning.METRIC_BEST)
         app.tune_search_type_var.set("grid")
         app.tune_skip_done_var.set(True)
         app.tune_update_summary()
@@ -477,7 +529,14 @@ class WizardTab:
         self.goal_name = self.goal_var.get()
         self.overrides = {}
         self.config = presets.normalize(cfg)
+        self.preset_name = ""
         self.preset_name_var.set("")
+        if self.auto_var.get():
+            # Nothing to save: the preset is used as is. Straight to training.
+            self.goto(2)
+            self.status_var.set(f"Auto-complete: training '{self.goal_name}' as is.")
+            self.start_training()
+            return
         self.status_var.set(f"Using '{self.goal_name}' unchanged.")
         self.goto(1)
 
@@ -508,8 +567,25 @@ class WizardTab:
             return
         self.btn_use_best.config(state="normal")
         note = " (search cancelled early)" if cancelled else ""
+        if self.auto_var.get() and not cancelled:
+            self._auto_continue(best)
+            return
         self.status_var.set(f"Best so far{note}: {best.label or 'base config'} → "
                             f"{best.score_text()}. Click 'Continue with best'.")
+
+    def _auto_continue(self, best: tuning.ConfigResult) -> None:
+        """Auto-complete: best -> preset (saved under its default name) -> training.
+        Training's own completion hook then switches to Watch and plays."""
+        self.use_best()                                   # step 2 with the default name filled in
+        name = self.preset_name_var.get().strip()
+        if not self.app.save_preset_named(name, self.config, confirm_overwrite=False):
+            self.status_var.set("Auto-complete stopped: the preset could not be saved.")
+            return
+        self.preset_name = name
+        self.goto(2)                                      # fills the run name from the preset
+        self.status_var.set(f"Auto-complete: saved '{name}', training as "
+                            f"'{self.run_name_var.get()}'…")
+        self.start_training()
 
     def _render_candidates(self) -> None:
         for row in self.tree.get_children():
