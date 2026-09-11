@@ -22,13 +22,10 @@ import presets
 import runs
 import tuning
 from player import CANVAS_H, CANVAS_W, SCALE, SPEED_CHOICES
+from widgets import ACCENT, MONO, MONO_BOLD, MUTED, make_table
 
 STEPS = ("Tune", "Preset", "Train", "Watch")
-MONO = ("Menlo", 10)
-MONO_BOLD = ("Menlo", 11, "bold")
 TITLE = ("Helvetica", 15, "bold")
-MUTED = "#777"
-ACCENT = "#1f6feb"
 
 WIZARD_PREFIX = "wizard"        # run-name prefix of tuning trials
 INTRO = {
@@ -195,19 +192,10 @@ class WizardTab:
         res = ttk.LabelFrame(pane, text="Candidates (best first)", padding=4)
         res.grid(row=5, column=0, sticky="nsew")
         pane.rowconfigure(5, weight=1)
-        res.columnconfigure(0, weight=1)
-        res.rowconfigure(0, weight=1)
-        self.tree = ttk.Treeview(res, columns=("rank", "config", "score", "time"),
-                                 show="headings", height=6)
-        for c, text, w, anc in [("rank", "#", 36, "e"), ("config", "hyperparameters", 420, "w"),
-                                ("score", "best eval reward", 140, "e"), ("time", "time", 70, "e")]:
-            self.tree.heading(c, text=text)
-            self.tree.column(c, width=w, anchor=anc, stretch=(c == "config"))
-        self.tree.tag_configure("best", font=("Menlo", 10, "bold"))
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        sb = ttk.Scrollbar(res, command=self.tree.yview)
-        sb.grid(row=0, column=1, sticky="ns")
-        self.tree.config(yscrollcommand=sb.set)
+        self.tree = make_table(res, [
+            ("rank", "#", 36, "e", False), ("config", "hyperparameters", 420, "w", True),
+            ("score", "best eval reward", 140, "e", False), ("time", "time", 70, "e", False),
+        ], height=6)
 
     # ----- pane 2: preset -----
 
@@ -426,6 +414,12 @@ class WizardTab:
                               else (names[0] if names else ""))
         self._on_goal_changed()
 
+    def set_goal(self, preset_name: str) -> None:
+        """Select `preset_name` as the wizard's training goal (Presets tab)."""
+        if preset_name in self._presets:
+            self.goal_var.set(preset_name)
+            self._on_goal_changed()
+
     def _on_goal_changed(self) -> None:
         cfg = self._presets.get(self.goal_var.get())
         self.goal_note.config(text=describe_preset(cfg) if cfg else "")
@@ -459,7 +453,19 @@ class WizardTab:
         self.template_note.config(text=tuning.TEMPLATE_NOTES.get(self.template_var.get(), ""))
         self.summary_var.set(self.app.tune_summary_var.get())
 
+    def on_game_changed(self, runnable: bool) -> None:
+        state = "normal" if runnable and not self.app.busy() else "disabled"
+        if self.phase == "idle":
+            self.btn_search.config(state=state)
+            self.btn_skip.config(state=state)
+            self.btn_train.config(state=state)
+            self.btn_play.config(state=state)
+
     def start_search(self) -> None:
+        ok, why = self.app.game_runnable()
+        if not ok:
+            messagebox.showerror("Wizard", why)
+            return
         self._sync_tune_tab()
         self.goal_name = self.goal_var.get()
         self._render_candidates()
@@ -473,6 +479,10 @@ class WizardTab:
                             "(details on the Tune tab).")
 
     def skip_search(self) -> None:
+        ok, why = self.app.game_runnable()
+        if not ok:
+            messagebox.showerror("Wizard", why)
+            return
         cfg = self._presets.get(self.goal_var.get())
         if cfg is None:
             messagebox.showwarning("Wizard", "Pick a training goal first.")
@@ -512,7 +522,7 @@ class WizardTab:
             self.tree.insert("", "end", iid=str(r.index),
                              values=(rank, r.label or "(base config)", r.score_text(),
                                      tuning.format_duration(r.duration)),
-                             tags=("best",) if rank == 1 and r.values else ())
+                             tags=("best",) if rank == 1 and r.values else (() if r.values else ("muted",)))
 
     def use_best(self) -> None:
         best = tuning.best_result(self.app.tune_results())
@@ -600,7 +610,7 @@ class WizardTab:
     def _best_model(self):
         if not self.run_name:
             return None
-        return runs.best_model_for_run("mario", self.run_name)
+        return runs.best_model_for_run(self.app.game, self.run_name)
 
     def on_train_done(self, rc: int, stopped: bool) -> None:
         if self.phase != "training":

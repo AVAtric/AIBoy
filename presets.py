@@ -389,6 +389,21 @@ def upsert(name: str, config: dict) -> None:
     save_user(user)
 
 
+def rename(old: str, new: str) -> None:
+    """Rename a user preset. Built-ins cannot be renamed; names must be unique."""
+    if old in BUILTIN_PRESETS:
+        raise ValueError(f"'{old}' is a built-in preset and cannot be renamed.")
+    if new in BUILTIN_PRESETS:
+        raise ValueError(f"'{new}' is a built-in preset; pick a different name.")
+    user = load_user()
+    if old not in user:
+        raise ValueError(f"No user preset named '{old}'.")
+    if new != old and new in user:
+        raise ValueError(f"A preset named '{new}' already exists.")
+    user[new] = user.pop(old)
+    save_user(user)
+
+
 def delete(name: str) -> None:
     if name in BUILTIN_PRESETS:
         raise ValueError(f"Cannot delete built-in preset '{name}'.")

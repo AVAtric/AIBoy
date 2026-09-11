@@ -1,10 +1,11 @@
 """Tkinter GUI for gameboyEnv.
 
 Tabs, in workflow order:
-  Wizard  guided Tune -> Preset -> Train -> Watch flow (see wizard.py)
-  Tune    hyperparameter sweeps over short training trials
-  Train   a single headless training run (subprocess) with live stats
-  Play    watch any saved model inside an embedded Game Boy canvas
+  Wizard   guided Tune -> Preset -> Train -> Watch flow (see wizard.py)
+  Tune     hyperparameter sweeps over short training trials
+  Train    a single headless training run (subprocess) with live stats
+  Play     watch any saved model inside an embedded Game Boy canvas
+  Presets  browse / edit / organise presets (see presets_tab.py)
 
 Training and tuning run `main.py train` as subprocesses so the window
 stays responsive; playback runs on a background thread (player.py).
@@ -33,12 +34,16 @@ from PIL import Image, ImageTk
 import presets
 import runs
 import tuning
-from env import GAMES, level_choices
+from env import RomInfo, discover_roms, level_choices, probe_rom
 from player import CANVAS_H, CANVAS_W, GAME_H, GAME_W, SCALE, SPEED_CHOICES, EmbeddedPlayer
+from presets_tab import PresetsTab
+from widgets import MONO, MONO_BOLD, MUTED, ConfigForm, make_table, setup_styles
 
 PROJECT_DIR = Path(__file__).resolve().parent
-GAME = "mario"                      # the GUI is Super Mario Land only (see README → Roadmap)
+DEFAULT_GAME = "mario"
 TENSORBOARD_PORT = 6006
+STATUS_COLORS = {"ok": "#1e7e34", "experimental": "#b26a00", "unsupported": "#c0392b",
+                 "checking": MUTED}
 
 # SB3's verbose=1 table: "|    ep_rew_mean    | 123     |"
 STAT_LINE = re.compile(r"\|\s+([a-z_]+)\s+\|\s+([\S]+)\s+\|")
@@ -47,8 +52,6 @@ TRACKED_STATS = ("total_timesteps", "ep_rew_mean", "ep_len_mean", "fps", "time_e
 LEVEL_CHOICES = level_choices()
 
 STOP_GRACE_SECONDS = 20     # SIGINT -> trainer saves final.zip; SIGKILL after this
-MONO = ("Menlo", 10)
-MONO_BOLD = ("Menlo", 11, "bold")
 
 
 def interrupt(proc: subprocess.Popen | None) -> None:
@@ -108,13 +111,88 @@ class GameBoyAIGUI:
         self._canvases: list[tuple[tk.Canvas, int]] = []
         self._tk_img: ImageTk.PhotoImage | None = None
         self._closing = False
+        self._train_run_name = ""
+        self.roms: dict[str, RomInfo] = {}
         self.wizard = None
+        self.presets_tab = None
 
         self._build_ui()
+        self.rescan_roms()
         self.refresh_run_names()
         self.refresh_models()
         self.refresh_presets()
         self._pump()
+
+    # ---------- game selection ----------
+
+    @property
+    def game(self) -> str:
+        return self.game_var.get() or DEFAULT_GAME
+
+    def rescan_roms(self) -> None:
+        """List the ROM folder and probe every ROM in the background."""
+        infos = discover_roms(PROJECT_DIR / "ROMs")
+        self.roms = {info.name: info for info in infos}
+        names = [info.name for info in infos]
+        self.game_combo["values"] = names
+        if self.game_var.get() not in names:
+            self.game_var.set(DEFAULT_GAME if DEFAULT_GAME in names else (names[0] if names else ""))
+        self._update_game_status()
+        if not infos:
+            self.game_status_var.set("no .gb files in ROMs/ — see README → Install")
+            self.game_status_label.config(foreground=STATUS_COLORS["unsupported"])
+            return
+
+        def _probe_all(paths: list[tuple[str, Path]]) -> None:
+            for name, path in paths:
+                title, wrapper, error = probe_rom(path)
+                self.stats_queue.put(("rom_probed", name, title, wrapper, error))
+
+        threading.Thread(target=_probe_all, daemon=True,
+                         args=([(i.name, i.path) for i in infos],)).start()
+
+    def current_rom(self) -> RomInfo | None:
+        return self.roms.get(self.game)
+
+    def game_runnable(self) -> tuple[bool, str]:
+        """(True, "") if the selected game can be trained and played here,
+        else (False, reason)."""
+        info = self.current_rom()
+        if info is None:
+            return False, f"No ROM for '{self.game}' in ROMs/."
+        level, text = info.status()
+        if level == "ok":
+            return True, ""
+        if level == "checking":
+            return False, "Still checking whether this ROM can run; try again in a moment."
+        return False, f"'{self.game}' cannot be used in this version: {text}"
+
+    def _update_game_status(self) -> None:
+        info = self.current_rom()
+        if info is None:
+            level, text = "unsupported", "no ROM selected"
+        else:
+            level, text = info.status()
+        self.game_status_var.set(text)
+        self.game_status_label.config(foreground=STATUS_COLORS[level])
+        self._update_start_buttons()
+
+    def _update_start_buttons(self) -> None:
+        """Start buttons are only enabled for a runnable game (and no run active)."""
+        ok, _ = self.game_runnable()
+        state = "normal" if ok and not self.busy() else "disabled"
+        self.btn_train_start.config(state=state)
+        self.btn_tune_start.config(state=state)
+        if not self.playing_active():
+            self.btn_play_start.config(state=state)
+        if self.wizard is not None:
+            self.wizard.on_game_changed(ok)
+
+    def _on_game_changed(self) -> None:
+        self._update_game_status()
+        self.refresh_run_names()
+        self.refresh_models()
+        self.refresh_presets()
 
     # ---------- state queries ----------
 
@@ -136,34 +214,48 @@ class GameBoyAIGUI:
     def _build_ui(self) -> None:
         from wizard import WizardTab
 
-        top = ttk.Frame(self.root, padding=(10, 8))
-        top.pack(fill="x")
+        setup_styles(self.root)
+
+        # Top bar: which ROM to work with, and whether it can run here.
+        top = ttk.Frame(self.root, padding=(10, 8, 10, 0))
+        top.pack(side="top", fill="x")
         ttk.Label(top, text="Game:").pack(side="left")
-        self.game_var = tk.StringVar(value=GAME)
-        ttk.Label(top, text="Super Mario Land", font=MONO_BOLD).pack(side="left", padx=6)
-        ttk.Label(top, text="Run name (blank = 'default'):").pack(side="left", padx=(20, 4))
-        self.run_name_var = tk.StringVar(value="")
-        # Pick an existing run (for resume) OR type a new name.
-        self.run_name_combo = ttk.Combobox(top, textvariable=self.run_name_var, width=18)
-        self.run_name_combo.pack(side="left")
-        self.run_name_combo.bind("<KeyRelease>", lambda e: self.refresh_models())
-        self.run_name_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_models())
+        self.game_var = tk.StringVar(value=DEFAULT_GAME)
+        self.game_combo = ttk.Combobox(top, textvariable=self.game_var, state="readonly", width=12)
+        self.game_combo.pack(side="left", padx=6)
+        self.game_combo.bind("<<ComboboxSelected>>", lambda e: self._on_game_changed())
+        self.btn_rescan = ttk.Button(top, text="Rescan ROMs", command=self.rescan_roms)
+        self.btn_rescan.pack(side="left", padx=(0, 12))
+        self.game_status_var = tk.StringVar(value="")
+        self.game_status_label = ttk.Label(top, textvariable=self.game_status_var, font=MONO)
+        self.game_status_label.pack(side="left")
+
+        # Status bar (bottom): what is running right now.
+        self.status_bar_var = tk.StringVar(value="Idle")
+        bar = ttk.Frame(self.root, padding=(10, 4))
+        bar.pack(side="bottom", fill="x")
+        ttk.Label(bar, textvariable=self.status_bar_var, font=MONO, foreground="#444").pack(
+            side="left")
+        ttk.Label(bar, text="Super Mario Land · PPO", foreground=MUTED).pack(side="right")
 
         self.nb = ttk.Notebook(self.root)
-        self.nb.pack(fill="both", expand=True, padx=10, pady=(4, 10))
+        self.nb.pack(fill="both", expand=True, padx=10, pady=(8, 4))
         self.wizard_tab = ttk.Frame(self.nb, padding=10)
         self.tune_tab = ttk.Frame(self.nb, padding=10)
         self.train_tab = ttk.Frame(self.nb, padding=10)
         self.play_tab = ttk.Frame(self.nb, padding=10)
+        self.presets_frame = ttk.Frame(self.nb, padding=10)
         self.nb.add(self.wizard_tab, text="Wizard")
         self.nb.add(self.tune_tab, text="Tune")
         self.nb.add(self.train_tab, text="Train")
         self.nb.add(self.play_tab, text="Play")
+        self.nb.add(self.presets_frame, text="Presets")
         # Train defines the variables the other tabs reference; build it first.
         self._build_train(self.train_tab)
         self._build_play(self.play_tab)
         self._build_tune(self.tune_tab)
         self.wizard = WizardTab(self, self.wizard_tab)
+        self.presets_tab = PresetsTab(self, self.presets_frame)
         self.nb.select(self.wizard_tab)
 
     def show_tab(self, tab: ttk.Frame) -> None:
@@ -182,27 +274,7 @@ class GameBoyAIGUI:
 
     def _build_train(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
-
-        self.tsteps_var = tk.IntVar(value=500_000)
-        self.n_envs_var = tk.IntVar(value=10)
-        self.ent_coef_var = tk.DoubleVar(value=0.01)
-        self.lr_var = tk.DoubleVar(value=2.5e-4)
-        self.nsteps_var = tk.IntVar(value=256)
-        self.batch_var = tk.IntVar(value=128)
-        self.device_var = tk.StringVar(value="cpu")
         self.resume_var = tk.BooleanVar(value=False)
-        self.action_repeat_var = tk.IntVar(value=4)
-        self.frame_stack_var = tk.IntVar(value=4)
-        self.n_epochs_var = tk.IntVar(value=4)
-        self.gamma_var = tk.DoubleVar(value=presets.PRESET_DEFAULTS["gamma"])
-        self.gae_lambda_var = tk.DoubleVar(value=presets.PRESET_DEFAULTS["gae_lambda"])
-        self.clip_range_var = tk.DoubleVar(value=presets.PRESET_DEFAULTS["clip_range"])
-        self.seed_var = tk.IntVar(value=0)
-        self.ckpt_freq_var = tk.IntVar(value=runs.DEFAULT_CHECKPOINT_FREQ)
-        self.eval_freq_var = tk.IntVar(value=runs.DEFAULT_EVAL_FREQ)
-        self.n_eval_var = tk.IntVar(value=runs.DEFAULT_N_EVAL_EPISODES)
-        self.obs_type_var = tk.StringVar(value="tiles")
-        self.start_level_var = tk.StringVar(value="default")
         self.preview_var = tk.BooleanVar(value=False)
 
         # ---- Presets bar ----
@@ -216,87 +288,39 @@ class GameBoyAIGUI:
         self.preset_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_preset())
         self.btn_preset_save = ttk.Button(preset_frame, text="Save as…", command=self._save_preset)
         self.btn_preset_save.grid(row=0, column=1, padx=2)
-        self.btn_preset_delete = ttk.Button(preset_frame, text="Delete", command=self._delete_preset)
-        self.btn_preset_delete.grid(row=0, column=2, padx=2)
-        self.btn_preset_reload = ttk.Button(preset_frame, text="Reload", command=self.refresh_presets)
-        self.btn_preset_reload.grid(row=0, column=3, padx=2)
+        self.btn_preset_manage = ttk.Button(preset_frame, text="Manage…",
+                                            command=lambda: self.show_tab(self.presets_frame))
+        self.btn_preset_manage.grid(row=0, column=2, padx=2)
 
-        # ---- Basic + Advanced params, side by side ----
-        params_frame = ttk.Frame(parent)
-        params_frame.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        params_frame.columnconfigure(0, weight=1)
-        params_frame.columnconfigure(1, weight=1)
-        basic = ttk.LabelFrame(params_frame, text="Basic", padding=8)
-        basic.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
-        basic.columnconfigure(1, weight=1)
-        advanced = ttk.LabelFrame(params_frame, text="Advanced", padding=8)
-        advanced.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
-        advanced.columnconfigure(1, weight=1)
-
-        self._train_config_widgets: list[tk.Widget] = []
-
-        def _add(frame, row_ref, label, widget):
-            ttk.Label(frame, text=label).grid(row=row_ref[0], column=0, sticky="w", pady=1)
-            widget.grid(row=row_ref[0], column=1, sticky="ew", pady=1, padx=(6, 0))
-            row_ref[0] += 1
-            self._train_config_widgets.append(widget)
-
-        r = [0]
-        _add(basic, r, "Total timesteps:", ttk.Spinbox(basic, from_=1000, to=100_000_000,
-             increment=10_000, textvariable=self.tsteps_var, width=14))
-        _add(basic, r, "Parallel envs:", ttk.Spinbox(basic, from_=1, to=16,
-             textvariable=self.n_envs_var, width=14))
-        _add(basic, r, "Learning rate:", ttk.Entry(basic, textvariable=self.lr_var, width=16))
-        _add(basic, r, "Entropy coef:", ttk.Spinbox(basic, from_=0.0, to=0.5,
-             increment=0.01, textvariable=self.ent_coef_var, width=14))
-        _add(basic, r, "PPO n_steps:", ttk.Spinbox(basic, from_=32, to=8192, increment=32,
-             textvariable=self.nsteps_var, width=14))
-        _add(basic, r, "PPO batch size:", ttk.Spinbox(basic, from_=8, to=4096, increment=8,
-             textvariable=self.batch_var, width=14))
-        _add(basic, r, "Obs type:", ttk.Combobox(basic, textvariable=self.obs_type_var,
-             values=["tiles", "pixels"], state="readonly", width=13))
-        _add(basic, r, "Start level:", ttk.Combobox(basic, textvariable=self.start_level_var,
-             values=LEVEL_CHOICES, state="readonly", width=13))
-        _add(basic, r, "Device:", ttk.Combobox(basic, textvariable=self.device_var,
-             values=["cpu", "auto", "mps", "cuda"], state="readonly", width=13))
-
-        r = [0]
-        _add(advanced, r, "Action repeat:", ttk.Spinbox(advanced, from_=1, to=16,
-             textvariable=self.action_repeat_var, width=14))
-        _add(advanced, r, "Frame stack:", ttk.Spinbox(advanced, from_=1, to=16,
-             textvariable=self.frame_stack_var, width=14))
-        _add(advanced, r, "PPO n_epochs:", ttk.Spinbox(advanced, from_=1, to=30,
-             textvariable=self.n_epochs_var, width=14))
-        _add(advanced, r, "Gamma (discount):", ttk.Spinbox(advanced, from_=0.9, to=0.9999,
-             increment=0.005, textvariable=self.gamma_var, width=14))
-        _add(advanced, r, "GAE lambda:", ttk.Spinbox(advanced, from_=0.8, to=1.0,
-             increment=0.01, textvariable=self.gae_lambda_var, width=14))
-        _add(advanced, r, "PPO clip range:", ttk.Spinbox(advanced, from_=0.05, to=0.5,
-             increment=0.05, textvariable=self.clip_range_var, width=14))
-        _add(advanced, r, "Seed:", ttk.Spinbox(advanced, from_=0, to=2_147_483_647,
-             textvariable=self.seed_var, width=14))
-        _add(advanced, r, "Checkpoint / N steps:", ttk.Spinbox(advanced, from_=100, to=10_000_000,
-             increment=1000, textvariable=self.ckpt_freq_var, width=14))
-        _add(advanced, r, "Eval / N steps:", ttk.Spinbox(advanced, from_=100, to=10_000_000,
-             increment=1000, textvariable=self.eval_freq_var, width=14))
-        _add(advanced, r, "Eval episodes:", ttk.Spinbox(advanced, from_=1, to=100,
-             textvariable=self.n_eval_var, width=14))
+        # ---- Parameters (Basic | Advanced) ----
+        self.form = ConfigForm(parent)
+        self.form.grid(row=1, column=0, sticky="ew", pady=(0, 6))
 
         # ---- Checkboxes + buttons + progress bar ----
-        controls = ttk.Frame(parent)
+        controls = ttk.LabelFrame(parent, text="Run", padding=6)
         controls.grid(row=2, column=0, sticky="ew", pady=(0, 6))
         controls.columnconfigure(0, weight=1)
+        run_row = ttk.Frame(controls)
+        run_row.grid(row=0, column=0, sticky="ew")
+        ttk.Label(run_row, text="Run name:").pack(side="left")
+        self.run_name_var = tk.StringVar(value="")
+        # Pick an existing run (for resume) OR type a new name. Blank = 'default'.
+        self.run_name_combo = ttk.Combobox(run_row, textvariable=self.run_name_var, width=24)
+        self.run_name_combo.pack(side="left", padx=(6, 4))
+        self.run_name_combo.bind("<KeyRelease>", lambda e: self.refresh_models())
+        self.run_name_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_models())
+        ttk.Label(run_row, text="(blank = 'default'; pick an existing run to resume it)",
+                  foreground=MUTED).pack(side="left")
         self.resume_check = ttk.Checkbutton(
-            controls, text="Resume from newest checkpoint (uses selected run name)",
-            variable=self.resume_var)
-        self.resume_check.grid(row=0, column=0, sticky="w")
+            run_row, text="Resume from newest checkpoint", variable=self.resume_var)
+        self.resume_check.pack(side="left", padx=(18, 0))
         self.preview_check = ttk.Checkbutton(
-            controls, text="Show live preview on Play tab (slower training)",
+            controls, text="Show live preview on the Play tab while training (slower)",
             variable=self.preview_var)
-        self.preview_check.grid(row=1, column=0, sticky="w")
+        self.preview_check.grid(row=1, column=0, sticky="w", pady=(4, 0))
 
         btns = ttk.Frame(controls)
-        btns.grid(row=2, column=0, sticky="ew", pady=(4, 0))
+        btns.grid(row=2, column=0, sticky="ew", pady=(6, 0))
         self.btn_train_start = ttk.Button(btns, text="Start training", command=self.start_training)
         self.btn_train_start.pack(side="left", padx=(0, 4))
         self.btn_train_stop = ttk.Button(btns, text="Stop", command=self.stop_training,
@@ -326,22 +350,25 @@ class GameBoyAIGUI:
 
         stats = ttk.LabelFrame(monitor, text="Live stats", padding=8)
         stats.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
-        stats.columnconfigure(1, weight=1)
         self.stat_vars: dict[str, tk.StringVar] = {}
-        for i, (k, v) in enumerate([
-            ("status", "idle"), ("total_timesteps", "—"), ("ep_rew_mean", "—"),
-            ("ep_len_mean", "—"), ("fps", "—"), ("time_elapsed", "—"),
-            # Game state, fed by the preview thread when live preview is on
-            ("world", "—"), ("lives", "—"), ("coins", "—"), ("max_x", "—"),
-        ]):
-            self.stat_vars[k] = tk.StringVar(value=v)
-            ttk.Label(stats, text=f"{k}:").grid(row=i, column=0, sticky="w", padx=(0, 12))
-            ttk.Label(stats, textvariable=self.stat_vars[k], font=MONO_BOLD).grid(
-                row=i, column=1, sticky="w")
+        # Left column: trainer stats. Right column: game state, fed by the
+        # preview thread when live preview is on.
+        columns = [
+            [("status", "idle"), ("total_timesteps", "—"), ("ep_rew_mean", "—"),
+             ("ep_len_mean", "—"), ("fps", "—"), ("time_elapsed", "—")],
+            [("world", "—"), ("lives", "—"), ("coins", "—"), ("max_x", "—")],
+        ]
+        for col, items in enumerate(columns):
+            for row, (k, v) in enumerate(items):
+                self.stat_vars[k] = tk.StringVar(value=v)
+                ttk.Label(stats, text=f"{k}:").grid(row=row, column=col * 2, sticky="w",
+                                                    padx=(0 if col == 0 else 18, 8))
+                ttk.Label(stats, textvariable=self.stat_vars[k], font=MONO_BOLD, width=12,
+                          anchor="w").grid(row=row, column=col * 2 + 1, sticky="w")
 
         log_frame = ttk.LabelFrame(monitor, text="Training log", padding=4)
         log_frame.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
-        self.log_text = tk.Text(log_frame, height=8, wrap="none", font=MONO,
+        self.log_text = tk.Text(log_frame, height=6, wrap="none", font=MONO,
                                 background="#111", foreground="#ddd", insertbackground="#ddd")
         self.log_text.pack(side="left", fill="both", expand=True)
         yscroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
@@ -559,21 +586,12 @@ class GameBoyAIGUI:
 
         res_frame = ttk.LabelFrame(parent, text="Results (best first)", padding=4)
         res_frame.grid(row=4, column=0, sticky="nsew")
-        res_frame.columnconfigure(0, weight=1)
-        res_frame.rowconfigure(0, weight=1)
-        cols = ("rank", "config", "score", "ep_len", "steps", "time", "runs")
-        self.tune_tree = ttk.Treeview(res_frame, columns=cols, show="headings", height=8)
-        for c, text, w, anc in [("rank", "#", 36, "e"), ("config", "config (overrides)", 300, "w"),
-                                ("score", "score", 110, "e"), ("ep_len", "ep len", 60, "e"),
-                                ("steps", "steps", 80, "e"), ("time", "time", 60, "e"),
-                                ("runs", "runs", 200, "w")]:
-            self.tune_tree.heading(c, text=text)
-            self.tune_tree.column(c, width=w, anchor=anc, stretch=(c in ("config", "runs")))
-        self.tune_tree.tag_configure("best", font=("Menlo", 10, "bold"))
-        self.tune_tree.grid(row=0, column=0, sticky="nsew")
-        tune_scroll = ttk.Scrollbar(res_frame, command=self.tune_tree.yview)
-        tune_scroll.grid(row=0, column=1, sticky="ns")
-        self.tune_tree.config(yscrollcommand=tune_scroll.set)
+        self.tune_tree = make_table(res_frame, [
+            ("rank", "#", 36, "e", False), ("config", "config (overrides)", 300, "w", True),
+            ("score", "score", 110, "e", False), ("ep_len", "ep len", 60, "e", False),
+            ("steps", "steps", 80, "e", False), ("time", "time", 60, "e", False),
+            ("runs", "runs", 200, "w", True),
+        ], height=8)
 
         actions = ttk.Frame(parent)
         actions.grid(row=5, column=0, sticky="ew", pady=(6, 0))
@@ -664,6 +682,10 @@ class GameBoyAIGUI:
         if self.training_active():
             messagebox.showwarning("Tune", "Training is currently running. Stop training first.")
             return False
+        ok, why = self.game_runnable()
+        if not ok:
+            messagebox.showerror("Tune", why)
+            return False
         plan, err = self.tune_plan()
         if err:
             messagebox.showerror("Tune", f"Cannot start: {err}")
@@ -739,7 +761,7 @@ class GameBoyAIGUI:
         base, combos = plan["base"], plan["combos"]
         trial_steps, n_seeds = plan["trial_steps"], plan["n_seeds"]
         prefix, metric = plan["prefix"], plan["metric"]
-        game = base.get("game", GAME)
+        game = base.get("game", self.game)
         eval_freq = max(1000, trial_steps // plan["evals_per_trial"])
         total = len(combos) * n_seeds
         done_trials = 0
@@ -819,7 +841,7 @@ class GameBoyAIGUI:
                 values=(rank, r.label or "(base config)", r.score_text(),
                         f"{r.ep_len:.0f}" if r.values else "—",
                         f"{r.timesteps:,}", tuning.format_duration(r.duration), run_txt),
-                tags=("best",) if rank == 1 and r.values else (),
+                tags=("best",) if rank == 1 and r.values else (() if r.values else ("muted",)),
             )
 
     def _selected_tune_result(self) -> tuning.ConfigResult | None:
@@ -831,7 +853,7 @@ class GameBoyAIGUI:
 
     def _tune_load_results(self) -> None:
         """Reload a saved sweep (models/<game>/_tune/<prefix>.json)."""
-        initial = PROJECT_DIR / "models" / GAME / "_tune"
+        initial = PROJECT_DIR / "models" / self.game / "_tune"
         path = filedialog.askopenfilename(
             title="Load tuning results", parent=self.root,
             initialdir=str(initial if initial.exists() else PROJECT_DIR),
@@ -877,7 +899,7 @@ class GameBoyAIGUI:
 
     def refresh_presets(self) -> None:
         self._all_presets = presets.load_all()
-        names = presets.sorted_names(self._all_presets, GAME)
+        names = presets.sorted_names(self._all_presets, self.game)
         self.tune_preset_combo["values"] = names
         if self.tune_preset_var.get() not in names and names:
             self.tune_preset_var.set(names[0])
@@ -890,35 +912,18 @@ class GameBoyAIGUI:
             self.apply_preset()
         if self.wizard is not None:
             self.wizard.on_presets_changed(names)
+        if self.presets_tab is not None:
+            self.presets_tab.refresh()
         self.tune_update_summary()
 
     def presets_by_name(self) -> dict[str, dict]:
         return dict(self._all_presets)
 
-    def _train_var_map(self) -> dict[str, tk.Variable]:
-        """Preset field -> Train-tab variable (everything except `game`)."""
-        return {
-            "timesteps": self.tsteps_var, "n_envs": self.n_envs_var,
-            "ent_coef": self.ent_coef_var, "learning_rate": self.lr_var,
-            "n_steps": self.nsteps_var, "batch_size": self.batch_var,
-            "n_epochs": self.n_epochs_var, "gamma": self.gamma_var,
-            "gae_lambda": self.gae_lambda_var, "clip_range": self.clip_range_var,
-            "device": self.device_var, "obs_type": self.obs_type_var,
-            "start_level": self.start_level_var, "action_repeat": self.action_repeat_var,
-            "frame_stack": self.frame_stack_var, "seed": self.seed_var,
-            "checkpoint_freq": self.ckpt_freq_var, "eval_freq": self.eval_freq_var,
-            "n_eval_episodes": self.n_eval_var,
-        }
-
     def load_config_into_train(self, cfg: dict) -> None:
         """Populate the Train tab (and the Play tab's obs / level / input
         shape) from a preset-style dict. Optional fields missing from `cfg`
         fall back to PRESET_DEFAULTS so applying a preset is deterministic."""
-        for key, var in self._train_var_map().items():
-            if key in cfg:
-                var.set(cfg[key])
-            elif key in presets.PRESET_DEFAULTS:
-                var.set(presets.PRESET_DEFAULTS[key])
+        self.form.set_config(cfg)
         self.sync_play_options(cfg)
         self.refresh_models()
 
@@ -939,16 +944,9 @@ class GameBoyAIGUI:
             self.load_config_into_train(cfg)
 
     def current_config(self) -> dict:
-        """Train-tab values as a preset dict. Raises tk.TclError / ValueError
-        if a field holds text that is not a number."""
-        ints = {"timesteps", "n_envs", "n_steps", "batch_size", "n_epochs", "action_repeat",
-                "frame_stack", "seed", "checkpoint_freq", "eval_freq", "n_eval_episodes"}
-        floats = {"ent_coef", "learning_rate", "gamma", "gae_lambda", "clip_range"}
-        cfg: dict = {"game": GAME}
-        for key, var in self._train_var_map().items():
-            val = var.get()
-            cfg[key] = int(val) if key in ints else float(val) if key in floats else str(val)
-        return cfg
+        """Train-tab values as a preset dict. Raises ValueError naming the
+        field if a value is not a number."""
+        return {"game": self.game, **self.form.get_config()}
 
     def save_preset_named(self, name: str, cfg: dict, *, confirm_overwrite: bool = True) -> bool:
         """Persist `cfg` as user preset `name` and select it on the Train tab."""
@@ -970,36 +968,19 @@ class GameBoyAIGUI:
     def _save_preset(self) -> None:
         try:
             cfg = self.current_config()
-        except (tk.TclError, ValueError) as e:
+        except ValueError as e:
             messagebox.showerror("Save preset", f"A training field has an invalid value:\n{e}")
             return
         name = simpledialog.askstring("Save preset", "Preset name:", parent=self.root)
         self.save_preset_named((name or "").strip(), cfg)
 
-    def _delete_preset(self) -> None:
-        name = self.preset_var.get()
-        if not name:
-            return
-        if presets.is_builtin(name):
-            messagebox.showinfo("Delete preset", f"'{name}' is a built-in preset and cannot be deleted.")
-            return
-        if not messagebox.askyesno("Delete preset", f"Delete preset '{name}'?"):
-            return
-        try:
-            presets.delete(name)
-        except (ValueError, OSError) as e:
-            messagebox.showerror("Delete preset", str(e))
-            return
-        self.preset_var.set("")
-        self.refresh_presets()
-
     # ---------- Runs & models ----------
 
     def refresh_run_names(self) -> None:
-        self.run_name_combo["values"] = runs.list_runs(GAME)
+        self.run_name_combo["values"] = runs.list_runs(self.game)
 
     def refresh_models(self) -> None:
-        self._model_paths = dict(runs.list_models(GAME))
+        self._model_paths = dict(runs.list_models(self.game))
         labels = list(self._model_paths)
         prev = self.model_var.get()
         self.model_combo["values"] = labels
@@ -1026,14 +1007,14 @@ class GameBoyAIGUI:
         if self.tuning_active():
             messagebox.showwarning("Training", "Tuning is currently running. Stop it first.")
             return False
+        ok, why = self.game_runnable()
+        if not ok:
+            messagebox.showerror("Training", why)
+            return False
         try:
             cfg = self.current_config()
-        except (tk.TclError, ValueError) as e:
+        except ValueError as e:
             messagebox.showerror("Training", f"A training field has an invalid value:\n{e}")
-            return False
-        rom = PROJECT_DIR / "ROMs" / GAMES[GAME].rom_file
-        if not rom.exists():
-            messagebox.showerror("Training", f"ROM not found:\n{rom}\n\nSee README → Install.")
             return False
         # Playback would compete for CPU and for the shared canvas.
         if self.playing_active():
@@ -1051,6 +1032,7 @@ class GameBoyAIGUI:
             messagebox.showerror("Training", f"Could not start the trainer:\n{e}")
             return False
         self._train_stop_requested = False
+        self._train_run_name = run_name
         self.btn_train_start.config(state="disabled")
         self.btn_train_stop.config(state="normal")
         self.btn_tune_start.config(state="disabled")
@@ -1068,7 +1050,7 @@ class GameBoyAIGUI:
         threading.Thread(target=self._read_train_stdout, daemon=True).start()
 
         if self.preview_var.get():
-            self._start_preview(GAME, run_name, cfg)
+            self._start_preview(self.game, run_name, cfg)
         return True
 
     def _read_train_stdout(self) -> None:
@@ -1118,6 +1100,10 @@ class GameBoyAIGUI:
             messagebox.showwarning(
                 "Play", "Training or tuning is running. Stop it first, or wait for it to finish.")
             return False
+        ok, why = self.game_runnable()
+        if not ok:
+            messagebox.showerror("Play", why)
+            return False
         label = self.model_var.get()
         if not label:
             self.refresh_models()
@@ -1125,8 +1111,9 @@ class GameBoyAIGUI:
         if not label:
             messagebox.showerror(
                 "Play",
-                f"No trained model found for '{GAME}'. Train first, or place a .zip at\n"
-                f"models/{GAME}/<run>/logs/best_model.zip or models/{GAME}/<run>/checkpoints/final.zip")
+                f"No trained model found for '{self.game}'. Train first, or place a .zip at\n"
+                f"models/{self.game}/<run>/logs/best_model.zip or "
+                f"models/{self.game}/<run>/checkpoints/final.zip")
             return False
         model_path = self._model_paths.get(label)
         if model_path is None or not model_path.exists():
@@ -1149,7 +1136,7 @@ class GameBoyAIGUI:
         for v in self.play_stat_vars.values():
             v.set("—")
         self.play_thread = self.player.play(
-            model_path=model_path, game=GAME, obs_type=self.play_obs_type_var.get(),
+            model_path=model_path, game=self.game, obs_type=self.play_obs_type_var.get(),
             action_repeat=action_repeat, frame_stack=frame_stack,
             start_level=None if raw_level == "default" else raw_level,
             episodes=episodes, max_steps=max_steps,
@@ -1185,14 +1172,35 @@ class GameBoyAIGUI:
             for canvas, img_id in self._canvases:
                 canvas.itemconfig(img_id, image=self._tk_img)
 
+        self._update_status_bar()
         try:
             self.root.after(33, self._pump)
         except tk.TclError:
             pass
 
+    def _update_status_bar(self) -> None:
+        if self.training_active():
+            text = (f"Training '{self._train_run_name}' · {self.train_progress_text.get()} steps · "
+                    f"{self.stat_vars['fps'].get()} fps · ep_rew_mean {self.stat_vars['ep_rew_mean'].get()}")
+        elif self.tuning_active():
+            text = f"Tuning · {self.tune_progress_text.get()} trials · {self.tune_live_var.get()}"
+        elif self.playing_active():
+            text = f"Playing · {self.play_status_var.get()}"
+        else:
+            text = "Idle"
+        if self.status_bar_var.get() != text:
+            self.status_bar_var.set(text)
+
     def _handle_event(self, item: tuple) -> None:
         kind = item[0]
-        if kind == "log":
+        if kind == "rom_probed":
+            _, name, title, wrapper, error = item
+            info = self.roms.get(name)
+            if info is not None:
+                info.probed, info.title, info.has_wrapper, info.error = True, title, wrapper, error
+                if name == self.game:
+                    self._update_game_status()
+        elif kind == "log":
             self.append_log(item[1])
         elif kind == "stat":
             _, key, val = item
@@ -1237,10 +1245,9 @@ class GameBoyAIGUI:
             self.append_log(f"[tune] {item[1]}\n")
         elif kind == "tune_done":
             _, text, cancelled = item
-            self.btn_tune_start.config(state="normal")
             self.btn_tune_stop.config(state="disabled")
-            self.btn_train_start.config(state="normal")
             self.set_inputs_disabled(False)
+            self._update_start_buttons()
             self.tune_proc = None
             self.tune_live_var.set(text)
             self.append_log(f"[tune] {text}\n")
@@ -1274,11 +1281,10 @@ class GameBoyAIGUI:
             status = f"failed (rc={rc}) — see log"
             self.train_progress_text.set("failed")
         self.stat_vars["status"].set(status)
-        self.btn_train_start.config(state="normal")
         self.btn_train_stop.config(state="disabled")
-        self.btn_tune_start.config(state="normal")
         self.set_inputs_disabled(False)
         self.train_proc = None
+        self._update_start_buttons()
         self.preview_stop.set()
         self.refresh_models()       # new checkpoints may have arrived
         self.refresh_run_names()    # a new run dir may have appeared
@@ -1286,9 +1292,8 @@ class GameBoyAIGUI:
             self.wizard.on_train_done(rc, self._train_stop_requested)
 
     def _play_finished(self) -> None:
-        if not self.busy():
-            self.btn_play_start.config(state="normal")
         self.btn_play_stop.config(state="disabled")
+        self._update_start_buttons()
 
     def set_inputs_disabled(self, disabled: bool) -> None:
         """Lock every input on every tab while training or tuning runs, so a
@@ -1300,9 +1305,9 @@ class GameBoyAIGUI:
             return "readonly" if isinstance(w, ttk.Combobox) else "normal"
 
         widgets: list[tk.Widget] = [
-            *self._train_config_widgets,
-            self.preset_combo, self.btn_preset_save, self.btn_preset_delete,
-            self.btn_preset_reload, self.resume_check, self.preview_check,
+            self.game_combo, self.btn_rescan,
+            self.preset_combo, self.btn_preset_save, self.run_name_combo,
+            self.resume_check, self.preview_check,
             *self._play_widgets,
             *self._tune_config_widgets,
             self.btn_tune_save_preset, self.btn_tune_to_train, self.btn_tune_load,
@@ -1312,8 +1317,11 @@ class GameBoyAIGUI:
                 w.config(state=_state_for(w))
             except tk.TclError:
                 pass
+        self.form.set_enabled(not disabled)
         if self.wizard is not None:
             self.wizard.set_inputs_disabled(disabled)
+        if self.presets_tab is not None:
+            self.presets_tab.set_inputs_disabled(disabled)
 
     def open_tensorboard(self) -> None:
         """Serve models/<game>/ (every run, incl. tune trials) and open a browser tab."""
@@ -1321,7 +1329,7 @@ class GameBoyAIGUI:
         if self.tb_proc is not None and self.tb_proc.poll() is None:
             webbrowser.open(url)
             return
-        logdir = PROJECT_DIR / "models" / GAME
+        logdir = PROJECT_DIR / "models" / self.game
         exe = shutil.which("tensorboard")
         cmd = [exe] if exe else [sys.executable, "-m", "tensorboard.main"]
         cmd += ["--logdir", str(logdir), "--port", str(TENSORBOARD_PORT)]

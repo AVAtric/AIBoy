@@ -18,6 +18,8 @@ Wizard:  1 Tune  →  2 Preset  →  3 Train  →  4 Watch
   the full log, TensorBoard, resume, and an optional live preview.
 - **Play** — play any saved model at 0.5× to unlimited speed, deterministic
   or stochastic, in any level mode.
+- **Presets** — browse, duplicate, edit, rename and delete training presets;
+  send one to the Train tab or the wizard.
 - **CLI** — `train` and `play` sub-commands for scripts and remote machines.
 
 Only Super Mario Land is supported in this version; see [Roadmap](#roadmap).
@@ -70,6 +72,23 @@ The window opens on the **Wizard** tab.
 Everything the wizard does is visible on the expert tabs: the sweep on
 **Tune**, the log on **Train**, the model selection on **Play**.
 
+### Choosing a game
+
+The **Game** selector at the top lists every `.gb` / `.gbc` file in `ROMs/`.
+Each ROM is booted once in the background to check whether PyBoy can run it,
+and the label next to the selector shows the result:
+
+- **green** — supported: Super Mario Land with the custom environment,
+  presets and level modes. Everything works.
+- **amber** — experimental: PyBoy has a game wrapper (e.g. Kirby's Dream
+  Land) but this version has no environment, presets or level modes for it.
+  It can only be tried from the CLI with pixel observations.
+- **red** — cannot run: no PyBoy game wrapper for the cartridge, an unknown
+  or corrupt file, or a `mario.gb` that is not the expected cartridge.
+
+Start buttons are disabled unless the selected game is supported. Runs,
+models and presets are listed per game. **Rescan ROMs** re-reads the folder.
+
 ### How long does it take?
 
 Rough numbers on an Apple M1 Max with tile observations and 10 parallel
@@ -121,10 +140,12 @@ tab** promote a row.
 ### Train tab
 
 Pick a **preset** or edit the fields directly (**Basic** and **Advanced**),
-type a **run name** in the top bar (blank = `default`), **Start training**.
-The trainer runs as a subprocess so the window stays responsive; its
-`ep_rew_mean`, `ep_len_mean`, `fps`, `time_elapsed` and progress bar update
-live and the raw log scrolls on the right.
+type a **run name** in the *Run* section (blank = `default`; pick an existing
+run from the dropdown to resume it), **Start training**. The trainer runs as
+a subprocess so the window stays responsive; its `ep_rew_mean`,
+`ep_len_mean`, `fps`, `time_elapsed` and progress bar update live and the
+raw log scrolls on the right. The status bar at the bottom of the window
+always shows what is running.
 
 - **Resume from newest checkpoint** continues the selected run. The saved
   model's architecture, `n_steps` and `batch_size` are kept; `ent_coef`,
@@ -136,8 +157,8 @@ live and the raw log scrolls on the right.
   evaluation reward so far) is always kept.
 - **TensorBoard** serves `models/mario/` (every run, including tune trials)
   on port 6006 and opens the browser.
-- **Save as…** / **Delete** manage user presets in `training_presets.json`;
-  built-ins live in `builtin_presets.json` and can be hand-edited.
+- **Save as…** stores the current fields as a user preset; **Manage…** opens
+  the Presets tab.
 
 While training or tuning runs, every input on every tab is locked so a run
 cannot be edited mid-flight and two CPU-hungry sessions cannot collide.
@@ -151,6 +172,16 @@ run. Options: episodes, max steps (0 = unlimited), speed (`0.5×` … `4×`,
 must match training and are filled in automatically when you apply a preset
 or arrive from the wizard. The live panel shows episode, reward, world,
 position, lives, coins and the chosen action.
+
+### Presets tab
+
+Every preset in one table (built-in or user, level mode, steps, envs, obs)
+with the selected one shown in the same Basic / Advanced form as the Train
+tab. Built-ins are read-only: **Duplicate…** makes an editable user copy.
+User presets can be edited and saved, renamed and deleted. **New from Train
+tab…** captures the Train tab's current fields, **Load into Train tab** and
+**Use in Wizard** send a preset onward. User presets are stored in
+`training_presets.json`, built-ins in `builtin_presets.json` (hand-editable).
 
 ---
 
@@ -287,8 +318,10 @@ models/mario/
 
 ```
 main.py               CLI entry point: gui | train | play
-gui.py                Tkinter app: Tune, Train, Play tabs, event pump
+gui.py                Tkinter app: Tune, Train, Play tabs, status bar, event pump
 wizard.py             Wizard tab (guided Tune → Preset → Train → Watch)
+presets_tab.py        Presets tab (browse / edit / organise presets)
+widgets.py            Shared Tk pieces: parameter form (ConfigForm), uniform tables
 player.py             Embedded playback / live preview engine (background thread)
 env.py                MarioEnv, level modes, save-state bootstrap, VecEnv wrapping
 runs.py               Run directories, model discovery, trainer command line
@@ -312,6 +345,8 @@ through the wizard with 4 000 steps per candidate.
 ## Troubleshooting
 
 - **`ROM not found: ROMs/mario.gb`** — place your ROM there (see Install).
+- **Game shows red or amber** — only Super Mario Land is supported in this
+  version; see Roadmap. Check that `mario.gb` is the original cartridge.
 - **Training plateaus** — raise `ent_coef` to 0.02–0.05, sweep
   `ent_coef × learning_rate` on the Tune tab, or switch to `pixels`.
 - **Slow training** — keep `obs_type=tiles`, `device=cpu`, and `n_envs`

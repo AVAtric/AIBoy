@@ -193,9 +193,99 @@ class GameSpec:
 GAMES = {
     "mario": GameSpec("mario.gb", "SUPER MARIOLAN", supported=True),
     "kirby": GameSpec("kirby.gb", "KIRBY DREAM LA"),
-    "wario": GameSpec("wario.gb", "WARIO"),
+    "wario": GameSpec("wario.gb", "SUPERMARIOLAND"),   # Super Mario Land 3: Wario Land
 }
 SUPPORTED_GAMES = tuple(name for name, spec in GAMES.items() if spec.supported)
+ROM_SUFFIXES = (".gb", ".gbc")
+
+
+@dataclass
+class RomInfo:
+    """A ROM file in the ROM folder plus what we know about running it.
+
+    `title` / `has_wrapper` / `error` are filled in by `probe_rom`; until
+    then `probed` is False and the status is "checking".
+    """
+    name: str                       # file stem, e.g. "mario"; also the --game value
+    path: Path
+    probed: bool = False
+    title: str | None = None        # cartridge title reported by PyBoy
+    has_wrapper: bool | None = None # PyBoy ships a game wrapper for this cartridge
+    error: str | None = None        # boot failure, if any
+
+    @property
+    def spec(self) -> GameSpec | None:
+        return GAMES.get(self.name)
+
+    def status(self) -> tuple[str, str]:
+        """(level, text) where level is one of
+        "ok"            fully supported (custom env, presets, level modes)
+        "experimental"  PyBoy has a wrapper; generic pixel env, CLI only
+        "unsupported"   cannot run (no wrapper, unknown cartridge, boot error)
+        "checking"      probe still running
+        """
+        if self.error:
+            return "unsupported", f"cannot boot ROM: {self.error}"
+        spec = self.spec
+        if spec is not None and spec.supported:
+            if self.probed and self.title != spec.cartridge_title:
+                return "unsupported", (f"expected cartridge '{spec.cartridge_title}' "
+                                       f"but the ROM reports '{self.title}'")
+            return "ok", f"{self.title or spec.cartridge_title} — supported"
+        if not self.probed:
+            return "checking", "checking whether PyBoy can run this ROM…"
+        if self.has_wrapper:
+            return "experimental", (f"{self.title} — PyBoy game wrapper only; no custom "
+                                    f"environment, presets or level modes in this version "
+                                    f"(CLI: --game {self.name}, pixels)")
+        return "unsupported", f"{self.title} — no PyBoy game wrapper; cannot be trained or played"
+
+    @property
+    def runnable(self) -> bool:
+        return self.status()[0] == "ok"
+
+
+def discover_roms(rom_dir: str | Path = ROM_DIR) -> list[RomInfo]:
+    """Every .gb / .gbc file in the ROM folder, known games first."""
+    rom_dir = Path(rom_dir)
+    if not rom_dir.exists():
+        return []
+    files = [p for p in rom_dir.iterdir() if p.is_file() and p.suffix.lower() in ROM_SUFFIXES]
+    order = {name: i for i, name in enumerate(GAMES)}
+    files.sort(key=lambda p: (order.get(p.stem, len(order)), p.stem.lower()))
+    return [RomInfo(name=p.stem, path=p) for p in files]
+
+
+def probe_rom(rom_path: str | Path, timeout_sec: int = 30) -> tuple[str | None, bool, str | None]:
+    """Boot a ROM headless in a subprocess and report
+    (cartridge_title, has_game_wrapper, error). Isolated so a ROM PyBoy
+    cannot handle can neither hang nor crash the caller."""
+    import json
+    import subprocess
+    import sys as _sys
+    code = (
+        "import json, sys;"
+        "from pyboy import PyBoy;"
+        f"p = PyBoy({str(Path(rom_path).resolve())!r}, window_type='null', "
+        "game_wrapper=True, disable_renderer=True);"
+        "print(json.dumps({'title': p.cartridge_title(), "
+        "'wrapper': p.game_wrapper() is not None}));"
+        "p.stop(save=False)"
+    )
+    try:
+        out = subprocess.run([_sys.executable, "-c", code], timeout=timeout_sec,
+                             capture_output=True, text=True)
+    except subprocess.TimeoutExpired:
+        return None, False, "PyBoy did not start within the time limit"
+    if out.returncode != 0:
+        last = (out.stderr.strip().splitlines() or ["unknown error"])[-1]
+        return None, False, last[:200]
+    try:
+        line = [l for l in out.stdout.splitlines() if l.startswith("{")][-1]
+        data = json.loads(line)
+    except (IndexError, json.JSONDecodeError):
+        return None, False, "unexpected output from PyBoy"
+    return str(data.get("title", "")).strip(), bool(data.get("wrapper")), None
 
 
 class ActionRepeat(gym.Wrapper):

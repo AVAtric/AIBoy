@@ -44,6 +44,20 @@ class PresetTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             presets.delete(presets.RECOMMENDED_PRESET)
 
+    def test_rename_rules(self):
+        presets.upsert("a", {"game": "mario"})
+        presets.upsert("b", {"game": "mario"})
+        presets.rename("a", "c")
+        self.assertEqual(set(presets.load_user()), {"b", "c"})
+        with self.assertRaises(ValueError):
+            presets.rename("c", "b")                              # collision
+        with self.assertRaises(ValueError):
+            presets.rename("missing", "x")
+        with self.assertRaises(ValueError):
+            presets.rename(presets.RECOMMENDED_PRESET, "x")       # built-in
+        with self.assertRaises(ValueError):
+            presets.rename("c", presets.RECOMMENDED_PRESET)
+
     def test_sorted_names_puts_recommended_first(self):
         all_presets = dict(presets.BUILTIN_PRESETS)
         all_presets["zzz user"] = {"game": "mario"}
