@@ -154,20 +154,18 @@ def cmd_train(args: argparse.Namespace) -> None:
     if args.game == "mario" and start_level is not None:
         rom = Path("ROMs") / "mario.gb"
         if start_level in ("random", "sequential", "marathon"):
-            targets = SML_ALL_LEVELS
+            targets = list(SML_ALL_LEVELS)
         else:
             targets = [tuple(int(x) for x in start_level.split("-"))]
-        needed = [(w, l) for (w, l) in targets
-                  if not (Path("models") / "mario" / "_level_states" / f"{w}-{l}.state").exists()]
-        if needed:
-            print(f"[train] bootstrapping save-states for {len(needed)} level(s): "
-                  f"{[f'{w}-{l}' for w, l in needed]}...")
-            ok = ensure_level_states(rom, needed)
-            failed = [t for t in needed if t not in ok]
-            if failed:
-                print(f"[train] warning: could not bootstrap {failed} — falling back to old path")
-            else:
-                print(f"[train] all requested level states cached")
+        # Idempotent: levels whose state file already exists are skipped.
+        ok = ensure_level_states(rom, targets)
+        failed = [t for t in targets if t not in ok]
+        if failed:
+            print(f"[train] warning: could not bootstrap save-states for "
+                  f"{[f'{w}-{l}' for w, l in failed]} — those levels fall back to "
+                  f"set_world_level + start_game (slower)")
+        else:
+            print(f"[train] save-states ready for {len(ok)} level(s)")
     env = build_vec_env(args.game, args.n_envs, args.seed,
                         args.action_repeat, args.frame_stack, args.obs_type,
                         start_level=start_level)

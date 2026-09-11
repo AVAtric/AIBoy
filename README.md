@@ -7,10 +7,10 @@ learning algorithm.
 
 Supported games (require a PyBoy game-wrapper):
 
-| Name    | ROM file   | Cartridge title  | Notes                                                    |
-|---------|------------|------------------|----------------------------------------------------------|
-| `mario` | `mario.gb` | `SUPER MARIOLAN` | Custom shaped-reward MarioEnv                            |
-| `kirby` | `kirby.gb` | `KIRBY DREAM LA` | PyBoy's default openai_gym                               |
+| Name    | ROM file   | Cartridge title  | Notes                                               |
+|---------|------------|------------------|-----------------------------------------------------|
+| `mario` | `mario.gb` | `SUPER MARIOLAN` | Custom shaped-reward MarioEnv                       |
+| `kirby` | `kirby.gb` | `KIRBY DREAM LA` | PyBoy's default openai_gym                          |
 | `wario` | `wario.gb` | `WARIO`          | ⚠ No PyBoy game_wrapper — unsupported for training/play |
 
 Super Mario Land uses a custom `MarioEnv` with:
@@ -48,9 +48,18 @@ Super Mario Land uses a custom `MarioEnv` with:
 | `marathon`   | Any death (or clearing the last level) | Speedrunning all 10 usable levels.        |
 | `W-L`        | Any death or clear                     | Drilling one specific level.              |
 
-`marathon` mode **skips the in-game level-end cutscene**: the instant Mario
-touches the flagpole, the next level's save-state is force-loaded, so no
-training steps are wasted on the ~15 s victory sequence.
+**Instant event detection.** `MarioEnv` reads Super Mario Land's game-state
+byte (`0xFFB3`) every step, so a level clear is credited the step Mario
+touches the goal and a death the step he dies — not ~70 / ~20 steps later
+when PyBoy's `world` tuple or life counter catch up. Episodes that end on
+a clear or a death (`random`, `sequential`, `W-L`, `marathon`) therefore end
+immediately; campaign mode ends on the last-life death instead of sitting
+through the game-over screen. `marathon` additionally **skips the level-end
+cutscene entirely**: on the goal-touch step the next level's save-state is
+force-loaded, so Mario is standing in the next level on the very next step.
+The state values were mapped empirically (clear `0x07→0x05→0x06`, death
+`0x04→0x01`, pit death `0x01`, game over `0x3A`); PyBoy's own lives / world
+readings remain as fallback detectors.
 
 Levels 2-3 and 4-3 cannot be booted through PyBoy's SML wrapper (upstream
 bug); every mode that iterates levels transparently skips them.
@@ -112,9 +121,10 @@ speed). When enabled, a preview thread loads the newest `best_model.zip`
 as it's saved and plays it in the Play-tab canvas — you watch the agent
 improve during training. A **progress bar** shows `total_timesteps`.
 
-While a training run is active, every config widget on the Train tab and
-every input on the Play tab is disabled to prevent mid-run edits and
-double-CPU contention.
+While a training or tuning run is active, every input widget on all three
+tabs is disabled (and the other tab's Start button is locked) to prevent
+mid-run edits and two CPU-hungry sessions colliding. Invalid field values
+are reported in a dialog instead of silently failing.
 
 ### `train` flags
 

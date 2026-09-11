@@ -41,6 +41,40 @@ LEVEL_CHOICES = (["default", "random", "sequential", "marathon"]
                  + [f"{w}-{l}" for (w, l) in SML_ALL_LEVELS])
 
 
+def build_train_cmd(cfg: dict, run_name: str, *, resume: bool = False,
+                    timesteps: int | None = None, checkpoint_freq: int | None = None,
+                    eval_freq: int | None = None) -> list[str]:
+    """`main.py train` argv for a preset-style config dict (see
+    presets.PRESET_FIELDS). Shared by the Train tab and the Tune tab so
+    both launch training with exactly the same flag set."""
+    cmd = [
+        sys.executable, "-u", "main.py", "train",
+        "--game", str(cfg.get("game", "mario")),
+        "--n-envs", str(cfg["n_envs"]),
+        "--timesteps", str(timesteps if timesteps is not None else cfg["timesteps"]),
+        "--ent-coef", str(cfg["ent_coef"]),
+        "--learning-rate", str(cfg["learning_rate"]),
+        "--n-steps", str(cfg["n_steps"]),
+        "--batch-size", str(cfg["batch_size"]),
+        "--obs-type", str(cfg.get("obs_type", "tiles")),
+        "--start-level", str(cfg.get("start_level", "default")),
+        "--device", str(cfg.get("device", "cpu")),
+        "--action-repeat", str(cfg.get("action_repeat", 4)),
+        "--frame-stack", str(cfg.get("frame_stack", 4)),
+        "--n-epochs", str(cfg.get("n_epochs", 4)),
+        "--seed", str(cfg.get("seed", 0)),
+        "--checkpoint-freq", str(checkpoint_freq if checkpoint_freq is not None
+                                 else cfg.get("checkpoint_freq", 25_000)),
+        "--eval-freq", str(eval_freq if eval_freq is not None
+                           else cfg.get("eval_freq", 10_000)),
+        "--n-eval-episodes", str(cfg.get("n_eval_episodes", 3)),
+        "--run-name", run_name,
+    ]
+    if resume:
+        cmd.append("--resume")
+    return cmd
+
+
 class GameBoyAIGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -571,6 +605,12 @@ class GameBoyAIGUI:
             messagebox.showerror("Tune", "Pick a base preset first.")
             return
         base = dict(self._all_presets[preset_name])
+        try:
+            trial_steps = int(self.tune_trial_steps_var.get())
+            n_random = max(1, int(self.tune_n_random_var.get()))
+        except (tk.TclError, ValueError) as e:
+            messagebox.showerror("Tune", f"Invalid trial-steps / N-trials value:\n{e}")
+            return
 
         # Parse sweep JSON
         try:
@@ -590,9 +630,8 @@ class GameBoyAIGUI:
             combos = list(product(*(sweep[k] for k in keys)))
         else:  # random
             import random as _random
-            n = max(1, int(self.tune_n_random_var.get()))
             rng = _random.Random()
-            combos = [tuple(rng.choice(sweep[k]) for k in keys) for _ in range(n)]
+            combos = [tuple(rng.choice(sweep[k]) for k in keys) for _ in range(n_random)]
         if not combos:
             messagebox.showerror("Tune", "Sweep produced 0 configs.")
             return
@@ -613,8 +652,7 @@ class GameBoyAIGUI:
 
         self.tune_thread = threading.Thread(
             target=self._tuning_loop,
-            args=(base, keys, combos,
-                  int(self.tune_trial_steps_var.get()),
+            args=(base, keys, combos, trial_steps,
                   self.tune_run_prefix_var.get().strip() or "tune",
                   self.tune_metric_var.get()),
             daemon=True,
@@ -652,28 +690,9 @@ class GameBoyAIGUI:
             cfg_summary = ", ".join(f"{k}={overrides[k]}" for k in keys)
             self.stats_queue.put(("tune_progress", i, len(combos),
                                    f"trial {i + 1}/{len(combos)}: {cfg_summary}"))
-            # Build subprocess cmd
-            cmd = [
-                sys.executable, "-u", "main.py", "train",
-                "--game", game,
-                "--n-envs", str(cfg["n_envs"]),
-                "--timesteps", str(trial_steps),
-                "--ent-coef", str(cfg["ent_coef"]),
-                "--learning-rate", str(cfg["learning_rate"]),
-                "--n-steps", str(cfg["n_steps"]),
-                "--batch-size", str(cfg["batch_size"]),
-                "--obs-type", cfg["obs_type"],
-                "--start-level", cfg.get("start_level", "default"),
-                "--device", cfg.get("device", "cpu"),
-                "--action-repeat", str(cfg.get("action_repeat", 4)),
-                "--frame-stack", str(cfg.get("frame_stack", 4)),
-                "--n-epochs", str(cfg.get("n_epochs", 4)),
-                "--seed", str(cfg.get("seed", 0)),
-                "--checkpoint-freq", str(max(trial_steps, 1)),  # only save at end
-                "--eval-freq", str(best_eval_freq),
-                "--n-eval-episodes", str(cfg.get("n_eval_episodes", 3)),
-                "--run-name", run_name,
-            ]
+            cmd = build_train_cmd(cfg, run_name, timesteps=trial_steps,
+                                  checkpoint_freq=max(trial_steps, 1),  # only save at end
+                                  eval_freq=best_eval_freq)
             t0 = time.time()
             try:
                 self.tune_proc = subprocess.Popen(
@@ -799,6 +818,7 @@ class GameBoyAIGUI:
         for key, var in var_map.items():
             if key in cfg:
                 var.set(cfg[key])
+        self._refresh_run_names()
         # Clear the Train-tab preset selection to signal "custom config"
         self.preset_var.set("")
         # Play tab should track the same obs/level for a smooth handoff
@@ -881,8 +901,9 @@ class GameBoyAIGUI:
         cfg = self._all_presets.get(name)
         if cfg is None:
             return
-        if "game" in cfg and cfg["game"] in GAMES:
+        if "game" in cfg and cfg["game"] in GAMES and cfg["game"] != self.game_var.get():
             self.game_var.set(cfg["game"])
+            self._refresh_run_names()
         var_map = {
             "timesteps": self.tsteps_var,
             "n_envs": self.n_envs_var,
@@ -997,31 +1018,14 @@ class GameBoyAIGUI:
         # the shared canvas.
         if self.play_thread is not None and self.play_thread.is_alive():
             self.play_stop.set()
-        game = self.game_var.get()
+        try:
+            cfg = self._current_config()
+        except (tk.TclError, ValueError) as e:
+            messagebox.showerror("Training", f"A training field has an invalid value:\n{e}")
+            return
+        game = cfg["game"]
         run_name = self.run_name_var.get().strip() or "default"
-        cmd = [
-            sys.executable, "-u", "main.py", "train",
-            "--game", game,
-            "--n-envs", str(self.n_envs_var.get()),
-            "--timesteps", str(self.tsteps_var.get()),
-            "--ent-coef", str(self.ent_coef_var.get()),
-            "--learning-rate", str(self.lr_var.get()),
-            "--n-steps", str(self.nsteps_var.get()),
-            "--batch-size", str(self.batch_var.get()),
-            "--obs-type", self.obs_type_var.get(),
-            "--start-level", self.start_level_var.get(),
-            "--device", self.device_var.get(),
-            "--action-repeat", str(self.action_repeat_var.get()),
-            "--frame-stack", str(self.frame_stack_var.get()),
-            "--n-epochs", str(self.n_epochs_var.get()),
-            "--seed", str(self.seed_var.get()),
-            "--checkpoint-freq", str(self.ckpt_freq_var.get()),
-            "--eval-freq", str(self.eval_freq_var.get()),
-            "--n-eval-episodes", str(self.n_eval_var.get()),
-            "--run-name", run_name,
-        ]
-        if self.resume_var.get():
-            cmd.append("--resume")
+        cmd = build_train_cmd(cfg, run_name, resume=bool(self.resume_var.get()))
 
         self._append_log(f"$ {' '.join(cmd)}\n")
         self.train_proc = subprocess.Popen(
@@ -1035,10 +1039,10 @@ class GameBoyAIGUI:
         self.btn_tune_start.config(state="disabled")
         self._set_subprocess_widgets_disabled(True)
         self.stat_labels["status"].config(text="running")
-        self._train_target_steps = max(1, int(self.tsteps_var.get()))
+        self._train_target_steps = max(1, cfg["timesteps"])
         # Baseline = model's prior step count. First observed total_timesteps
         # will be (baseline + rollout_size), so we subtract rollout_size to find it.
-        self._train_rollout_size = max(1, int(self.nsteps_var.get()) * int(self.n_envs_var.get()))
+        self._train_rollout_size = max(1, cfg["n_steps"] * cfg["n_envs"])
         self._train_baseline_steps = None
         self.train_progress["value"] = 0
         self.train_progress_label.config(text=f"0 / {self._train_target_steps:,}")

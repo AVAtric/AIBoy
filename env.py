@@ -27,6 +27,27 @@ SML_ALL_LEVELS = tuple(
     if (w, l) not in SML_BROKEN_LEVELS
 )
 
+# SML's game-state byte (mapped empirically by logging RAM transitions
+# across clears / enemy deaths / pit deaths / game over on several levels):
+#   0x00  playing
+#   0x07 → 0x05 → 0x06  level-clear sequence: goal touched, walk-off,
+#                       bonus-timer countdown (~70 env-steps at frame_skip 4
+#                       before PyBoy's `world` tuple finally flips)
+#   0x04 → 0x01  dying animation → waiting for respawn (pit deaths jump
+#                straight to 0x01; 0x03 sometimes precedes 0x04 for one step)
+#   0x02 / 0x08  next level / respawn loading (transient)
+#   0x3A  game-over screen (PyBoy's game_over() checks 0xC0A4 == 0x39)
+# Reading it lets the env credit a clear or a death the step it happens
+# instead of ~20-70 steps later — a large training-throughput win since
+# every step in a cutscene / death animation is a wasted sample.
+# Not yet observed (no trained agent enters pipes): whether a pipe
+# transition uses one of the death values. The life-counter fallback
+# would not fire in that case, so a pipe entry would end a fixed/random
+# episode as a "death". If that ever shows up, narrow SML_DEATH_STATES.
+ADDR_GAME_STATE = 0xFFB3
+SML_CLEAR_STATES = frozenset({0x05, 0x06, 0x07})
+SML_DEATH_STATES = frozenset({0x01, 0x04})
+
 # Where per-level save-state files live. Gitignored via models/.
 LEVEL_STATES_DIR = Path("models") / "mario" / "_level_states"
 
@@ -213,7 +234,11 @@ class MarioEnv(gym.Env):
         Clearing the last usable level ends the episode with a big bonus.
 
     Rewards fire in every mode: +completion_bonus on level clear,
-    -death_penalty on death (whether or not the episode ends).
+    -death_penalty on death (whether or not the episode ends). Both events
+    are detected the step they happen via SML's game-state byte
+    (ADDR_GAME_STATE) rather than ~20-70 steps later when PyBoy's life
+    counter / world tuple catch up, so episodes that end on a clear or a
+    death end immediately and no samples are spent inside cutscenes.
     """
 
     metadata = {"render_modes": []}
@@ -300,7 +325,7 @@ class MarioEnv(gym.Env):
         #                     the same level (fresh lives via state reload).
         #   "marathon"     → single-attempt speedrun through every usable
         #                     level. On level clear we force-load the next
-        #                     level's state IMMEDIATELY (skipping the ~15 s
+        #                     level's state IMMEDIATELY (skipping the ~5 s
         #                     in-game victory cutscene). ANY death ends the
         #                     episode. Clearing the last level ends the
         #                     episode with a large bonus.
@@ -318,11 +343,15 @@ class MarioEnv(gym.Env):
         # a world change (level clear), consumed by the next `reset()`.
         self._sequential_idx = 0
         self._sequential_advance_pending = False
-        # Marathon ("marathon") mode: count of level clears within the
-        # current episode. When it hits len(SML_ALL_LEVELS) the episode
-        # ends with a big bonus. On game_over we reload the CURRENT level's
-        # state so Mario gets fresh lives without restarting at 1-1.
+        # Marathon mode: count of level clears within the current episode.
+        # When it hits len(SML_ALL_LEVELS) the episode ends with a big bonus.
         self._marathon_clears = 0
+        # Event bookkeeping for the instant clear / death detection (see
+        # ADDR_GAME_STATE). A clear or death is credited once, the step the
+        # game-state byte flips; the later world-flip / life-counter-drop
+        # then must not credit it again.
+        self._clear_credited = False
+        self._death_credited = False
         self._jump_actions = frozenset(i for i, evts in enumerate(self.ACTIONS)
                                         if WindowEvent.PRESS_BUTTON_A in evts)
 
@@ -444,6 +473,8 @@ class MarioEnv(gym.Env):
         self._last_score = self.gw.score
         self._last_coins = self.gw.coins
         self._stuck = 0
+        self._clear_credited = False
+        self._death_credited = False
         return self._obs(), {}
 
     def step(self, action: int):
@@ -467,9 +498,31 @@ class MarioEnv(gym.Env):
         score = self.gw.score
         coins = self.gw.coins
         is_game_over = self.gw.game_over()
+        game_state = self.pyboy.get_memory_value(ADDR_GAME_STATE)
 
-        died = lives < self._last_lives
-        level_cleared = world != self._last_world
+        # Level clear: credited the step Mario touches the goal (game-state
+        # 0x07), ~70 steps before PyBoy's `world` flips. The world flip is
+        # kept as a fallback detector and, in campaign mode, marks the
+        # moment the next level actually starts.
+        world_changed = world != self._last_world
+        clear_now = game_state in SML_CLEAR_STATES and not self._clear_credited
+        if clear_now:
+            self._clear_credited = True
+        level_cleared = clear_now or (world_changed and not self._clear_credited)
+        if world_changed:
+            self._clear_credited = False
+
+        # Death: credited the step Mario dies (game-state 0x04 / 0x01), ~20
+        # steps before the life counter drops at respawn. The life-counter
+        # drop is the fallback detector for any death type whose state
+        # value isn't mapped.
+        lives_dropped = lives < self._last_lives
+        death_now = game_state in SML_DEATH_STATES and not self._death_credited
+        if death_now:
+            self._death_credited = True
+        died = death_now or (lives_dropped and not self._death_credited)
+        if lives_dropped:
+            self._death_credited = False
 
         reward = 0.0
         if level_cleared:
@@ -505,11 +558,10 @@ class MarioEnv(gym.Env):
 
         # Marathon mode: single-attempt speedrun through every usable level.
         # ANY death ends the episode. On level clear we do NOT wait for
-        # the in-game level-end cutscene (Mario walks off screen, bonus
-        # countdown, intro screen — ~10-15 seconds of emulator time that
-        # burn training steps for zero learning signal). Instead we
-        # force-load the next level's save-state directly, so the moment
-        # Mario touches the flagpole he's in the next level.
+        # the in-game level-end cutscene (walk-off + bonus countdown, ~70
+        # env-steps that burn training samples for zero learning signal).
+        # `level_cleared` fires the step the goal is touched, and we
+        # force-load the next level's save-state right there.
         if self.start_level == "marathon" and level_cleared:
             self._marathon_clears += 1
             if self._marathon_clears >= len(SML_ALL_LEVELS):
@@ -526,6 +578,7 @@ class MarioEnv(gym.Env):
                     "x": x, "max_x": x, "lives": lives,
                     "world": world, "coins": coins, "score": score,
                     "stuck": 0, "game_over": is_game_over,
+                    "game_state": game_state, "died": died, "level_cleared": True,
                     "marathon_done": True,
                     "marathon_clears": self._marathon_clears,
                 }
@@ -540,6 +593,7 @@ class MarioEnv(gym.Env):
                     "lives": self._last_lives, "world": self._last_world,
                     "coins": self._last_coins, "score": self._last_score,
                     "stuck": self._stuck, "game_over": False,
+                    "game_state": 0, "died": False, "level_cleared": True,
                     "marathon_clears": self._marathon_clears,
                     "marathon_skipped_to": next_target,
                 }
@@ -552,18 +606,25 @@ class MarioEnv(gym.Env):
                 "x": x, "max_x": self._max_x, "lives": lives,
                 "world": world, "coins": coins, "score": score,
                 "stuck": self._stuck, "game_over": is_game_over,
+                "game_state": game_state, "died": died, "level_cleared": True,
                 "marathon_clears": self._marathon_clears,
                 "marathon_missing_state": next_target,
             }
 
         # Termination logic depends on mode
         if self._campaign_mode:
-            # Play through: only game_over ends the episode. Death and level
-            # clear are transitions within the same episode. Reset the max_x
-            # tracker after each transition so the agent can earn progress
-            # reward on the new attempt / new level.
-            terminated = is_game_over
-            if died or level_cleared:
+            # Play through: death and level clear are transitions within the
+            # same episode. Only game over ends it — and a death on the
+            # last life IS game over, so end right there instead of sitting
+            # through the death animation + game-over screen (~50 steps).
+            # (`death_now`, not `died`: on the fallback path `lives` has
+            # already dropped, so 0 there means "now on the last life".)
+            terminated = is_game_over or (death_now and lives == 0)
+            # Reset per-attempt trackers when the new attempt actually
+            # begins: respawn (life counter drops) or next level loaded
+            # (world flips). Not at the instant-detection step — Mario is
+            # still standing at the death spot / goal for a few steps.
+            if lives_dropped or world_changed:
                 self._max_x = x
                 self._stuck = 0
         elif self.start_level == "marathon":
@@ -587,6 +648,7 @@ class MarioEnv(gym.Env):
             "x": x, "max_x": self._max_x, "lives": lives,
             "world": world, "coins": coins, "score": score,
             "stuck": self._stuck, "game_over": is_game_over,
+            "game_state": game_state, "died": died, "level_cleared": level_cleared,
         }
         self._last_x = x
         self._last_lives = lives
@@ -621,6 +683,8 @@ class MarioEnv(gym.Env):
         self._last_score = self.gw.score
         self._last_coins = self.gw.coins
         self._stuck = 0
+        self._clear_credited = False
+        self._death_credited = False
         return True
 
     def close(self):
