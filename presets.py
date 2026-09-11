@@ -1,6 +1,6 @@
 """Training presets: built-in defaults + user-saved JSON.
 
-A preset is a dict of training-tab field values.
+A preset is a dict of training-tab field values (see PRESET_FIELDS).
 
 Storage:
   - `builtin_presets.json`  — canonical source for built-in presets. Bundled
@@ -24,10 +24,18 @@ PRESETS_FILE = _HERE / "training_presets.json"
 # Fields a preset can set. Keep in sync with gui.py's training-tab StringVars.
 PRESET_FIELDS = (
     "game", "timesteps", "n_envs", "ent_coef", "learning_rate",
-    "n_steps", "batch_size", "device", "obs_type", "start_level",
-    "action_repeat", "frame_stack", "n_epochs",
+    "n_steps", "batch_size", "n_epochs", "gamma", "gae_lambda", "clip_range",
+    "device", "obs_type", "start_level", "action_repeat", "frame_stack",
     "seed", "checkpoint_freq", "eval_freq", "n_eval_episodes",
 )
+
+# Optional fields: presets that omit them (all shipped ones) get these,
+# so `cfg.get(k, PRESET_DEFAULTS[k])` is the canonical read.
+PRESET_DEFAULTS: dict[str, float] = {
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+}
 
 # All timings estimated on Apple Silicon (M1 Max) at ~2500-3000 fps with
 # tile obs (default n_envs=10, batch_size=128, torch.set_num_threads(1)).
@@ -298,27 +306,10 @@ _HARDCODED_BUILTINS: dict[str, dict] = {
         "n_eval_episodes": 3,
         "device": "cpu",
     },
-    # ---- Other games ----
-    "Kirby — Default pixels (~1 h for 500k)": {
-        "game": "kirby",
-        "obs_type": "pixels",
-        "start_level": "default",
-        "timesteps": 500_000,
-        "n_envs": 4,
-        "ent_coef": 0.01,
-        "learning_rate": 2.5e-4,
-        "n_steps": 256,
-        "batch_size": 64,
-        "n_epochs": 4,
-        "action_repeat": 4,
-        "frame_stack": 4,
-        "seed": 0,
-        "checkpoint_freq": 25_000,
-        "eval_freq": 10_000,
-        "n_eval_episodes": 3,
-        "device": "cpu",
-    },
 }
+
+RECOMMENDED_PRESET = "Mario — Campaign, recommended (~15 min)"
+SMOKE_TEST_PRESET = "Mario — Quick smoke test (30 s)"
 
 
 def _load_builtin_from_file() -> dict[str, dict] | None:
@@ -394,7 +385,7 @@ def upsert(name: str, config: dict) -> None:
     if name in BUILTIN_PRESETS:
         raise ValueError(f"'{name}' is a built-in preset; pick a different name.")
     user = load_user()
-    user[name] = {k: v for k, v in config.items() if k in PRESET_FIELDS}
+    user[name] = normalize(config)
     save_user(user)
 
 
@@ -409,3 +400,24 @@ def delete(name: str) -> None:
 
 def is_builtin(name: str) -> bool:
     return name in BUILTIN_PRESETS
+
+
+def is_user(name: str) -> bool:
+    return name in load_user()
+
+
+def sorted_names(all_presets: dict[str, dict], game: str | None = None) -> list[str]:
+    """Preset names in display order: the recommended one first, then the
+    other built-ins, then user presets, each group alphabetical. `game`
+    restricts the list to presets for that game."""
+    names = [n for n, cfg in all_presets.items()
+             if game is None or cfg.get("game", "mario") == game]
+    return sorted(names, key=lambda n: (n != RECOMMENDED_PRESET, not is_builtin(n), n.lower()))
+
+
+def normalize(cfg: dict) -> dict:
+    """Preset fields only, with PRESET_DEFAULTS filled in for missing optionals."""
+    out = {k: v for k, v in cfg.items() if k in PRESET_FIELDS}
+    for k, v in PRESET_DEFAULTS.items():
+        out.setdefault(k, v)
+    return out

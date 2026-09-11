@@ -1,10 +1,16 @@
 """Train or play a Game Boy AI agent (PPO + PyBoy).
 
 Usage:
-    python main.py gui                                                 # open Tkinter GUI
-    python main.py train --game mario --n-envs 8 --timesteps 500000    # train headless
-    python main.py play  --game mario --episodes 3                     # play in SDL2 window
+    python main.py                                                     # GUI (wizard opens first)
+    python main.py gui                                                 # same
+    python main.py train --game mario --n-envs 10 --timesteps 500000   # train headless
+    python main.py play  --game mario --episodes 3                     # watch in an SDL2 window
+
+All paths (ROMs/, models/) are relative to the project directory, which
+`main()` makes the working directory so the commands work from anywhere.
 """
+from __future__ import annotations
+
 import argparse
 import os
 import sys
@@ -14,30 +20,15 @@ from pathlib import Path
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import (
-    DummyVecEnv,
-    SubprocVecEnv,
-    VecFrameStack,
-    VecTransposeImage,
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+
+from env import (
+    GAMES, SUPPORTED_GAMES, env_factory, level_choices, make_pyboy_env,
+    prepare_level_states, wrap_vec_env,
 )
+from runs import latest_checkpoint, resolve_model_path, run_paths
 
-from env import GAMES, SML_ALL_LEVELS, env_factory, ensure_level_states, make_pyboy_env
-
-
-MODELS_ROOT = Path("models")
-
-
-# ------------------------- paths -------------------------
-
-def run_paths(game: str, run_name: str) -> dict[str, Path]:
-    """models/<game>/<run>/{checkpoints,logs,tensorboard}/"""
-    base = MODELS_ROOT / game / run_name
-    return {
-        "base": base,
-        "checkpoints": base / "checkpoints",
-        "logs": base / "logs",
-        "tensorboard": base / "tensorboard",
-    }
+PROJECT_DIR = Path(__file__).resolve().parent
 
 
 # ------------------------- vec-env plumbing -------------------------
@@ -46,14 +37,7 @@ def build_vec_env(game, n_envs, seed, action_repeat, frame_stack, obs_type, star
     fns = [partial(env_factory, game, seed + i, "null", action_repeat, obs_type, start_level)
            for i in range(n_envs)]
     vec = SubprocVecEnv(fns, start_method="spawn") if n_envs > 1 else DummyVecEnv(fns)
-    if obs_type == "pixels":
-        vec = VecTransposeImage(vec)
-    if frame_stack > 1:
-        # For pixels (transposed to CHW) use channels_order="first"
-        # For tiles (float32 HWC), use "last" to stack along channel dim
-        order = "first" if obs_type == "pixels" else "last"
-        vec = VecFrameStack(vec, n_stack=frame_stack, channels_order=order)
-    return vec
+    return wrap_vec_env(vec, obs_type, frame_stack)
 
 
 def build_play_env(game, action_repeat, frame_stack, emulation_speed, obs_type, start_level=None):
@@ -65,74 +49,43 @@ def build_play_env(game, action_repeat, frame_stack, emulation_speed, obs_type, 
         )
         return Monitor(env)
 
-    vec = DummyVecEnv([_init])
-    if obs_type == "pixels":
-        vec = VecTransposeImage(vec)
-    if frame_stack > 1:
-        order = "first" if obs_type == "pixels" else "last"
-        vec = VecFrameStack(vec, n_stack=frame_stack, channels_order=order)
-    return vec
-
-
-# ------------------------- helpers -------------------------
-
-def latest_checkpoint(ckpt_dir: Path) -> Path | None:
-    if not ckpt_dir.exists():
-        return None
-    ckpts = sorted(ckpt_dir.glob("*.zip"), key=os.path.getmtime)
-    return ckpts[-1] if ckpts else None
-
-
-def resolve_model_path(model_arg: str | None, game: str, run_name: str) -> Path:
-    if model_arg:
-        p = Path(model_arg)
-        if not p.exists():
-            raise FileNotFoundError(f"Model not found: {p}")
-        return p
-    paths = run_paths(game, run_name)
-    candidates = [
-        paths["logs"] / "best_model.zip",
-        paths["checkpoints"] / "final.zip",
-    ]
-    if paths["checkpoints"].exists():
-        ckpts = sorted(paths["checkpoints"].glob("ppo_*.zip"))
-        if ckpts:
-            candidates.append(ckpts[-1])
-    for c in candidates:
-        if c.exists():
-            return c
-    raise FileNotFoundError(
-        f"No trained model for game='{game}' run='{run_name}'. "
-        f"Looked in: {[str(c) for c in candidates]}"
-    )
+    return wrap_vec_env(DummyVecEnv([_init]), obs_type, frame_stack)
 
 
 def pick_policy(obs_type: str) -> tuple[str, dict]:
-    """Return (policy_name, policy_kwargs) for the given observation type."""
+    """(policy_name, policy_kwargs) for the observation type."""
     if obs_type == "pixels":
         return "CnnPolicy", {}
-    # Tiles → MLP, small state so a moderately-sized net is enough
+    # Tiles: 16x20 grid, so a moderately sized MLP is plenty.
     return "MlpPolicy", dict(net_arch=dict(pi=[256, 256], vf=[256, 256]))
 
 
-# ------------------------- train -------------------------
-
 def _tune_torch_threads(obs_type: str, device: str) -> None:
-    """For tile-obs training the policy is a tiny MLP (1280 → 256 → 256 → 11).
-    PyTorch's default multithreading has more overhead than compute for a
-    network this small AND its threads compete for CPU cores with the
-    SubprocVecEnv workers. Setting it to 1 thread gives ~15% more fps in
-    practice. For pixel obs (larger CnnPolicy) we keep the default.
-    """
-    if device != "cpu":
-        return  # GPU/MPS compute doesn't touch CPU threads
-    if obs_type == "tiles":
-        try:
-            import torch
-            torch.set_num_threads(1)
-        except ImportError:
-            pass
+    """Tile-obs training uses a tiny MLP (1280 -> 256 -> 256 -> 11). PyTorch's
+    default multithreading costs more than it gains for a network this
+    small AND its threads compete with the SubprocVecEnv workers for cores.
+    One thread gives ~15% more fps in practice. Pixel obs (CnnPolicy) keeps
+    the default."""
+    if device == "cpu" and obs_type == "tiles":
+        import torch
+        torch.set_num_threads(1)
 
+
+def _eval_start_level(start_level: str | None) -> str | None:
+    """Level mode for the evaluation env.
+
+    A fixed level is mirrored so the eval reward is per-level. Every other
+    mode evaluates on the campaign: the reward stays comparable between
+    evals and a campaign episode always terminates (game over or stuck
+    timeout), whereas a random / sequential / marathon eval episode could
+    run for a very long time and stall `evaluate_policy`.
+    """
+    if start_level is not None and "-" in start_level:
+        return start_level
+    return None
+
+
+# ------------------------- train -------------------------
 
 def cmd_train(args: argparse.Namespace) -> None:
     _tune_torch_threads(args.obs_type, args.device)
@@ -144,46 +97,30 @@ def cmd_train(args: argparse.Namespace) -> None:
     print(f"[train] game={args.game} run={run_name} obs_type={args.obs_type}")
     print(f"[train] n_envs={args.n_envs} device={args.device}")
     print(f"[train] ent_coef={args.ent_coef} n_steps={args.n_steps} "
-          f"batch={args.batch_size} lr={args.learning_rate}")
+          f"batch={args.batch_size} lr={args.learning_rate} n_epochs={args.n_epochs} "
+          f"gamma={args.gamma} gae_lambda={args.gae_lambda} clip_range={args.clip_range}")
     print(f"[train] writing to {paths['base']}")
+    rollout = args.n_steps * args.n_envs
+    if rollout % args.batch_size:
+        print(f"[train] note: rollout size n_steps*n_envs={rollout} is not a multiple of "
+              f"batch_size={args.batch_size}; the last minibatch of every epoch is smaller")
 
     start_level = args.start_level if args.start_level != "default" else None
-    # Pre-bootstrap per-level save-states so SubprocVecEnv workers just load
-    # them (instant, race-free) instead of each running set_world_level +
-    # start_game, which is fragile and can hang.
-    if args.game == "mario" and start_level is not None:
-        rom = Path("ROMs") / "mario.gb"
-        if start_level in ("random", "sequential", "marathon"):
-            targets = list(SML_ALL_LEVELS)
-        else:
-            targets = [tuple(int(x) for x in start_level.split("-"))]
-        # Idempotent: levels whose state file already exists are skipped.
-        ok = ensure_level_states(rom, targets)
-        failed = [t for t in targets if t not in ok]
+    if args.game == "mario":
+        # Save-states are created once here so the workers only load them.
+        failed = prepare_level_states(start_level)
         if failed:
             print(f"[train] warning: could not bootstrap save-states for "
-                  f"{[f'{w}-{l}' for w, l in failed]} — those levels fall back to "
+                  f"{[f'{w}-{l}' for w, l in failed]}; those levels fall back to "
                   f"set_world_level + start_game (slower)")
-        else:
-            print(f"[train] save-states ready for {len(ok)} level(s)")
+        elif start_level is not None:
+            print("[train] save-states ready")
     env = build_vec_env(args.game, args.n_envs, args.seed,
                         args.action_repeat, args.frame_stack, args.obs_type,
                         start_level=start_level)
-    # Eval env selection:
-    #  - Fixed level ("W-L"): mirror it for consistent per-level eval.
-    #  - Every other mode (default, random, sequential, marathon): use
-    #    campaign (None). Reasons: eval reward is comparable across evals,
-    #    and campaign guarantees the episode terminates on game_over —
-    #    unlike random/sequential/marathon where an eval episode could
-    #    run indefinitely and block `evaluate_policy` (was the source of
-    #    the "hangs at ~100k timesteps" bug in marathon mode).
-    if start_level is not None and isinstance(start_level, str) and "-" in start_level:
-        eval_start = start_level
-    else:
-        eval_start = None
     eval_env = build_vec_env(args.game, 1, args.seed + 10_000,
                              args.action_repeat, args.frame_stack, args.obs_type,
-                             start_level=eval_start)
+                             start_level=_eval_start_level(start_level))
 
     try:
         from torch.utils.tensorboard import SummaryWriter  # noqa: F401
@@ -195,12 +132,12 @@ def cmd_train(args: argparse.Namespace) -> None:
     resumed_from = latest_checkpoint(paths["checkpoints"]) if args.resume else None
     if args.resume and resumed_from is None:
         print(f"[train] --resume requested but no checkpoint found in "
-              f"{paths['checkpoints']} — starting fresh.")
+              f"{paths['checkpoints']}; starting fresh.")
     if resumed_from is not None:
         print(f"[train] resuming from {resumed_from}")
-        print(f"[train] WARNING: --resume loads the saved model's hyperparameters. "
-              f"Mutable overrides (ent_coef, learning_rate, n_epochs) will be applied, "
-              f"but architecture / n_steps / batch_size come from the saved model.")
+        print("[train] WARNING: --resume loads the saved model's hyperparameters. "
+              "Mutable overrides (ent_coef, learning_rate, n_epochs) are applied, "
+              "but architecture / n_steps / batch_size come from the saved model.")
         model = PPO.load(str(resumed_from), env=env, device=args.device, tensorboard_log=tb_log)
         model.ent_coef = args.ent_coef
         model.learning_rate = args.learning_rate
@@ -219,15 +156,16 @@ def cmd_train(args: argparse.Namespace) -> None:
             n_steps=args.n_steps,
             batch_size=args.batch_size,
             n_epochs=args.n_epochs,
-            gamma=0.99,
-            gae_lambda=0.95,
-            clip_range=0.2,
+            gamma=args.gamma,
+            gae_lambda=args.gae_lambda,
+            clip_range=args.clip_range,
             ent_coef=args.ent_coef,
             vf_coef=0.5,
             max_grad_norm=0.5,
             seed=args.seed,
         )
 
+    # SB3 counts callback frequency in vec-env steps; the flags are env steps.
     per_env = max(1, args.n_envs)
     checkpoint_cb = CheckpointCallback(
         save_freq=max(args.checkpoint_freq // per_env, 1),
@@ -267,12 +205,8 @@ def cmd_play(args: argparse.Namespace) -> None:
     print(f"[play] loading model from {model_path}")
 
     start_level = args.start_level if args.start_level != "default" else None
-    if args.game == "mario" and start_level is not None:
-        rom = Path("ROMs") / "mario.gb"
-        if start_level in ("random", "sequential", "marathon"):
-            ensure_level_states(rom)
-        else:
-            ensure_level_states(rom, [tuple(int(x) for x in start_level.split("-"))])
+    if args.game == "mario":
+        prepare_level_states(start_level)
     env = build_play_env(args.game, args.action_repeat, args.frame_stack,
                          args.emulation_speed, args.obs_type,
                          start_level=start_level)
@@ -301,14 +235,14 @@ def cmd_play(args: argparse.Namespace) -> None:
 # ------------------------- CLI -------------------------
 
 def _add_common(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--game", default="mario", choices=sorted(GAMES.keys()))
+    p.add_argument("--game", default="mario", choices=sorted(GAMES),
+                   help=f"Supported: {', '.join(SUPPORTED_GAMES)}. Other titles are "
+                        f"experimental (PyBoy's generic wrapper, pixels only, no level modes).")
     p.add_argument("--action-repeat", type=int, default=4, help="Frames each action is held")
     p.add_argument("--frame-stack", type=int, default=4, help="Consecutive frames stacked as obs")
     p.add_argument("--obs-type", default="tiles", choices=["pixels", "tiles"],
-                   help="tiles = 16×20 game_area (fast, MLP); pixels = 144×160×3 RGB (slow, CNN)")
-    level_choices = (["default", "random", "sequential", "marathon"]
-                     + [f"{w}-{l}" for (w, l) in SML_ALL_LEVELS])
-    p.add_argument("--start-level", default="default", choices=level_choices,
+                   help="tiles = 16x20 game_area (fast, MLP); pixels = 144x160x3 RGB (slow, CNN)")
+    p.add_argument("--start-level", default="default", choices=level_choices(),
                    help="Level mode: 'default' (campaign, respect lives), "
                         "'random' (new random level per episode), "
                         "'sequential' (advance level on clear, retry on death), "
@@ -343,8 +277,11 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--n-epochs", type=int, default=4)
     t.add_argument("--ent-coef", type=float, default=0.01,
                    help="Entropy coefficient (raise for more exploration)")
+    t.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
+    t.add_argument("--gae-lambda", type=float, default=0.95, help="GAE lambda")
+    t.add_argument("--clip-range", type=float, default=0.2, help="PPO clip range")
 
-    sub.add_parser("gui", help="Launch the Tkinter GUI (train + play in one window)")
+    sub.add_parser("gui", help="Launch the Tkinter GUI (wizard, tune, train and play)")
 
     p = sub.add_parser("play", help="Watch a trained agent in an SDL2 window")
     _add_common(p)
@@ -359,14 +296,15 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
-    # `python main.py` with no args opens the GUI (same as `python main.py gui`).
-    # Any subcommand is still parsed normally.
-    if len(sys.argv) == 1:
+def main(argv: list[str] | None = None) -> None:
+    os.chdir(PROJECT_DIR)
+    argv = sys.argv[1:] if argv is None else argv
+    # `python main.py` with no arguments opens the GUI.
+    if not argv:
         from gui import run as run_gui
         run_gui()
         return
-    args = build_parser().parse_args()
+    args = build_parser().parse_args(argv)
     if args.mode == "train":
         cmd_train(args)
     elif args.mode == "play":

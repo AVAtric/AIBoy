@@ -1,4 +1,6 @@
 """PyBoy gym environment factory for Game Boy AI training."""
+from __future__ import annotations
+
 import random as _random_mod
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,6 +10,9 @@ import numpy as np
 from gymnasium import spaces
 from pyboy import PyBoy, WindowEvent
 from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import VecEnv, VecFrameStack, VecTransposeImage
+
+ROM_DIR = Path("ROMs")
 
 
 # Super Mario Land has 4 worlds × 3 levels = 12 total levels. PyBoy's
@@ -50,6 +55,15 @@ SML_DEATH_STATES = frozenset({0x01, 0x04})
 
 # Where per-level save-state files live. Gitignored via models/.
 LEVEL_STATES_DIR = Path("models") / "mario" / "_level_states"
+
+# Level modes that are not a fixed "W-L" level (see MarioEnv docstring).
+LEVEL_MODES = ("default", "random", "sequential", "marathon")
+MULTI_LEVEL_MODES = ("random", "sequential", "marathon")
+
+
+def level_choices() -> list[str]:
+    """Every valid `--start-level` value: the four modes, then each usable level."""
+    return list(LEVEL_MODES) + [f"{w}-{l}" for (w, l) in SML_ALL_LEVELS]
 
 
 def _level_state_path(world: int, level: int) -> Path:
@@ -107,6 +121,31 @@ def ensure_level_states(rom_path: Path, targets=None) -> list[tuple[int, int]]:
     return ok
 
 
+def level_targets(start_level) -> list[tuple[int, int]]:
+    """Levels whose save-state a `start_level` spec needs. Empty for campaign."""
+    parsed = parse_start_level(start_level)
+    if parsed is None:
+        return []
+    if isinstance(parsed, tuple):
+        return [parsed]
+    return list(SML_ALL_LEVELS)
+
+
+def prepare_level_states(start_level, rom_path: Path | None = None) -> list[tuple[int, int]]:
+    """Bootstrap the save-states a `start_level` spec needs (idempotent).
+
+    Returns the levels that could NOT be prepared (empty on success). Call
+    it once in the parent process before spawning workers so they simply
+    load the files instead of each running the fragile `start_game` path.
+    """
+    targets = level_targets(start_level)
+    if not targets:
+        return []
+    rom = Path(rom_path) if rom_path is not None else ROM_DIR / GAMES["mario"].rom_file
+    ok = set(ensure_level_states(rom, targets))
+    return [t for t in targets if t not in ok]
+
+
 def parse_start_level(spec):
     """Parse a start_level spec into None, "random", "sequential",
     "marathon", or a (world, level) tuple.
@@ -145,13 +184,18 @@ def parse_start_level(spec):
 class GameSpec:
     rom_file: str
     cartridge_title: str
+    # Only Super Mario Land has a custom env, reward shaping and level
+    # modes. The other titles run through PyBoy's generic openai_gym
+    # wrapper (pixels only) and are experimental CLI-only extras.
+    supported: bool = False
 
 
 GAMES = {
-    "mario": GameSpec("mario.gb", "SUPER MARIOLAN"),
+    "mario": GameSpec("mario.gb", "SUPER MARIOLAN", supported=True),
     "kirby": GameSpec("kirby.gb", "KIRBY DREAM LA"),
     "wario": GameSpec("wario.gb", "WARIO"),
 }
+SUPPORTED_GAMES = tuple(name for name, spec in GAMES.items() if spec.supported)
 
 
 class ActionRepeat(gym.Wrapper):
@@ -243,6 +287,12 @@ class MarioEnv(gym.Env):
 
     metadata = {"render_modes": []}
 
+    ACTION_NAMES = (
+        "NOOP", "RIGHT", "LEFT", "JUMP",
+        "RIGHT+JUMP", "RIGHT+RUN", "RIGHT+RUN+JUMP",
+        "LEFT+JUMP", "LEFT+RUN", "LEFT+RUN+JUMP",
+        "DOWN",
+    )
     ACTIONS = (
         (),                                                                # 0 NOOP
         (WindowEvent.PRESS_ARROW_RIGHT,),                                  # 1 RIGHT
@@ -694,12 +744,28 @@ class MarioEnv(gym.Env):
             pass
 
 
+def wrap_vec_env(vec: VecEnv, obs_type: str, frame_stack: int) -> VecEnv:
+    """Apply the observation wrappers a policy trained on `obs_type` expects.
+
+    Pixels are transposed to channels-first for the CNN and stacked along
+    that axis; tile grids stay HWC and stack along the channel dimension.
+    Training, evaluation, CLI playback and the GUI all wrap through here so
+    a saved model always sees the observation shape it was trained on.
+    """
+    if obs_type == "pixels":
+        vec = VecTransposeImage(vec)
+    if frame_stack > 1:
+        order = "first" if obs_type == "pixels" else "last"
+        vec = VecFrameStack(vec, n_stack=frame_stack, channels_order=order)
+    return vec
+
+
 def make_pyboy_env(
     game: str = "mario",
     window_type: str = "null",
     action_repeat: int = 4,
     seed: int | None = None,
-    rom_dir: str | Path = "ROMs",
+    rom_dir: str | Path = ROM_DIR,
     emulation_speed: int | None = None,
     obs_type: str = "pixels",
     start_level=None,
@@ -713,7 +779,9 @@ def make_pyboy_env(
     spec = GAMES[game]
     rom_path = Path(rom_dir) / spec.rom_file
     if not rom_path.exists():
-        raise FileNotFoundError(f"ROM not found: {rom_path}")
+        raise FileNotFoundError(
+            f"ROM not found: {rom_path}. Place your legally obtained copy of the "
+            f"game at that path (see README → Install).")
 
     # Tile obs reads game_area(), so rendering can be disabled in null-window
     # mode for a small speedup. Pixel obs and the SDL2 window both require
