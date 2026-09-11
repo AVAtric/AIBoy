@@ -52,6 +52,22 @@ class LevelSpecTests(unittest.TestCase):
                 self.assertFalse(bad, f"{mod}.py imports {bad} at module level")
 
 
+class FormFieldTests(unittest.TestCase):
+    def test_form_fields_match_preset_fields(self):
+        import widgets
+        import presets
+        keys = {f.key for f in widgets.FIELDS}
+        self.assertEqual(keys, set(presets.PRESET_FIELDS) - {"game"})
+        for f in widgets.FIELDS:
+            default = presets.DEFAULT_CONFIG[f.key]
+            if f.kind == "choice":
+                self.assertIn(default, f.choices, f.key)
+            elif f.kind == "int":
+                self.assertIsInstance(default, int, f.key)
+            if f.kind in ("int", "float") and not f.entry:
+                self.assertTrue(f.lo <= default <= f.hi, f.key)
+
+
 class RomDiscoveryTests(unittest.TestCase):
     def test_discover_roms_orders_known_games_first(self):
         import tempfile

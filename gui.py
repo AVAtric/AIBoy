@@ -35,7 +35,7 @@ import presets
 import runs
 import tuning
 from games import RomInfo, discover_roms, level_choices, probe_rom
-from player import CANVAS_H, CANVAS_W, GAME_H, GAME_W, SCALE, SPEED_CHOICES, EmbeddedPlayer
+from player import CANVAS_H, CANVAS_W, GAME_H, GAME_W, SPEED_CHOICES, EmbeddedPlayer
 from presets_tab import PresetsTab
 from widgets import MONO, MONO_BOLD, MUTED, ConfigForm, make_table, setup_styles
 
@@ -82,8 +82,8 @@ class GameBoyAIGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title("Game Boy AI — Super Mario Land")
-        root.geometry("1240x840")
-        root.minsize(1180, 780)
+        root.geometry("1240x900")
+        root.minsize(1180, 820)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Cross-thread channels
@@ -109,7 +109,7 @@ class GameBoyAIGUI:
         self._model_paths: dict[str, Path] = {}
         self._all_presets: dict[str, dict] = {}
         self._tune_results: dict[int, tuning.ConfigResult] = {}
-        self._canvases: list[tuple[tk.Canvas, int]] = []
+        self._canvas_img_id: int | None = None
         self._tk_img: ImageTk.PhotoImage | None = None
         self._closing = False
         self._train_run_name = ""
@@ -269,14 +269,12 @@ class GameBoyAIGUI:
     def show_tab(self, tab: ttk.Frame) -> None:
         self.nb.select(tab)
 
-    def register_canvas(self, canvas: tk.Canvas) -> None:
-        """Every registered canvas shows the live emulator frame."""
+    def _init_canvas(self, canvas: tk.Canvas) -> None:
+        """Blank Game Boy frame until the first emulator frame arrives."""
         placeholder = np.full((GAME_H, GAME_W, 3), 34, dtype=np.uint8)
-        if self._tk_img is None:
-            self._tk_img = ImageTk.PhotoImage(
-                Image.fromarray(placeholder).resize((CANVAS_W, CANVAS_H), Image.NEAREST))
-        img_id = canvas.create_image(0, 0, anchor="nw", image=self._tk_img)
-        self._canvases.append((canvas, img_id))
+        self._tk_img = ImageTk.PhotoImage(
+            Image.fromarray(placeholder).resize((CANVAS_W, CANVAS_H), Image.NEAREST))
+        self._canvas_img_id = canvas.create_image(0, 0, anchor="nw", image=self._tk_img)
 
     # ---------- Train tab ----------
 
@@ -395,7 +393,7 @@ class GameBoyAIGUI:
         self.canvas = tk.Canvas(parent, width=CANVAS_W, height=CANVAS_H, bg="#222",
                                 highlightthickness=0)
         self.canvas.pack()
-        self.register_canvas(self.canvas)
+        self._init_canvas(self.canvas)
         self.play_status_var = tk.StringVar(value="idle")
         ttk.Label(parent, textvariable=self.play_status_var, font=MONO, wraplength=CANVAS_W).pack(
             fill="x", pady=(4, 2))
@@ -692,6 +690,7 @@ class GameBoyAIGUI:
                   else tuning.sample_random(sweep, n_random))
         return {
             "preset_name": preset_name, "base": dict(base), "sweep": sweep,
+            "game": str(base.get("game", self.game)),
             "search": search, "combos": combos, "trial_steps": trial_steps,
             "n_seeds": n_seeds, "evals_per_trial": evals,
             "prefix": self.tune_run_prefix_var.get().strip() or "tune",
@@ -806,7 +805,7 @@ class GameBoyAIGUI:
         base, combos = plan["base"], plan["combos"]
         trial_steps, n_seeds = plan["trial_steps"], plan["n_seeds"]
         prefix, metric = plan["prefix"], plan["metric"]
-        game = base.get("game", self.game)
+        game = plan["game"]          # resolved on the main thread; no Tk access here
         eval_freq = max(1000, trial_steps // plan["evals_per_trial"])
         total = len(combos) * n_seeds
         done_trials = 0
@@ -1038,8 +1037,14 @@ class GameBoyAIGUI:
         """Persist `cfg` as user preset `name` and select it on the Train tab."""
         if not name:
             return False
-        if confirm_overwrite and presets.is_user(name) and not messagebox.askyesno(
-                "Save preset", f"A preset named '{name}' already exists. Overwrite it?"):
+        if confirm_overwrite and presets.is_builtin(name) and not messagebox.askyesno(
+                "Save preset",
+                f"'{name}' is a built-in preset. Save your values as its new version?\n"
+                f"(The shipped values stay available via 'Reset to default' on the Presets tab.)"):
+            return False
+        if confirm_overwrite and not presets.is_builtin(name) and presets.is_user(name) \
+                and not messagebox.askyesno(
+                    "Save preset", f"A preset named '{name}' already exists. Overwrite it?"):
             return False
         try:
             presets.upsert(name, cfg)
@@ -1277,11 +1282,10 @@ class GameBoyAIGUI:
                 latest = self.frame_queue.get_nowait()
         except queue.Empty:
             pass
-        if latest is not None:
+        if latest is not None and self._canvas_img_id is not None:
             img = Image.fromarray(latest).resize((CANVAS_W, CANVAS_H), Image.NEAREST)
             self._tk_img = ImageTk.PhotoImage(img)
-            for canvas, img_id in self._canvases:
-                canvas.itemconfig(img_id, image=self._tk_img)
+            self.canvas.itemconfig(self._canvas_img_id, image=self._tk_img)
 
         self._update_status_bar()
         try:

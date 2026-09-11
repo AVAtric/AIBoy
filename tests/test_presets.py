@@ -73,6 +73,25 @@ class PresetTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             presets.rename("c", presets.RECOMMENDED_PRESET)
 
+    def test_normalize_completes_missing_fields(self):
+        cfg = presets.normalize({"game": "mario", "timesteps": 7, "junk": 1})
+        self.assertEqual(set(cfg), set(presets.PRESET_FIELDS))
+        self.assertEqual(cfg["timesteps"], 7)
+        self.assertEqual(cfg["n_envs"], presets.DEFAULT_CONFIG["n_envs"])
+        self.assertNotIn("junk", cfg)
+        self.assertEqual(set(presets.DEFAULT_CONFIG), set(presets.PRESET_FIELDS))
+        # load_all() delivers complete configs even for sparse user presets
+        presets.PRESETS_FILE.write_text('{"sparse": {"game": "mario"}}')
+        self.assertEqual(set(presets.load_all()["sparse"]), set(presets.PRESET_FIELDS))
+
+    def test_kind_accepts_preloaded_user_dict(self):
+        presets.upsert("u", {"game": "mario"})
+        user = presets.load_user()
+        self.assertEqual(presets.kind("u", user), "user")
+        self.assertEqual(presets.kind(presets.RECOMMENDED_PRESET, user), "built-in")
+        self.assertEqual(presets.kind(presets.RECOMMENDED_PRESET, {presets.RECOMMENDED_PRESET: {}}),
+                         "modified")
+
     def test_sorted_names_puts_recommended_first(self):
         all_presets = dict(presets.BUILTIN_PRESETS)
         all_presets["zzz user"] = {"game": "mario"}

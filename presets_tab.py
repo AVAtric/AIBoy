@@ -125,11 +125,12 @@ class PresetsTab:
         """Re-read presets and redraw the table, keeping the selection."""
         self._all = self.app.presets_by_name()
         names = presets.sorted_names(self._all, self.app.game)
+        user = presets.load_user()
         for row in self.tree.get_children():
             self.tree.delete(row)
         for name in names:
             cfg = self._all[name]
-            kind = presets.kind(name)
+            kind = presets.kind(name, user)
             self.tree.insert("", "end", iid=name, values=(
                 name, kind, mode_label(cfg), f"{int(cfg.get('timesteps', 0)):,}",
                 cfg.get("n_envs", "?"), cfg.get("obs_type", "tiles"),

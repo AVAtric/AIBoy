@@ -67,6 +67,11 @@ class RunDiscoveryTests(unittest.TestCase):
             model = runs.run_paths("mario", "r", root)["logs"] / "best_model.zip"
             self.assertEqual(runs.run_of_model(model), ("mario", "r"))
 
+    def test_build_train_cmd_accepts_sparse_normalized_preset(self):
+        import presets
+        cmd = runs.build_train_cmd(presets.normalize({"game": "mario"}), "r")
+        self.assertEqual(cmd[cmd.index("--n-envs") + 1], str(presets.DEFAULT_CONFIG["n_envs"]))
+
     def test_build_train_cmd(self):
         cfg = {"game": "mario", "n_envs": 2, "timesteps": 4000, "ent_coef": 0.01,
                "learning_rate": 2.5e-4, "n_steps": 128, "batch_size": 128}

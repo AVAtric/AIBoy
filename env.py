@@ -72,9 +72,14 @@ class MarioEnv(gym.Env):
                                                 re-covering ground gives 0,
                                                 so back-and-forth cannot farm)
         + coin_weight    * dcoins             (each coin picked up)
-        + score_weight    * dscore            (coins / enemies / items)
+        + score_weight    * dscore            (enemies / items / coins — SML
+                                                also adds 100 score per coin,
+                                                so a coin is worth
+                                                coin_weight + 100*score_weight)
         - time_penalty                        (small per-step cost — pressure
                                                 against noop / oscillation)
+      and, in any mode, +completion_bonus on level clear / -death_penalty on
+      death (that step carries no progress / coin / score / time terms).
 
     Five modes, decided by `start_level`:
       - None / "default" (CAMPAIGN): play through the game. Death does NOT

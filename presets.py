@@ -37,6 +37,29 @@ PRESET_DEFAULTS: dict[str, float] = {
     "clip_range": 0.2,
 }
 
+# A complete configuration. `normalize()` fills any field a preset lacks
+# from here, so hand-edited JSON with missing keys still loads and trains.
+DEFAULT_CONFIG: dict = {
+    "game": "mario",
+    "obs_type": "tiles",
+    "start_level": "default",
+    "timesteps": 2_000_000,
+    "n_envs": 10,
+    "ent_coef": 0.01,
+    "learning_rate": 2.5e-4,
+    "n_steps": 512,
+    "batch_size": 128,
+    "n_epochs": 4,
+    "action_repeat": 4,
+    "frame_stack": 4,
+    "seed": 0,
+    "checkpoint_freq": 100_000,
+    "eval_freq": 25_000,
+    "n_eval_episodes": 3,
+    "device": "cpu",
+    **PRESET_DEFAULTS,
+}
+
 # All timings estimated on Apple Silicon (M1 Max) at ~2500-3000 fps with
 # tile obs (default n_envs=10, batch_size=128, torch.set_num_threads(1)).
 # Pixel-obs runs are much slower (~40-70 fps).
@@ -355,13 +378,14 @@ BUILTIN_PRESETS: dict[str, dict] = _init_builtins()
 
 
 def load_all() -> dict[str, dict]:
-    """Return builtin + user presets. User overrides builtin on collision.
-    Built-ins are re-read from JSON on every call so hand-edits are picked up.
+    """Return builtin + user presets, each normalized to a complete config.
+    User overrides builtin on collision. Built-ins are re-read from JSON on
+    every call so hand-edits are picked up.
     """
     merged = dict(_init_builtins())
     for name, cfg in load_user().items():
         merged[name] = cfg
-    return merged
+    return {name: normalize(cfg) for name, cfg in merged.items()}
 
 
 def load_user() -> dict[str, dict]:
@@ -407,10 +431,15 @@ def reset(name: str) -> None:
         save_user(user)
 
 
-def kind(name: str) -> str:
-    """'built-in' | 'modified' (built-in with override) | 'user'."""
+def kind(name: str, user: dict | None = None) -> str:
+    """'built-in' | 'modified' (built-in with override) | 'user'.
+
+    Pass `user=load_user()` when classifying many names at once so the
+    file is read only once."""
+    if user is None:
+        user = load_user()
     if name in BUILTIN_PRESETS:
-        return "modified" if name in load_user() else "built-in"
+        return "modified" if name in user else "built-in"
     return "user"
 
 
@@ -458,8 +487,8 @@ def sorted_names(all_presets: dict[str, dict], game: str | None = None) -> list[
 
 
 def normalize(cfg: dict) -> dict:
-    """Preset fields only, with PRESET_DEFAULTS filled in for missing optionals."""
+    """Preset fields only, every field present (missing ones from DEFAULT_CONFIG)."""
     out = {k: v for k, v in cfg.items() if k in PRESET_FIELDS}
-    for k, v in PRESET_DEFAULTS.items():
+    for k, v in DEFAULT_CONFIG.items():
         out.setdefault(k, v)
     return out

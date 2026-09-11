@@ -32,7 +32,8 @@ Only Super Mario Land is supported in this version; see [Roadmap](#roadmap).
 
 ## Install
 
-Requirements: Python 3.10+, macOS / Linux / Windows, no GPU needed.
+Requirements: Python 3.10+, macOS / Linux / Windows, no GPU needed, a
+display of at least 1280 × 960 for the GUI (the window is 1240 × 900).
 
 ```bash
 git clone <this repo> gameboyEnv && cd gameboyEnv
@@ -275,9 +276,11 @@ the model was trained with.
   than pixels on CPU. `pixels`: the raw 144×160 RGB screen with a CNN.
 - **Shaped reward per step:**
   `3 × new forward distance` (only new territory counts, so backtracking
-  cannot farm) `+ 5 × coins` `+ 0.05 × score` `− 0.03` time penalty,
-  `− 500` on death, `+ 1000` on level clear (`+ 3000` for finishing a
-  marathon).
+  cannot farm) `+ 5 × coins collected` `+ 0.05 × score gained` (enemies,
+  items; the game also adds 100 score per coin, so a coin is worth 10 in
+  total) `− 0.03` per step. A death gives `− 500` and a level clear
+  `+ 1000` (`+ 3000` more for finishing a marathon); those steps carry no
+  other terms.
 - **Instant event detection.** The game-state byte at `0xFFB3` credits a
   clear the step Mario touches the goal and a death the step he dies,
   instead of 20–70 steps later when PyBoy's counters catch up. Episodes that
@@ -325,7 +328,7 @@ models/mario/
     ├── logs/best_model.zip             best evaluation reward
     ├── logs/evaluations.npz            eval history
     ├── tensorboard/                    TensorBoard events
-    ├── run.json                        training settings (Play tab reads it)
+    ├── run.json                        training settings (the screen panel reads it)
     └── trial.json                      (tune trials only) config of this trial
 ```
 
@@ -355,10 +358,13 @@ tests/                Unit tests (python -m unittest discover -s tests)
 python -m unittest discover -s tests -v
 ```
 
-The tests cover the Tk-free modules (sweep expansion and reuse rules, model
-discovery, presets, level parsing). A GUI smoke test is as simple as
-starting the app and running the `Mario — Quick smoke test (30 s)` preset
-through the wizard with 4 000 steps per candidate.
+33 tests cover the emulator-free modules: sweep expansion and the
+trial-reuse rules, run discovery and the `run.json` manifest, preset
+defaults / overrides / rename rules, level parsing, ROM discovery and the
+ROM probe (the probe test is skipped without `ROMs/mario.gb`), and a guard
+that no GUI module imports PyBoy or Stable-Baselines3 at module level so the
+window keeps opening instantly. The GUI itself is exercised by starting it
+and running the `Mario — Quick smoke test (30 s)` preset through the wizard.
 
 ## Troubleshooting
 
