@@ -173,12 +173,24 @@ always shows what is running.
 While training or tuning runs, every input on every tab is locked so a run
 cannot be edited mid-flight and two CPU-hungry sessions cannot collide.
 
+### Housekeeping
+
+Trial runs and wizard runs accumulate under `models/mario/`. Delete them
+from where they were made: **Delete trial runs…** on the Tune tab removes
+every run of the current prefix plus its results file, **Clear previous
+search data…** on the wizard's first step does the same for the wizard's
+trials, and **Delete run…** on the Train tab removes the run named in the
+run field. Each asks first and shows the size it will free; saved presets
+are never touched. **Open folder** reveals a run in the file manager, and
+**Clear** on the screen panel blanks the emulator view.
+
 ### Screen panel (right)
 
 The emulator view with the live episode (episode, reward, world, position,
 steps, lives, coins, action) and the controls to **play a model**: the
 model dropdown lists every `best`, `final` and step snapshot of every run,
-plus episodes and speed (`0.5×` … `4×`, `Unlimited`). Speed is paced per
+plus episodes and speed (`0.5×` … `4×`, `Unlimited`), and **Clear** to blank
+the view. Speed is paced per
 emulator frame, so real time is real time even though a jump holds the
 button for 10 frames and a walk step for 4. Selecting a model
 applies the observation settings recorded in its `run.json`; **Advanced…**

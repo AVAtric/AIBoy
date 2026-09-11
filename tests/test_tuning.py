@@ -52,6 +52,19 @@ class SweepTests(unittest.TestCase):
         self.assertEqual(tuning.trial_run_name("tune", 3, 0, 1), "tune-003")
         self.assertEqual(tuning.trial_run_name("tune", 3, 1, 2), "tune-003-s1")
 
+    def test_progress_helpers(self):
+        self.assertEqual(tuning.format_steps(4000), "4,000")
+        self.assertEqual(tuning.format_steps(250_000), "250k")
+        self.assertEqual(tuning.format_steps(1_250_000), "1.25M")
+        self.assertIsNone(tuning.eta_seconds(0, 100, 10))          # nothing done yet
+        self.assertIsNone(tuning.eta_seconds(50, 100, 1))          # too early to say
+        self.assertAlmostEqual(tuning.eta_seconds(25, 100, 60), 180)
+        self.assertEqual(tuning.eta_seconds(100, 100, 60), 0.0)
+        self.assertEqual(tuning.progress_text(0, 2_000_000, 0.0), "0 / 2.00M · 0%")
+        self.assertEqual(tuning.progress_text(500_000, 2_000_000, 120.0),
+                         "500k / 2.00M · 25% · ETA 6 min")
+        self.assertTrue(tuning.progress_text(2_000_000, 2_000_000, 300).endswith("ETA done"))
+
     def test_format_duration(self):
         self.assertEqual(tuning.format_duration(30), "30 s")
         self.assertEqual(tuning.format_duration(600), "10 min")

@@ -103,6 +103,8 @@ class GameBoyAIGUI:
         self._train_target_steps = 1
         self._train_rollout_size = 1
         self._train_baseline_steps: int | None = None
+        self._train_started_at = 0.0
+        self._tune_started_at = 0.0
 
         self._model_paths: dict[str, Path] = {}
         self._all_presets: dict[str, dict] = {}
@@ -342,6 +344,10 @@ class GameBoyAIGUI:
         self.btn_train_stop.pack(side="left", padx=4)
         ttk.Button(btns, text="TensorBoard", command=self.open_tensorboard).pack(
             side="left", padx=(16, 4))
+        self.btn_run_delete = ttk.Button(btns, text="Delete run…", command=self._delete_run)
+        self.btn_run_delete.pack(side="right")
+        self.btn_run_open = ttk.Button(btns, text="Open folder", command=self._open_run_folder)
+        self.btn_run_open.pack(side="right", padx=(0, 4))
 
         pb_frame = ttk.Frame(controls)
         pb_frame.grid(row=4, column=0, sticky="ew", pady=(4, 0))
@@ -351,7 +357,7 @@ class GameBoyAIGUI:
         ttk.Progressbar(pb_frame, mode="determinate", maximum=100,
                         variable=self.train_progress_var).grid(row=0, column=0, sticky="ew",
                                                                padx=(0, 6))
-        ttk.Label(pb_frame, textvariable=self.train_progress_text, width=24).grid(
+        ttk.Label(pb_frame, textvariable=self.train_progress_text, width=32, anchor="e").grid(
             row=0, column=1, sticky="e")
 
         # ---- Live stats, then the training log below (full width, grows) ----
@@ -437,9 +443,14 @@ class GameBoyAIGUI:
         self.btn_play_stop = ttk.Button(btns, text="■ Stop", command=self.stop_playing,
                                         state="disabled")
         self.btn_play_stop.pack(side="left", padx=4)
-        self.btn_model_refresh = ttk.Button(btns, text="Refresh", command=self.refresh_models)
-        self.btn_model_refresh.pack(side="left", padx=4)
-        self.btn_play_adv = ttk.Button(btns, text="Advanced…", command=self._open_play_advanced)
+        self.btn_screen_clear = ttk.Button(btns, text="Clear", command=self.clear_screen)
+        self.btn_screen_clear.pack(side="left", padx=4)
+        btns2 = ttk.Frame(ctl)
+        btns2.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        self.btn_model_refresh = ttk.Button(btns2, text="Refresh model list",
+                                            command=self.refresh_models)
+        self.btn_model_refresh.pack(side="left")
+        self.btn_play_adv = ttk.Button(btns2, text="Advanced…", command=self._open_play_advanced)
         self.btn_play_adv.pack(side="right")
 
         # Advanced options live in a small dialog (see _open_play_advanced). The
@@ -454,6 +465,18 @@ class GameBoyAIGUI:
         self._play_widgets: list[tk.Widget] = [self.model_combo, self.btn_model_refresh,
                                                ep_spin, speed_combo, self.btn_play_start,
                                                self.btn_play_adv]
+
+    def clear_screen(self) -> None:
+        """Blank the emulator view and the live-episode panel (stops playback first)."""
+        if self.playing_active():
+            self.play_stop.set()
+        if self.preview_thread is not None and self.preview_thread.is_alive():
+            self.preview_stop.set()
+        self.frames.take()
+        self._init_canvas(self.canvas)
+        for v in self.play_stat_vars.values():
+            v.set("—")
+        self.play_status_var.set("idle")
 
     def _open_play_advanced(self) -> None:
         """Rarely needed playback options, in a small window next to the screen."""
@@ -618,7 +641,7 @@ class GameBoyAIGUI:
         self.tune_progress_text = tk.StringVar(value="—")
         ttk.Progressbar(ctrl, mode="determinate", maximum=100,
                         variable=self.tune_progress_var).grid(row=0, column=3, sticky="ew", padx=6)
-        ttk.Label(ctrl, textvariable=self.tune_progress_text, width=12, anchor="e").grid(
+        ttk.Label(ctrl, textvariable=self.tune_progress_text, width=20, anchor="e").grid(
             row=0, column=4, sticky="e")
         self.tune_live_var = tk.StringVar(value="idle")
         ttk.Label(parent, textvariable=self.tune_live_var, font=MONO).grid(
@@ -644,6 +667,10 @@ class GameBoyAIGUI:
         self.btn_tune_to_train.pack(side="left", padx=4)
         ttk.Label(actions, text="(double-click a row to load it)", foreground=THEME.muted).pack(
             side="left", padx=8)
+        self.btn_tune_delete = ttk.Button(actions, text="Delete trial runs…",
+                                          command=lambda: self.delete_tune_data(
+                                              self.tune_run_prefix_var.get().strip() or "tune"))
+        self.btn_tune_delete.pack(side="right")
 
         self.apply_tune_template()
 
@@ -747,6 +774,7 @@ class GameBoyAIGUI:
         self.tune_progress_var.set(0)
         self.tune_progress_text.set(f"0/{n_trials}")
         self.tune_live_var.set("starting…")
+        self._tune_started_at = time.time()
         self.btn_tune_start.config(state="disabled")
         self.btn_tune_stop.config(state="normal")
         self.btn_train_start.config(state="disabled")
@@ -1068,6 +1096,79 @@ class GameBoyAIGUI:
     def refresh_run_names(self) -> None:
         self.run_name_combo["values"] = runs.list_runs(self.game)
 
+    # ---------- Housekeeping ----------
+
+    def _open_run_folder(self) -> None:
+        name = self.run_name_var.get().strip() or "default"
+        base = runs.run_paths(self.game, name)["base"]
+        target = base if base.exists() else base.parent
+        target.mkdir(parents=True, exist_ok=True)
+        try:
+            runs.open_in_file_manager(PROJECT_DIR / target)
+        except OSError as e:
+            messagebox.showerror("Open folder", f"Could not open {target}:\n{e}")
+
+    def _delete_run(self) -> None:
+        """Delete the run named on the Train tab (models/<game>/<run>/)."""
+        if self.busy():
+            messagebox.showwarning("Delete run", "Stop training or tuning first.")
+            return
+        name = self.run_name_var.get().strip() or "default"
+        base = runs.run_paths(self.game, name)["base"]
+        if not runs.is_run_name(name) or not base.exists():
+            messagebox.showinfo("Delete run", f"There is no run '{name}' to delete.")
+            return
+        size = runs.format_size(runs.dir_size(base))
+        if not messagebox.askyesno(
+                "Delete run",
+                f"Delete run '{name}' ({size})?\n\nThis removes {base}/ with all its "
+                f"checkpoints, the best model and TensorBoard logs. It cannot be undone."):
+            return
+        if self.playing_active():
+            self.play_stop.set()
+        try:
+            freed = runs.delete_run(self.game, name)
+        except (OSError, ValueError) as e:
+            messagebox.showerror("Delete run", str(e))
+            return
+        self.run_name_var.set("")
+        self.refresh_run_names()
+        self.refresh_models()
+        self._update_run_hint()
+        self.flash(f"Run '{name}' deleted ({runs.format_size(freed)} freed).")
+
+    def delete_tune_data(self, prefix: str) -> bool:
+        """Delete every trial run of a sweep prefix and its results file.
+        Used by the Tune tab and the wizard. True if something was deleted."""
+        if self.busy():
+            messagebox.showwarning("Delete trial runs", "Stop training or tuning first.")
+            return False
+        n_runs, size = runs.tune_data_size(self.game, prefix)
+        if n_runs == 0 and size == 0:
+            messagebox.showinfo("Delete trial runs", f"No trial runs with prefix '{prefix}' found.")
+            return False
+        if not messagebox.askyesno(
+                "Delete trial runs",
+                f"Delete {n_runs} trial run(s) named '{prefix}-…' and the saved results "
+                f"({runs.format_size(size)})?\n\nThe presets you saved from them are kept. "
+                f"This cannot be undone."):
+            return False
+        try:
+            n_runs, freed = runs.delete_tune_data(self.game, prefix)
+        except (OSError, ValueError) as e:
+            messagebox.showerror("Delete trial runs", str(e))
+            return False
+        if self.tune_run_prefix_var.get().strip() == prefix:
+            self._tune_results.clear()
+            self.render_tune_results()
+            self.tune_live_var.set("idle")
+            self.tune_progress_var.set(0)
+            self.tune_progress_text.set("—")
+        self.refresh_run_names()
+        self.refresh_models()
+        self.flash(f"Deleted {n_runs} trial run(s) of '{prefix}' ({runs.format_size(freed)} freed).")
+        return True
+
     def refresh_models(self) -> None:
         self._model_paths = dict(runs.list_models(self.game))
         labels = list(self._model_paths)
@@ -1159,8 +1260,9 @@ class GameBoyAIGUI:
         # first reported total_timesteps is baseline + one rollout.
         self._train_rollout_size = max(1, cfg["n_steps"] * cfg["n_envs"])
         self._train_baseline_steps = None
+        self._train_started_at = time.time()
         self.train_progress_var.set(0)
-        self.train_progress_text.set(f"0 / {self._train_target_steps:,}")
+        self.train_progress_text.set(tuning.progress_text(0, self._train_target_steps, 0.0))
         threading.Thread(target=self._read_train_stdout, daemon=True).start()
 
         if self.preview_var.get():
@@ -1297,7 +1399,7 @@ class GameBoyAIGUI:
                 return
             self._flash = None
         if self.training_active():
-            text = (f"Training '{self._train_run_name}' · {self.train_progress_text.get()} steps · "
+            text = (f"Training '{self._train_run_name}' · {self.train_progress_text.get()} · "
                     f"{self.stat_vars['fps'].get()} fps · ep_rew_mean {self.stat_vars['ep_rew_mean'].get()}")
         elif self.tuning_active():
             text = f"Tuning · {self.tune_progress_text.get()} trials · {self.tune_live_var.get()}"
@@ -1349,6 +1451,9 @@ class GameBoyAIGUI:
         elif kind == "tune_progress":
             _, frac, label = item
             self.tune_progress_var.set(100.0 * frac)
+            eta = tuning.eta_seconds(frac, 1.0, time.time() - self._tune_started_at)
+            if eta is not None and frac < 1.0:
+                label += f" · ETA {tuning.format_duration(eta)}"
             self.tune_progress_text.set(label)
         elif kind == "tune_result":
             r = item[1]
@@ -1385,7 +1490,8 @@ class GameBoyAIGUI:
         new_steps = done_abs - self._train_baseline_steps
         pct = min(100.0, 100.0 * new_steps / max(1, self._train_target_steps))
         self.train_progress_var.set(pct)
-        self.train_progress_text.set(f"{new_steps:,} / {self._train_target_steps:,}")
+        self.train_progress_text.set(tuning.progress_text(
+            new_steps, self._train_target_steps, time.time() - self._train_started_at))
 
     def _on_train_done(self, rc: int) -> None:
         if rc == 0:
@@ -1428,10 +1534,11 @@ class GameBoyAIGUI:
         widgets: list[tk.Widget] = [
             self.game_combo, self.btn_rescan,
             self.preset_combo, self.btn_preset_save, self.run_name_combo,
-            self.resume_check, self.preview_check,
-            *self._play_widgets,
+            self.resume_check, self.preview_check, self.btn_run_delete,
+            *self._play_widgets, self.btn_screen_clear,
             *self._tune_config_widgets,
             self.btn_tune_save_preset, self.btn_tune_to_train, self.btn_tune_load,
+            self.btn_tune_delete,
         ]
         for w in widgets:
             try:

@@ -180,13 +180,16 @@ class WizardTab:
         self.btn_use_best = ttk.Button(btns, text="Continue with best →", command=self.use_best,
                                        state="disabled")
         self.btn_use_best.pack(side="right")
+        self.btn_clear_search = ttk.Button(pane, text="Clear previous search data…",
+                                           command=self.clear_search_data)
+        self.btn_clear_search.grid(row=6, column=0, sticky="e", pady=(6, 0))
 
         prog = ttk.Frame(pane)
         prog.grid(row=3, column=0, sticky="ew")
         prog.columnconfigure(0, weight=1)
         ttk.Progressbar(prog, mode="determinate", maximum=100,
                         variable=self.app.tune_progress_var).grid(row=0, column=0, sticky="ew")
-        ttk.Label(prog, textvariable=self.app.tune_progress_text, width=10, anchor="e").grid(
+        ttk.Label(prog, textvariable=self.app.tune_progress_text, width=20, anchor="e").grid(
             row=0, column=1, padx=(6, 0))
         ttk.Label(pane, textvariable=self.app.tune_live_var, font=MONO).grid(
             row=4, column=0, sticky="w", pady=(4, 6))
@@ -279,7 +282,7 @@ class WizardTab:
         prog.columnconfigure(0, weight=1)
         ttk.Progressbar(prog, mode="determinate", maximum=100,
                         variable=self.app.train_progress_var).grid(row=0, column=0, sticky="ew")
-        ttk.Label(prog, textvariable=self.app.train_progress_text, width=24, anchor="e").grid(
+        ttk.Label(prog, textvariable=self.app.train_progress_text, width=32, anchor="e").grid(
             row=0, column=1, padx=(6, 0))
 
         stats = ttk.LabelFrame(pane, text="Live stats", padding=8)
@@ -358,8 +361,10 @@ class WizardTab:
                 self.start_watch()
 
     def restart(self) -> None:
-        if self.app.busy() or self.app.playing_active():
+        if self.app.playing_active():
             self.app.stop_playing()
+        if not self.app.busy():
+            self.app.clear_screen()
         self.config, self.overrides, self.preset_name, self.run_name = {}, {}, "", ""
         self.preset_name_var.set("")
         self.run_name_var.set("")
@@ -379,8 +384,9 @@ class WizardTab:
                     w.config(state="readonly" if isinstance(w, ttk.Combobox) else "normal")
             except tk.TclError:
                 pass
-        busy = self.app.busy()
+        busy = disabled or self.app.busy()
         self.btn_skip.config(state="disabled" if busy else "normal")
+        self.btn_clear_search.config(state="disabled" if busy else "normal")
         self.btn_save_preset.config(state="disabled" if busy else "normal")
         self.btn_train_back.config(state="disabled" if busy else "normal")
         self.btn_play.config(state="disabled" if busy else "normal")
@@ -474,6 +480,15 @@ class WizardTab:
         self.preset_name_var.set("")
         self.status_var.set(f"Using '{self.goal_name}' unchanged.")
         self.goto(1)
+
+    def clear_search_data(self) -> None:
+        """Delete the wizard's trial runs and results from earlier searches."""
+        if self.phase != "idle":
+            return
+        if self.app.delete_tune_data(WIZARD_PREFIX):
+            self._render_candidates()
+            self.btn_use_best.config(state="disabled")
+            self.status_var.set("Previous search data deleted.")
 
     def on_tune_result(self) -> None:
         if self.phase == "tuning":

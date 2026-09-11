@@ -19,6 +19,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -176,6 +179,83 @@ def list_models(game_filter: str | None = None, root: Path = MODELS_ROOT) -> lis
             for p in snaps:
                 entries.append((f"{game}/{run} — {_snapshot_steps(p):,} steps", p))
     return entries
+
+
+# ------------------------- housekeeping -------------------------
+
+TRIAL_NAME = re.compile(r"^(?P<prefix>.+)-(?P<config>\d{3})(?:-s(?P<seed>\d+))?$")
+
+
+def dir_size(path: Path) -> int:
+    """Bytes used below `path` (0 if it does not exist)."""
+    if not path.exists():
+        return 0
+    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+
+def format_size(n_bytes: int) -> str:
+    size = float(n_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit in ("B", "KB") else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def delete_run(game: str, run_name: str, root: Path = MODELS_ROOT) -> int:
+    """Delete a run directory (checkpoints, logs, tensorboard, manifests).
+    Returns the bytes freed. Refuses internal directories."""
+    if not is_run_name(run_name):
+        raise ValueError(f"'{run_name}' is not a run directory.")
+    base = run_paths(game, run_name, root)["base"]
+    if not base.exists():
+        return 0
+    freed = dir_size(base)
+    shutil.rmtree(base)
+    return freed
+
+
+def tune_trial_runs(game: str, prefix: str, root: Path = MODELS_ROOT) -> list[str]:
+    """Run names produced by a sweep with this prefix (`<prefix>-NNN[-sK]`)."""
+    out = []
+    for name in list_runs(game, root):
+        m = TRIAL_NAME.match(name)
+        if m and m.group("prefix") == prefix:
+            out.append(name)
+    return out
+
+
+def tune_data_size(game: str, prefix: str, root: Path = MODELS_ROOT) -> tuple[int, int]:
+    """(number of trial runs, bytes) a sweep prefix occupies, results file included."""
+    names = tune_trial_runs(game, prefix, root)
+    total = sum(dir_size(run_paths(game, n, root)["base"]) for n in names)
+    results = root / game / "_tune" / f"{prefix}.json"
+    if results.exists():
+        total += results.stat().st_size
+    return len(names), total
+
+
+def delete_tune_data(game: str, prefix: str, root: Path = MODELS_ROOT) -> tuple[int, int]:
+    """Delete every trial run of a sweep prefix and its results file.
+    Returns (runs deleted, bytes freed)."""
+    names = tune_trial_runs(game, prefix, root)
+    freed = sum(delete_run(game, n, root) for n in names)
+    results = root / game / "_tune" / f"{prefix}.json"
+    if results.exists():
+        freed += results.stat().st_size
+        results.unlink()
+    return len(names), freed
+
+
+def open_in_file_manager(path: Path) -> None:
+    """Reveal a folder in Finder / Explorer / the desktop's file manager."""
+    path = Path(path)
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", str(path)])
+    elif os.name == "nt":
+        os.startfile(str(path))  # type: ignore[attr-defined]
+    else:
+        subprocess.Popen(["xdg-open", str(path)])
 
 
 def build_train_cmd(cfg: dict, run_name: str, *, resume: bool = False,

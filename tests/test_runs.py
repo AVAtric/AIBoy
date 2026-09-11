@@ -72,6 +72,33 @@ class RunDiscoveryTests(unittest.TestCase):
         cmd = runs.build_train_cmd(presets.normalize({"game": "mario"}), "r")
         self.assertEqual(cmd[cmd.index("--n-envs") + 1], str(presets.DEFAULT_CONFIG["n_envs"]))
 
+    def test_housekeeping(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for name in ("tune-001", "tune-002-s1", "tune-010", "tuner-001", "wizard-001", "keep"):
+                self._make_run(root, "mario", name, best=True, snaps=(1000,))
+            self._make_run(root, "mario", "_level_states")
+            (root / "mario" / "_tune").mkdir()
+            (root / "mario" / "_tune" / "tune.json").write_text("{}")
+            self.assertEqual(runs.tune_trial_runs("mario", "tune", root),
+                             ["tune-001", "tune-002-s1", "tune-010"])
+            n, size = runs.tune_data_size("mario", "tune", root)
+            self.assertEqual(n, 3)
+            self.assertGreater(size, 0)
+            n, freed = runs.delete_tune_data("mario", "tune", root)
+            self.assertEqual(n, 3)
+            self.assertEqual(freed, size)
+            self.assertEqual(runs.list_runs("mario", root), ["keep", "tuner-001", "wizard-001"])
+            self.assertFalse((root / "mario" / "_tune" / "tune.json").exists())
+            self.assertEqual(runs.delete_tune_data("mario", "tune", root), (0, 0))
+            self.assertGreater(runs.delete_run("mario", "keep", root), 0)
+            self.assertEqual(runs.delete_run("mario", "keep", root), 0)
+            with self.assertRaises(ValueError):
+                runs.delete_run("mario", "_level_states", root)
+            self.assertTrue((root / "mario" / "_level_states").exists())
+        self.assertEqual(runs.format_size(512), "512 B")
+        self.assertEqual(runs.format_size(3 * 1024 * 1024), "3.0 MB")
+
     def test_build_train_cmd(self):
         cfg = {"game": "mario", "n_envs": 2, "timesteps": 4000, "ent_coef": 0.01,
                "learning_rate": 2.5e-4, "n_steps": 128, "batch_size": 128}

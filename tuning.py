@@ -175,6 +175,36 @@ def format_duration(seconds: float) -> str:
     return f"{seconds / 3600:.1f} h"
 
 
+def format_steps(n: int) -> str:
+    """Compact step counts for progress labels: 4,000 / 250k / 1.25M."""
+    n = int(n)
+    if n < 10_000:
+        return f"{n:,}"
+    if n < 1_000_000:
+        return f"{n / 1000:.0f}k"
+    return f"{n / 1_000_000:.2f}M"
+
+
+def eta_seconds(done: float, total: float, elapsed: float) -> float | None:
+    """Remaining seconds at the average rate so far; None until there is
+    enough progress (>= 1% and a few seconds) to say anything sensible."""
+    if total <= 0 or done <= 0 or elapsed < 3.0 or done / total < 0.01:
+        return None
+    if done >= total:
+        return 0.0
+    return elapsed * (total - done) / done
+
+
+def progress_text(done: int, total: int, elapsed: float) -> str:
+    """'1.25M / 2.00M · 62% · ETA 9 min' for a progress label."""
+    pct = min(100.0, 100.0 * done / max(1, total))
+    text = f"{format_steps(done)} / {format_steps(total)} · {pct:.0f}%"
+    eta = eta_seconds(done, total, elapsed)
+    if eta is not None:
+        text += " · ETA " + ("done" if eta == 0 else format_duration(eta))
+    return text
+
+
 # ------------------------- trial results -------------------------
 
 @dataclass
