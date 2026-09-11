@@ -35,15 +35,13 @@ import presets
 import runs
 import tuning
 from games import RomInfo, discover_roms, level_choices, probe_rom
-from player import CANVAS_H, CANVAS_W, GAME_H, GAME_W, SPEED_CHOICES, EmbeddedPlayer
+from player import CANVAS_H, CANVAS_W, GAME_H, GAME_W, SPEED_CHOICES, EmbeddedPlayer, LatestFrame
 from presets_tab import PresetsTab
-from widgets import MONO, MONO_BOLD, MUTED, ConfigForm, make_table, setup_styles
+from widgets import MONO, MONO_BOLD, THEME, ConfigForm, make_table, setup_styles
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_GAME = "mario"
 TENSORBOARD_PORT = 6006
-STATUS_COLORS = {"ok": "#1e7e34", "experimental": "#b26a00", "unsupported": "#c0392b",
-                 "checking": MUTED}
 
 # SB3's verbose=1 table: "|    ep_rew_mean    | 123     |"
 STAT_LINE = re.compile(r"\|\s+([a-z_]+)\s+\|\s+([\S]+)\s+\|")
@@ -82,14 +80,14 @@ class GameBoyAIGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title("Game Boy AI — Super Mario Land")
-        root.geometry("1240x900")
-        root.minsize(1180, 820)
+        root.geometry("1300x900")
+        root.minsize(1240, 820)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Cross-thread channels
         self.stats_queue: queue.Queue = queue.Queue()
-        self.frame_queue: queue.Queue = queue.Queue(maxsize=2)
-        self.player = EmbeddedPlayer(self.frame_queue, self.stats_queue)
+        self.frames = LatestFrame()
+        self.player = EmbeddedPlayer(self.frames, self.stats_queue)
 
         # Subprocess / thread state
         self.train_proc: subprocess.Popen | None = None
@@ -142,7 +140,7 @@ class GameBoyAIGUI:
         self._update_game_status()
         if not infos:
             self.game_status_var.set("no .gb files in ROMs/ — see README → Install")
-            self.game_status_label.config(foreground=STATUS_COLORS["unsupported"])
+            self.game_status_label.config(foreground=THEME.err)
             return
 
         def _probe_all(paths: list[tuple[str, Path]]) -> None:
@@ -176,7 +174,9 @@ class GameBoyAIGUI:
         else:
             level, text = info.status()
         self.game_status_var.set(text)
-        self.game_status_label.config(foreground=STATUS_COLORS[level])
+        colors = {"ok": THEME.ok, "experimental": THEME.warn, "unsupported": THEME.err,
+                  "checking": THEME.muted}
+        self.game_status_label.config(foreground=colors[level])
         self._update_start_buttons()
 
     def _update_start_buttons(self) -> None:
@@ -236,9 +236,10 @@ class GameBoyAIGUI:
         self.status_bar_var = tk.StringVar(value="Idle")
         bar = ttk.Frame(self.root, padding=(10, 4))
         bar.pack(side="bottom", fill="x")
-        ttk.Label(bar, textvariable=self.status_bar_var, font=MONO, foreground="#444").pack(
-            side="left")
-        ttk.Label(bar, text="PyBoy · Stable-Baselines3 PPO", foreground=MUTED).pack(side="right")
+        ttk.Label(bar, textvariable=self.status_bar_var, font=MONO,
+                  foreground=THEME.text_soft).pack(side="left")
+        ttk.Label(bar, text="PyBoy · Stable-Baselines3 PPO", foreground=THEME.muted).pack(
+            side="right")
 
         # Main area: workflow tabs on the left, the Game Boy screen on the right.
         main = ttk.Frame(self.root)
@@ -301,7 +302,7 @@ class GameBoyAIGUI:
                                             command=lambda: self.show_tab(self.presets_frame))
         self.btn_preset_manage.grid(row=0, column=2, padx=2)
         self.preset_state_var = tk.StringVar(value="")
-        ttk.Label(preset_frame, textvariable=self.preset_state_var, foreground="#b26a00").grid(
+        ttk.Label(preset_frame, textvariable=self.preset_state_var, foreground=THEME.warn).grid(
             row=1, column=0, columnspan=3, sticky="w")
 
         # ---- Parameters (Basic | Advanced) ----
@@ -325,7 +326,7 @@ class GameBoyAIGUI:
             run_row, text="Resume from newest checkpoint", variable=self.resume_var)
         self.resume_check.pack(side="left", padx=(18, 0))
         self.run_hint_var = tk.StringVar(value="")
-        ttk.Label(controls, textvariable=self.run_hint_var, foreground=MUTED, font=MONO,
+        ttk.Label(controls, textvariable=self.run_hint_var, foreground=THEME.muted, font=MONO,
                   wraplength=640).grid(row=1, column=0, sticky="w", pady=(2, 0))
         self.preview_check = ttk.Checkbutton(
             controls, text="Show live preview on the screen while training (slower)",
@@ -353,35 +354,31 @@ class GameBoyAIGUI:
         ttk.Label(pb_frame, textvariable=self.train_progress_text, width=24).grid(
             row=0, column=1, sticky="e")
 
-        # ---- Live stats + training log, side by side ----
-        monitor = ttk.Frame(parent)
-        monitor.grid(row=3, column=0, sticky="nsew", pady=(0, 4))
-        monitor.columnconfigure(0, weight=0)
-        monitor.columnconfigure(1, weight=1)
-        parent.rowconfigure(3, weight=1)
-
-        stats = ttk.LabelFrame(monitor, text="Live stats", padding=8)
-        stats.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        # ---- Live stats, then the training log below (full width, grows) ----
+        parent.rowconfigure(4, weight=1)
+        stats = ttk.LabelFrame(parent, text="Live stats", padding=6)
+        stats.grid(row=3, column=0, sticky="ew", pady=(0, 6))
         self.stat_vars: dict[str, tk.StringVar] = {}
-        columns = [
-            [("status", "idle"), ("total_timesteps", "—"), ("ep_rew_mean", "—")],
-            [("ep_len_mean", "—"), ("fps", "—"), ("time_elapsed", "—")],
-        ]
-        for col, items in enumerate(columns):
-            for row, (k, v) in enumerate(items):
-                self.stat_vars[k] = tk.StringVar(value=v)
-                ttk.Label(stats, text=f"{k}:").grid(row=row, column=col * 2, sticky="w",
-                                                    padx=(0 if col == 0 else 18, 8))
-                ttk.Label(stats, textvariable=self.stat_vars[k], font=MONO_BOLD, width=10,
-                          anchor="w").grid(row=row, column=col * 2 + 1, sticky="w")
+        for i, (k, v) in enumerate([
+            ("status", "idle"), ("total_timesteps", "—"), ("ep_rew_mean", "—"),
+            ("ep_len_mean", "—"), ("fps", "—"), ("time_elapsed", "—"),
+        ]):
+            col, row = divmod(i, 2)          # three columns of two rows
+            self.stat_vars[k] = tk.StringVar(value=v)
+            ttk.Label(stats, text=f"{k}:", foreground=THEME.muted).grid(
+                row=row, column=col * 2, sticky="w", padx=(0 if col == 0 else 18, 6), pady=1)
+            ttk.Label(stats, textvariable=self.stat_vars[k], font=MONO_BOLD, width=14,
+                      anchor="w").grid(row=row, column=col * 2 + 1, sticky="w", pady=1)
 
-        log_frame = ttk.LabelFrame(monitor, text="Training log", padding=4)
-        log_frame.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
-        self.log_text = tk.Text(log_frame, height=5, width=34, wrap="none", font=MONO,
+        log_frame = ttk.LabelFrame(parent, text="Training log", padding=4)
+        log_frame.grid(row=4, column=0, sticky="nsew")
+        log_frame.columnconfigure(0, weight=1)
+        log_frame.rowconfigure(0, weight=1)
+        self.log_text = tk.Text(log_frame, height=6, width=40, wrap="none", font=MONO,
                                 background="#111", foreground="#ddd", insertbackground="#ddd")
-        self.log_text.pack(side="left", fill="both", expand=True)
+        self.log_text.grid(row=0, column=0, sticky="nsew")
         yscroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
-        yscroll.pack(side="right", fill="y")
+        yscroll.grid(row=0, column=1, sticky="ns")
         self.log_text.config(yscrollcommand=yscroll.set)
 
     # ---------- Screen panel (always visible) ----------
@@ -405,7 +402,7 @@ class GameBoyAIGUI:
         self.play_stat_vars = {k: tk.StringVar(value="—") for k in keys}
         for i, key in enumerate(keys):
             col, row = divmod(i, 4)
-            ttk.Label(stats, text=f"{key}:", foreground=MUTED).grid(
+            ttk.Label(stats, text=f"{key}:", foreground=THEME.muted).grid(
                 row=row, column=col * 2, sticky="w", padx=(0 if col == 0 else 16, 6))
             ttk.Label(stats, textvariable=self.play_stat_vars[key], font=MONO_BOLD, width=15,
                       anchor="w").grid(row=row, column=col * 2 + 1, sticky="w")
@@ -420,7 +417,7 @@ class GameBoyAIGUI:
         self.model_combo.grid(row=0, column=0, columnspan=4, sticky="ew")
         self.model_combo.bind("<<ComboboxSelected>>", lambda e: self._on_model_selected())
         self.model_note_var = tk.StringVar(value="")
-        ttk.Label(ctl, textvariable=self.model_note_var, foreground=MUTED,
+        ttk.Label(ctl, textvariable=self.model_note_var, foreground=THEME.muted,
                   wraplength=CANVAS_W - 20).grid(row=1, column=0, columnspan=4, sticky="w",
                                                  pady=(2, 4))
         self.play_episodes_var = tk.IntVar(value=3)
@@ -488,7 +485,7 @@ class GameBoyAIGUI:
         r += 1
         ttk.Separator(body).grid(row=r, column=0, columnspan=2, sticky="ew", pady=8)
         r += 1
-        ttk.Label(body, wraplength=360, foreground=MUTED,
+        ttk.Label(body, wraplength=360, foreground=THEME.muted,
                   text="Observation setup. Filled in automatically from the model's run.json; "
                        "only change it for models from older runs, and make it match how "
                        "the model was trained.").grid(row=r, column=0, columnspan=2, sticky="w",
@@ -576,7 +573,8 @@ class GameBoyAIGUI:
                                             command=self.apply_tune_template)
         self.btn_tune_template.grid(row=0, column=2)
         self._tune_config_widgets.extend([tmpl_combo, self.btn_tune_template])
-        self.tune_template_note = ttk.Label(sweep_frame, text="", foreground="#888", wraplength=620)
+        self.tune_template_note = ttk.Label(sweep_frame, text="", foreground=THEME.muted,
+                                            wraplength=620)
         self.tune_template_note.grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 4))
 
         self.tune_sweep_text = tk.Text(sweep_frame, height=6, wrap="word", font=MONO, undo=True)
@@ -644,7 +642,7 @@ class GameBoyAIGUI:
         self.btn_tune_to_train = ttk.Button(actions, text="Load selected into Train tab",
                                             command=self._tune_load_into_train)
         self.btn_tune_to_train.pack(side="left", padx=4)
-        ttk.Label(actions, text="(double-click a row to load it)", foreground="#888").pack(
+        ttk.Label(actions, text="(double-click a row to load it)", foreground=THEME.muted).pack(
             side="left", padx=8)
 
         self.apply_tune_template()
@@ -704,7 +702,7 @@ class GameBoyAIGUI:
         plan, err = self.tune_plan()
         if err:
             self.tune_summary_var.set(f"⚠ {err}")
-            self.tune_summary_label.config(foreground="#c0392b")
+            self.tune_summary_label.config(foreground=THEME.err)
         else:
             n_cfg, n_seeds = len(plan["combos"]), plan["n_seeds"]
             n_trials = n_cfg * n_seeds
@@ -712,7 +710,7 @@ class GameBoyAIGUI:
             seeds_txt = f" × {n_seeds} seeds" if n_seeds > 1 else ""
             self.tune_summary_var.set(
                 f"{n_cfg} configs{seeds_txt} = {n_trials} trials · ≈ {tuning.format_duration(eta)}")
-            self.tune_summary_label.config(foreground="#555")
+            self.tune_summary_label.config(foreground=THEME.text_soft)
         if self.wizard is not None:
             self.wizard.on_tune_plan_changed()
 
@@ -1276,12 +1274,7 @@ class GameBoyAIGUI:
         except queue.Empty:
             pass
 
-        latest = None
-        try:
-            while True:
-                latest = self.frame_queue.get_nowait()
-        except queue.Empty:
-            pass
+        latest = self.frames.take()
         if latest is not None and self._canvas_img_id is not None:
             img = Image.fromarray(latest).resize((CANVAS_W, CANVAS_H), Image.NEAREST)
             self._tk_img = ImageTk.PhotoImage(img)

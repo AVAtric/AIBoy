@@ -33,7 +33,8 @@ Only Super Mario Land is supported in this version; see [Roadmap](#roadmap).
 ## Install
 
 Requirements: Python 3.10+, macOS / Linux / Windows, no GPU needed, a
-display of at least 1280 × 960 for the GUI (the window is 1240 × 900).
+display of at least 1366 × 960 for the GUI (the window is 1300 × 900). The
+GUI follows the system appearance (light or dark).
 
 ```bash
 git clone <this repo> gameboyEnv && cd gameboyEnv
@@ -96,13 +97,13 @@ models and presets are listed per game. **Rescan ROMs** re-reads the folder.
 ### How long does it take?
 
 Rough numbers on an Apple M1 Max with tile observations and 10 parallel
-emulators (~2 500–3 000 env steps/s):
+emulators (~3 000–3 500 env steps/s):
 
 | Steps          | What you get                                             | Time     |
 |----------------|----------------------------------------------------------|----------|
 | 20 k           | learns "run right"; dies at the first enemy              | seconds  |
 | 150–300 k      | jumps some obstacles                                     | ~2 min   |
-| 2 M            | `Campaign, recommended` preset; usually clears 1-1       | ~15 min  |
+| 2 M            | `Campaign, recommended` preset; usually clears 1-1       | ~12 min  |
 | 8–10 M         | `extended` / `Random levels`; progress into world 2–3    | ~1 h     |
 | 60 M           | `overnight` presets                                      | ~8 h     |
 
@@ -177,7 +178,9 @@ cannot be edited mid-flight and two CPU-hungry sessions cannot collide.
 The emulator view with the live episode (episode, reward, world, position,
 steps, lives, coins, action) and the controls to **play a model**: the
 model dropdown lists every `best`, `final` and step snapshot of every run,
-plus episodes and speed (`0.5×` … `4×`, `Unlimited`). Selecting a model
+plus episodes and speed (`0.5×` … `4×`, `Unlimited`). Speed is paced per
+emulator frame, so real time is real time even though a jump holds the
+button for 10 frames and a walk step for 4. Selecting a model
 applies the observation settings recorded in its `run.json`; **Advanced…**
 opens max steps, stochastic actions and the observation setup for models
 from older runs without that file.
@@ -220,7 +223,7 @@ the command from.
 | `--game`            | mario   | Only `mario` is supported (see Roadmap)                      |
 | `--obs-type`        | tiles   | `tiles` (fast MLP) or `pixels` (CNN, ~40× slower)            |
 | `--start-level`     | default | `default` / `random` / `sequential` / `marathon` / `W-L`     |
-| `--n-envs`          | 10      | Parallel emulators (`SubprocVecEnv`)                         |
+| `--n-envs`          | cores   | Parallel emulators, one per CPU core (max 12), clamped to cores |
 | `--timesteps`       | 500000  | Total env steps                                              |
 | `--action-repeat`   | 4       | Frames each action is held                                   |
 | `--frame-stack`     | 4       | Consecutive observations stacked as input                    |
@@ -229,10 +232,10 @@ the command from.
 | `--run-name`        | default | Sub-directory under `models/mario/`                          |
 | `--checkpoint-freq` | 25000   | Env steps between checkpoints                                |
 | `--eval-freq`       | 10000   | Env steps between evaluations                                |
-| `--n-eval-episodes` | 3       |                                                              |
+| `--n-eval-episodes` | 3       | Mario evals are deterministic; 1 episode is run (see Performance) |
 | `--learning-rate`   | 2.5e-4  |                                                              |
 | `--n-steps`         | 256     | PPO rollout length per env                                   |
-| `--batch-size`      | 128     |                                                              |
+| `--batch-size`      | 128     | Shipped presets use 256 (see Performance)                    |
 | `--n-epochs`        | 4       |                                                              |
 | `--ent-coef`        | 0.01    | Entropy coefficient (raise for more exploration)             |
 | `--gamma`           | 0.99    | Discount factor                                              |
@@ -315,6 +318,39 @@ network is tiny and the emulator workers need the cores.
 
 **Apple Silicon:** CPU beats MPS by ~4× for the tile MLP (kernel-launch
 overhead dominates), so `--device cpu` is the default on purpose.
+
+### Performance
+
+Where the time goes for one rollout of 10 envs × 512 steps (M1 Max, tile
+observations), measured:
+
+| Phase                         | Time    | Notes                                              |
+|-------------------------------|---------|----------------------------------------------------|
+| emulation + inference         | ~1.1 s  | 80% is PyBoy itself (0.06 ms per frame; jumps hold 10 frames) |
+| PPO update, batch 128         | 0.83 s  | emulator processes idle meanwhile                  |
+| PPO update, batch 256         | 0.49 s  | shipped default                                    |
+| PPO update, batch 512         | 0.33 s  |                                                    |
+| evaluation (every 25 k steps) | ~0.35 s | 1 episode; more would replay the identical episode |
+
+What the software does about it:
+
+- **Batch size 256** in every shipped preset (was 128): about 20% faster
+  wall-clock at 80 gradient steps per rollout. Larger batches are faster
+  still; the `Rollout shape` sweep on the Tune tab compares 256 and 512.
+- **One eval episode.** Emulator and greedy policy are deterministic, so
+  repeated eval episodes are identical; the trainer runs one regardless of
+  the setting and says so in the log.
+- **Emulators = cores.** `--n-envs` defaults to the number of CPU cores (max
+  12) and is clamped to it, because more emulator processes than cores only
+  adds scheduling overhead. The Train tab shows your core count next to
+  the field. Torch runs single-threaded for the tile MLP; more threads
+  measured no faster for a network this small.
+- **Tile observations** are ~40× cheaper than pixels; use `pixels` only if
+  tiles plateau.
+
+On other machines expect roughly `350 × cores` env steps/s for tiles (the
+Tune tab's time estimates use that), less on machines without performance
+cores.
 
 ### Artefacts
 

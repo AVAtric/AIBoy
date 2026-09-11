@@ -27,7 +27,7 @@ TUNABLE_FIELDS: frozenset[str] = frozenset(PRESET_FIELDS) - {
 
 # Curated starting points for Super Mario Land with tile observations
 # (MlpPolicy). Each is centred on the shipped defaults (ent_coef 0.01,
-# lr 2.5e-4, n_steps 512, batch 128, n_epochs 4, gamma 0.99, gae 0.95,
+# lr 2.5e-4, n_steps 512, batch 256, n_epochs 4, gamma 0.99, gae 0.95,
 # clip 0.2) and spans the range where PPO on this task is known to behave.
 SWEEP_TEMPLATES: dict[str, dict[str, list]] = {
     "Quick start — entropy × learning rate (6 configs)": {
@@ -42,7 +42,7 @@ SWEEP_TEMPLATES: dict[str, dict[str, list]] = {
     },
     "Rollout shape — n_steps × batch size (6 configs)": {
         "n_steps": [256, 512, 1024],
-        "batch_size": [128, 256],
+        "batch_size": [256, 512],
     },
     "Update intensity — epochs × clip range (6 configs)": {
         "n_epochs": [3, 5, 10],
@@ -60,7 +60,7 @@ SWEEP_TEMPLATES: dict[str, dict[str, list]] = {
         "learning_rate": [1e-4, 2.5e-4, 5e-4],
         "ent_coef": [0.005, 0.01, 0.02, 0.05],
         "n_steps": [256, 512, 1024],
-        "batch_size": [128, 256],
+        "batch_size": [256, 512],
         "n_epochs": [3, 4, 6],
         "gamma": [0.99, 0.995],
     },
@@ -158,7 +158,7 @@ def estimate_fps(cfg: dict) -> float:
     n_envs = max(1, int(cfg.get("n_envs", 10)))
     if cfg.get("obs_type", "tiles") == "pixels":
         return min(80.0, 15.0 * n_envs)
-    return min(3000.0, 320.0 * n_envs)
+    return min(3300.0, 350.0 * n_envs)
 
 
 def estimate_seconds(n_trials: int, trial_steps: int, cfg: dict) -> float:

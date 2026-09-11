@@ -48,7 +48,7 @@ DEFAULT_CONFIG: dict = {
     "ent_coef": 0.01,
     "learning_rate": 2.5e-4,
     "n_steps": 512,
-    "batch_size": 128,
+    "batch_size": 256,
     "n_epochs": 4,
     "action_repeat": 4,
     "frame_stack": 4,
@@ -60,9 +60,13 @@ DEFAULT_CONFIG: dict = {
     **PRESET_DEFAULTS,
 }
 
-# All timings estimated on Apple Silicon (M1 Max) at ~2500-3000 fps with
-# tile obs (default n_envs=10, batch_size=128, torch.set_num_threads(1)).
-# Pixel-obs runs are much slower (~40-70 fps).
+# All timings estimated on Apple Silicon (M1 Max) at ~3000-3500 fps with
+# tile obs (n_envs=10, batch_size=256, torch.set_num_threads(1)). With 10
+# envs x 512 steps a rollout is 5120 samples; batch 256 gives 20 minibatches
+# x 4 epochs = 80 gradient steps per rollout and roughly halves the PPO
+# update time compared with batch 128 (measured 0.49 s vs 0.83 s), during
+# which all emulator processes sit idle. Pixel-obs runs are much slower
+# (~40-70 fps).
 #
 # Modes (controlled by `start_level`):
 #   - "default"      → CAMPAIGN. Mario plays through 1-1, respects lives,
@@ -114,7 +118,7 @@ _HARDCODED_BUILTINS: dict[str, dict] = {
         "ent_coef": 0.01,
         "learning_rate": 2.5e-4,
         "n_steps": 512,
-        "batch_size": 128,
+        "batch_size": 256,
         "n_epochs": 4,
         "action_repeat": 4,
         "frame_stack": 4,
@@ -133,7 +137,7 @@ _HARDCODED_BUILTINS: dict[str, dict] = {
         "ent_coef": 0.01,
         "learning_rate": 2.5e-4,
         "n_steps": 512,
-        "batch_size": 128,
+        "batch_size": 256,
         "n_epochs": 4,
         "action_repeat": 4,
         "frame_stack": 4,
@@ -152,7 +156,7 @@ _HARDCODED_BUILTINS: dict[str, dict] = {
         "ent_coef": 0.01,
         "learning_rate": 2.5e-4,
         "n_steps": 512,
-        "batch_size": 128,
+        "batch_size": 256,
         "n_epochs": 4,
         "action_repeat": 4,
         "frame_stack": 4,
@@ -175,7 +179,7 @@ _HARDCODED_BUILTINS: dict[str, dict] = {
         "ent_coef": 0.02,
         "learning_rate": 2.5e-4,
         "n_steps": 512,
-        "batch_size": 128,
+        "batch_size": 256,
         "n_epochs": 4,
         "action_repeat": 4,
         "frame_stack": 4,
@@ -194,7 +198,7 @@ _HARDCODED_BUILTINS: dict[str, dict] = {
         "ent_coef": 0.02,
         "learning_rate": 2.5e-4,
         "n_steps": 512,
-        "batch_size": 128,
+        "batch_size": 256,
         "n_epochs": 4,
         "action_repeat": 4,
         "frame_stack": 4,
@@ -217,7 +221,7 @@ _HARDCODED_BUILTINS: dict[str, dict] = {
         "ent_coef": 0.02,
         "learning_rate": 2.5e-4,
         "n_steps": 512,
-        "batch_size": 128,
+        "batch_size": 256,
         "n_epochs": 4,
         "action_repeat": 4,
         "frame_stack": 4,
@@ -236,7 +240,7 @@ _HARDCODED_BUILTINS: dict[str, dict] = {
         "ent_coef": 0.02,
         "learning_rate": 2.5e-4,
         "n_steps": 512,
-        "batch_size": 128,
+        "batch_size": 256,
         "n_epochs": 4,
         "action_repeat": 4,
         "frame_stack": 4,
@@ -259,7 +263,7 @@ _HARDCODED_BUILTINS: dict[str, dict] = {
         "ent_coef": 0.02,
         "learning_rate": 2.5e-4,
         "n_steps": 512,
-        "batch_size": 128,
+        "batch_size": 256,
         "n_epochs": 4,
         "action_repeat": 4,
         "frame_stack": 4,
@@ -278,7 +282,7 @@ _HARDCODED_BUILTINS: dict[str, dict] = {
         "ent_coef": 0.02,
         "learning_rate": 2.5e-4,
         "n_steps": 512,
-        "batch_size": 128,
+        "batch_size": 256,
         "n_epochs": 4,
         "action_repeat": 4,
         "frame_stack": 4,
@@ -299,7 +303,7 @@ _HARDCODED_BUILTINS: dict[str, dict] = {
         "ent_coef": 0.02,
         "learning_rate": 2.5e-4,
         "n_steps": 512,
-        "batch_size": 128,
+        "batch_size": 256,
         "n_epochs": 4,
         "action_repeat": 4,
         "frame_stack": 4,

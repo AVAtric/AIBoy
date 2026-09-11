@@ -2,8 +2,9 @@
 frames + stats to the GUI.
 
 The emulator renders into memory (`window_type="null"`, renderer on); every
-emulator tick pushes the screen into `frame_queue`, and per-step numbers go
-into `event_queue` using the GUI's `_pump` protocol:
+emulator tick stores the screen in a `LatestFrame` slot (the GUI paints the
+newest frame it finds there), and per-step numbers go into `event_queue`
+using the GUI's `_pump` protocol:
 
     ("log", text)                 training-log line
     ("play_status", text)         screen-panel status line
@@ -12,8 +13,11 @@ into `event_queue` using the GUI's `_pump` protocol:
                                   {"reward", "steps"} per completed episode
     ("play_error", traceback)
 
-Pacing is done with `time.sleep()` because PyBoy's own speed setting only
-paces when it owns an SDL2 window.
+Pacing is done per emulator frame with `time.sleep()` because PyBoy's own
+speed setting only paces when it owns an SDL2 window. Per-frame (not
+per-step) pacing matters: a jump step holds the button for 10 frames while
+a walk step takes 4, so pacing per step would make jumps run 2.5x too fast
+and the canvas would only ever show the last frame of each step.
 
 Two entry points share one engine:
   - `play()`     plays a fixed model for N episodes (Play tab, wizard step 4)
@@ -35,6 +39,24 @@ from games import GAMES, ROM_DIR, prepare_level_states
 
 GB_FPS = 60.0
 PREVIEW_STEP_SLEEP = 0.02   # cap the preview at ~50 env-steps/s so training keeps the CPU
+RESYNC_AFTER = 0.25         # if pacing falls this far behind, drop the backlog instead of racing
+
+
+class LatestFrame:
+    """Single-slot, thread-safe hand-off of the newest emulator frame."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._frame: np.ndarray | None = None
+
+    def set(self, frame: np.ndarray) -> None:
+        with self._lock:
+            self._frame = frame
+
+    def take(self) -> np.ndarray | None:
+        with self._lock:
+            frame, self._frame = self._frame, None
+            return frame
 
 # Canvas geometry and speed presets shared by the Play tab and the wizard.
 SCALE = 3
@@ -45,10 +67,14 @@ SPEED_CHOICES = [("0.5×", 0.5), ("1× (real time)", 1.0), ("2×", 2.0),
 
 
 class _Session:
-    """One emulator + wrapped vec-env for a given observation setup."""
+    """One emulator + wrapped vec-env for a given observation setup.
+
+    `tick_period` > 0 paces every emulator frame to that many seconds
+    (1/60 for real time); 0 runs unthrottled.
+    """
 
     def __init__(self, game: str, obs_type: str, action_repeat: int, frame_stack: int,
-                 start_level, frame_queue: queue.Queue):
+                 start_level, frames: LatestFrame, tick_period: float = 0.0):
         # Heavy imports (PyBoy, SB3 / torch) happen here, on the playback
         # thread, so the GUI window opens without loading them.
         from pyboy import PyBoy
@@ -66,11 +92,13 @@ class _Session:
         self.pyboy = PyBoy(str(rom_path), window_type="null", game_wrapper=True,
                            disable_renderer=False)
         self.pyboy.set_emulation_speed(0)
-        self._frame_queue = frame_queue
+        self._frames = frames
+        self.tick_period = tick_period
+        self._deadline = time.perf_counter()
 
         if game == "mario":
             base = MarioEnv(self.pyboy, frame_skip=action_repeat, obs_type=obs_type,
-                            tick_callback=self.grab_frame, start_level=start_level)
+                            tick_callback=self.on_tick, start_level=start_level)
         else:
             if self.pyboy.game_wrapper() is None:
                 self.pyboy.stop(save=False)
@@ -82,12 +110,27 @@ class _Session:
         self.vec = wrap_vec_env(DummyVecEnv([lambda env=Monitor(base): env]),
                                 obs_type, frame_stack)
 
-    def grab_frame(self) -> None:
+    def push_frame(self) -> None:
         arr = self.pyboy.botsupport_manager().screen().screen_ndarray()
-        try:
-            self._frame_queue.put_nowait(np.asarray(arr, dtype=np.uint8))
-        except queue.Full:
-            pass
+        self._frames.set(np.array(arr, dtype=np.uint8, copy=True))
+
+    def start_pacing(self) -> None:
+        """Reset the frame clock (call after a reset or a model load so the
+        time spent there is not 'caught up' by racing ahead)."""
+        self._deadline = time.perf_counter()
+
+    def on_tick(self) -> None:
+        """Called by the env after every emulator frame: publish it, then hold
+        the frame until its wall-clock slot so playback runs at game speed."""
+        self.push_frame()
+        if self.tick_period <= 0:
+            return
+        self._deadline += self.tick_period
+        now = time.perf_counter()
+        if self._deadline > now:
+            time.sleep(self._deadline - now)
+        elif now - self._deadline > RESYNC_AFTER:
+            self._deadline = now
 
     def close(self) -> None:
         try:
@@ -97,8 +140,8 @@ class _Session:
 
 
 class EmbeddedPlayer:
-    def __init__(self, frame_queue: queue.Queue, event_queue: queue.Queue):
-        self.frame_queue = frame_queue
+    def __init__(self, frames: LatestFrame, event_queue: queue.Queue):
+        self.frames = frames
         self.events = event_queue
 
     # ---------- public entry points ----------
@@ -158,22 +201,21 @@ class EmbeddedPlayer:
                 # Subprocess with timeout, so a level that cannot boot cannot
                 # wedge the GUI thread.
                 prepare_level_states(start_level)
+            tick_period = (1.0 / GB_FPS) / speed_mult if speed_mult > 0 else 0.0
             session = _Session(game, obs_type, action_repeat, frame_stack, start_level,
-                               self.frame_queue)
+                               self.frames, tick_period)
             self._emit("play_status", f"loaded {model_path.name}")
             model = PPO.load(str(model_path), env=session.vec, device="cpu")
-            # Target wall-clock time per env step; 0 = no throttle.
-            step_period = (action_repeat / GB_FPS) / speed_mult if speed_mult > 0 else 0.0
 
             for ep in range(episodes):
                 if stop.is_set():
                     break
                 obs = session.vec.reset()
-                session.grab_frame()
+                session.push_frame()
+                session.start_pacing()
                 total, steps, done = 0.0, 0, [False]
                 self._emit("play_stat", "episode", f"{ep + 1}/{episodes}")
                 while not done[0] and not stop.is_set():
-                    t0 = time.time()
                     action, _ = model.predict(obs, deterministic=deterministic)
                     obs, reward, done, info = session.vec.step(action)
                     total += float(reward[0])
@@ -181,10 +223,6 @@ class EmbeddedPlayer:
                     self._report_step(game, action, info, total, steps)
                     if max_steps and steps >= max_steps:
                         break
-                    if step_period > 0:
-                        remaining = step_period - (time.time() - t0)
-                        if remaining > 0:
-                            time.sleep(remaining)
                 if stop.is_set():
                     break
                 summary.append({"reward": total, "steps": steps})
@@ -218,7 +256,7 @@ class EmbeddedPlayer:
                         if session is not None:
                             session.close()
                         session = _Session(game, obs_type, action_repeat, frame_stack,
-                                           start_level, self.frame_queue)
+                                           start_level, self.frames)
                         model = PPO.load(str(model_path), env=session.vec, device="cpu")
                         model_mtime = mtime
                         obs = session.vec.reset()

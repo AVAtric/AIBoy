@@ -17,7 +17,7 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
 import presets
-from widgets import MONO_BOLD, MUTED, ConfigForm, make_table
+from widgets import MONO_BOLD, THEME, ConfigForm, make_table
 
 MODE_LABEL = {"default": "campaign", "random": "random", "sequential": "sequential",
               "marathon": "marathon"}
@@ -49,7 +49,7 @@ class PresetsTab:
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(1, weight=1)
 
-        ttk.Label(parent, wraplength=640, foreground="#444",
+        ttk.Label(parent, wraplength=640, foreground=THEME.text_soft,
                   text="A preset is a complete training configuration. Select one to edit it "
                        "below; double-click to load it into the Train tab. Built-in presets "
                        "keep their shipped values behind your edits, so they can always be "
@@ -66,8 +66,6 @@ class PresetsTab:
             ("mode", "mode", 90, "w", False), ("steps", "steps", 90, "e", False),
             ("envs", "envs", 44, "e", False), ("obs", "obs", 56, "w", False),
         ], height=7)
-        self.tree.tag_configure("user", background="#e8f5e9")
-        self.tree.tag_configure("modified", background="#fff4e0")
         self.tree.bind("<<TreeviewSelect>>", lambda e: self._on_select())
         self.tree.bind("<Double-1>", lambda e: self.load_into_train())
 
@@ -99,9 +97,9 @@ class PresetsTab:
         self.title_var = tk.StringVar(value="No preset selected")
         ttk.Label(head, textvariable=self.title_var, font=MONO_BOLD).pack(side="left")
         self.kind_var = tk.StringVar(value="")
-        ttk.Label(head, textvariable=self.kind_var, foreground=MUTED).pack(side="left", padx=8)
+        ttk.Label(head, textvariable=self.kind_var, foreground=THEME.muted).pack(side="left", padx=8)
         self.note_var = tk.StringVar(value="")
-        ttk.Label(editor, textvariable=self.note_var, foreground=MUTED, wraplength=640).grid(
+        ttk.Label(editor, textvariable=self.note_var, foreground=THEME.muted, wraplength=640).grid(
             row=1, column=0, sticky="w", pady=(0, 6))
         self.form = ConfigForm(editor, on_change=self._on_edit)
         self.form.grid(row=2, column=0, sticky="ew")

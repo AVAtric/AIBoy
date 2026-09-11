@@ -27,6 +27,16 @@ from presets import PRESET_DEFAULTS, PRESET_FIELDS
 MODELS_ROOT = Path("models")
 INTERNAL_PREFIX = "_"
 
+def cpu_count() -> int:
+    return os.cpu_count() or 4
+
+
+def recommended_n_envs() -> int:
+    """Emulator processes worth running on this machine: one per core, at
+    most 12 (beyond that the PPO update, not the rollout, dominates)."""
+    return max(1, min(12, cpu_count()))
+
+
 # Baseline cadence used when a config does not specify one.
 DEFAULT_CHECKPOINT_FREQ = 25_000
 DEFAULT_EVAL_FREQ = 10_000

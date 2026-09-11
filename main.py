@@ -26,7 +26,8 @@ from env import (
     GAMES, SUPPORTED_GAMES, env_factory, level_choices, make_pyboy_env,
     prepare_level_states, wrap_vec_env,
 )
-from runs import latest_checkpoint, resolve_model_path, run_paths, write_run_config
+from runs import (cpu_count, latest_checkpoint, recommended_n_envs, resolve_model_path,
+                  run_paths, write_run_config)
 
 PROJECT_DIR = Path(__file__).resolve().parent
 
@@ -89,6 +90,12 @@ def _eval_start_level(start_level: str | None) -> str | None:
 
 def cmd_train(args: argparse.Namespace) -> None:
     _tune_torch_threads(args.obs_type, args.device)
+    if args.n_envs > cpu_count():
+        # More emulator processes than cores only adds scheduling overhead
+        # and memory; total emulation throughput is bounded by the cores.
+        print(f"[train] n_envs={args.n_envs} exceeds the {cpu_count()} CPU cores of this "
+              f"machine; using n_envs={cpu_count()}")
+        args.n_envs = cpu_count()
     run_name = args.run_name or "default"
     paths = run_paths(args.game, run_name)
     for d in ("checkpoints", "logs", "tensorboard"):
@@ -119,9 +126,19 @@ def cmd_train(args: argparse.Namespace) -> None:
     env = build_vec_env(args.game, args.n_envs, args.seed,
                         args.action_repeat, args.frame_stack, args.obs_type,
                         start_level=start_level)
+    eval_start = _eval_start_level(start_level)
     eval_env = build_vec_env(args.game, 1, args.seed + 10_000,
                              args.action_repeat, args.frame_stack, args.obs_type,
-                             start_level=_eval_start_level(start_level))
+                             start_level=eval_start)
+    n_eval_episodes = args.n_eval_episodes
+    if args.game == "mario" and n_eval_episodes > 1:
+        # The eval env (campaign boot or a fixed save-state) and the greedy
+        # policy are both deterministic, so every eval episode replays the
+        # same trajectory. One episode carries all the information; the rest
+        # would only burn wall-clock time between rollouts.
+        print(f"[train] evaluation is deterministic ({eval_start or 'campaign'}); "
+              f"running 1 eval episode instead of {n_eval_episodes}")
+        n_eval_episodes = 1
 
     try:
         from torch.utils.tensorboard import SummaryWriter  # noqa: F401
@@ -178,7 +195,7 @@ def cmd_train(args: argparse.Namespace) -> None:
         best_model_save_path=str(paths["logs"]),
         log_path=str(paths["logs"]),
         eval_freq=max(args.eval_freq // per_env, 1),
-        n_eval_episodes=args.n_eval_episodes,
+        n_eval_episodes=n_eval_episodes,
         deterministic=True,
         render=False,
     )
@@ -261,8 +278,8 @@ def build_parser() -> argparse.ArgumentParser:
     t = sub.add_parser("train", help="Train a PPO agent (headless)")
     _add_common(t)
     t.add_argument("--timesteps", type=int, default=500_000)
-    t.add_argument("--n-envs", type=int, default=10,
-                   help="Parallel PyBoy instances (10 uses all M1 cores)")
+    t.add_argument("--n-envs", type=int, default=recommended_n_envs(),
+                   help="Parallel PyBoy instances (default: one per CPU core, max 12)")
     t.add_argument("--seed", type=int, default=0)
     t.add_argument("--device", default="cpu",
                    help="cpu (recommended for tile obs), cuda, mps, or auto")

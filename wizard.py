@@ -21,7 +21,7 @@ from tkinter import messagebox, ttk
 import presets
 import runs
 import tuning
-from widgets import ACCENT, MONO, MONO_BOLD, MUTED, make_table
+from widgets import MONO, MONO_BOLD, THEME, make_table
 
 STEPS = ("Tune", "Preset", "Train", "Watch")
 TITLE = ("Helvetica", 15, "bold")
@@ -95,7 +95,7 @@ class WizardTab:
             lbl.bind("<Button-1>", lambda e, step=i: self._click_step(step))
             self._step_labels.append(lbl)
             if i < len(STEPS) - 1:
-                ttk.Label(header, text="→", foreground=MUTED).pack(side="left")
+                ttk.Label(header, text="→", foreground=THEME.muted).pack(side="left")
         self.title_var = tk.StringVar()
         ttk.Label(parent, textvariable=self.title_var, font=TITLE).grid(
             row=1, column=0, sticky="w", pady=(10, 2))
@@ -114,11 +114,11 @@ class WizardTab:
         self._build_watch(self.panes[3])
 
         self.status_var = tk.StringVar(value="")
-        ttk.Label(parent, textvariable=self.status_var, font=MONO, foreground=MUTED,
+        ttk.Label(parent, textvariable=self.status_var, font=MONO, foreground=THEME.muted,
                   wraplength=600).grid(row=3, column=0, sticky="w", pady=(8, 0))
 
     def _intro(self, pane: ttk.Frame, step: int, row: int) -> None:
-        ttk.Label(pane, text=INTRO[step], wraplength=600, foreground="#444").grid(
+        ttk.Label(pane, text=INTRO[step], wraplength=600, foreground=THEME.text_soft).grid(
             row=row, column=0, sticky="w", pady=(0, 10))
 
     def _register(self, *widgets: tk.Widget) -> None:
@@ -137,7 +137,7 @@ class WizardTab:
         self.goal_combo = ttk.Combobox(form, textvariable=self.goal_var, state="readonly")
         self.goal_combo.grid(row=0, column=1, sticky="ew", padx=6, pady=2)
         self.goal_combo.bind("<<ComboboxSelected>>", lambda e: self._on_goal_changed())
-        self.goal_note = ttk.Label(form, text="", foreground=MUTED)
+        self.goal_note = ttk.Label(form, text="", foreground=THEME.muted)
         self.goal_note.grid(row=1, column=1, sticky="w", padx=6)
 
         ttk.Label(form, text="Compare:").grid(row=2, column=0, sticky="w", pady=(8, 2))
@@ -146,7 +146,7 @@ class WizardTab:
                                            values=list(tuning.SWEEP_TEMPLATES))
         self.template_combo.grid(row=2, column=1, sticky="ew", padx=6, pady=(8, 2))
         self.template_combo.bind("<<ComboboxSelected>>", lambda e: self._on_template_changed())
-        self.template_note = ttk.Label(form, text="", foreground=MUTED, wraplength=520)
+        self.template_note = ttk.Label(form, text="", foreground=THEME.muted, wraplength=520)
         self.template_note.grid(row=3, column=1, sticky="w", padx=6)
 
         budget = ttk.Frame(form)
@@ -208,10 +208,11 @@ class WizardTab:
         pane.rowconfigure(1, weight=1)
         box.columnconfigure(0, weight=1)
         box.rowconfigure(0, weight=1)
-        self.config_text = tk.Text(box, height=14, font=MONO, wrap="none",
-                                   background="#f6f6f6", relief="flat")
+        self.config_text = tk.Text(box, height=14, font=MONO, wrap="none", relief="flat",
+                                   background=THEME.panel[0], foreground=THEME.panel[1],
+                                   highlightthickness=0)
         self.config_text.grid(row=0, column=0, sticky="nsew")
-        self.config_text.tag_configure("tuned", foreground=ACCENT, font=("Menlo", 10, "bold"))
+        self.config_text.tag_configure("tuned", foreground=THEME.accent, font=("Menlo", 10, "bold"))
         self.config_text.config(state="disabled")
 
         name_row = ttk.Frame(pane)
@@ -250,7 +251,7 @@ class WizardTab:
         steps_spin.grid(row=1, column=1, sticky="w", padx=6, pady=2)
         steps_spin.bind("<KeyRelease>", lambda e: self._update_train_eta())
         self.train_eta_var = tk.StringVar()
-        ttk.Label(form, textvariable=self.train_eta_var, foreground=MUTED).grid(
+        ttk.Label(form, textvariable=self.train_eta_var, foreground=THEME.muted).grid(
             row=2, column=1, sticky="w", padx=6)
         self.preview_var = tk.BooleanVar(value=False)
         preview_cb = ttk.Checkbutton(form, text="Show live preview while training (slower)",
@@ -303,7 +304,7 @@ class WizardTab:
         self.model_var = tk.StringVar(value="—")
         ttk.Label(box, textvariable=self.model_var, font=MONO, wraplength=600).grid(
             row=0, column=0, sticky="w")
-        ttk.Label(box, foreground=MUTED, wraplength=600,
+        ttk.Label(box, foreground=THEME.muted, wraplength=600,
                   text="Episodes and speed are set on the screen panel to the right; "
                        "the live episode stats update there while it plays.").grid(
             row=1, column=0, sticky="w", pady=(4, 0))
@@ -334,7 +335,8 @@ class WizardTab:
     def goto(self, step: int) -> None:
         self.step = step
         for i, lbl in enumerate(self._step_labels):
-            lbl.config(foreground=ACCENT if i == step else ("#222" if i < step else MUTED))
+            lbl.config(foreground=THEME.accent if i == step
+                       else (THEME.done if i < step else THEME.muted))
         self.title_var.set(f"Step {step + 1} of {len(STEPS)} — {STEPS[step]}")
         self.panes[step].tkraise()
         if step == 1:
