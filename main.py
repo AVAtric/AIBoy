@@ -7,6 +7,7 @@ Usage:
 """
 import argparse
 import os
+import sys
 from functools import partial
 from pathlib import Path
 
@@ -152,7 +153,10 @@ def cmd_train(args: argparse.Namespace) -> None:
     # start_game, which is fragile and can hang.
     if args.game == "mario" and start_level is not None:
         rom = Path("ROMs") / "mario.gb"
-        targets = SML_ALL_LEVELS if start_level == "random" else [tuple(int(x) for x in start_level.split("-"))]
+        if start_level in ("random", "sequential", "marathon"):
+            targets = SML_ALL_LEVELS
+        else:
+            targets = [tuple(int(x) for x in start_level.split("-"))]
         needed = [(w, l) for (w, l) in targets
                   if not (Path("models") / "mario" / "_level_states" / f"{w}-{l}.state").exists()]
         if needed:
@@ -167,9 +171,18 @@ def cmd_train(args: argparse.Namespace) -> None:
     env = build_vec_env(args.game, args.n_envs, args.seed,
                         args.action_repeat, args.frame_stack, args.obs_type,
                         start_level=start_level)
-    # Eval env is fixed to level 1-1 when training on random levels (so eval
-    # reward is comparable across evaluations). Otherwise mirror the train level.
-    eval_start = None if start_level == "random" else start_level
+    # Eval env selection:
+    #  - Fixed level ("W-L"): mirror it for consistent per-level eval.
+    #  - Every other mode (default, random, sequential, marathon): use
+    #    campaign (None). Reasons: eval reward is comparable across evals,
+    #    and campaign guarantees the episode terminates on game_over —
+    #    unlike random/sequential/marathon where an eval episode could
+    #    run indefinitely and block `evaluate_policy` (was the source of
+    #    the "hangs at ~100k timesteps" bug in marathon mode).
+    if start_level is not None and isinstance(start_level, str) and "-" in start_level:
+        eval_start = start_level
+    else:
+        eval_start = None
     eval_env = build_vec_env(args.game, 1, args.seed + 10_000,
                              args.action_repeat, args.frame_stack, args.obs_type,
                              start_level=eval_start)
@@ -258,7 +271,7 @@ def cmd_play(args: argparse.Namespace) -> None:
     start_level = args.start_level if args.start_level != "default" else None
     if args.game == "mario" and start_level is not None:
         rom = Path("ROMs") / "mario.gb"
-        if start_level == "random":
+        if start_level in ("random", "sequential", "marathon"):
             ensure_level_states(rom)
         else:
             ensure_level_states(rom, [tuple(int(x) for x in start_level.split("-"))])
@@ -295,11 +308,14 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--frame-stack", type=int, default=4, help="Consecutive frames stacked as obs")
     p.add_argument("--obs-type", default="tiles", choices=["pixels", "tiles"],
                    help="tiles = 16×20 game_area (fast, MLP); pixels = 144×160×3 RGB (slow, CNN)")
-    from env import SML_ALL_LEVELS
-    level_choices = ["default", "random"] + [f"{w}-{l}" for (w, l) in SML_ALL_LEVELS]
+    level_choices = (["default", "random", "sequential", "marathon"]
+                     + [f"{w}-{l}" for (w, l) in SML_ALL_LEVELS])
     p.add_argument("--start-level", default="default", choices=level_choices,
-                   help="Which SML level to start on: 'default' (1-1), '1-1'..'4-3' "
-                        "(2-1 excluded — PyBoy wrapper bug), or 'random'")
+                   help="Level mode: 'default' (campaign, respect lives), "
+                        "'random' (new random level per episode), "
+                        "'sequential' (advance level on clear, retry on death), "
+                        "'marathon' (one episode = all 10 levels), "
+                        "or a specific level 'W-L' (fixed).")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -346,6 +362,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    # `python main.py` with no args opens the GUI (same as `python main.py gui`).
+    # Any subcommand is still parsed normally.
+    if len(sys.argv) == 1:
+        from gui import run as run_gui
+        run_gui()
+        return
     args = build_parser().parse_args()
     if args.mode == "train":
         cmd_train(args)

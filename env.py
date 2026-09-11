@@ -87,15 +87,20 @@ def ensure_level_states(rom_path: Path, targets=None) -> list[tuple[int, int]]:
 
 
 def parse_start_level(spec):
-    """Parse a start_level spec into None, "random", or a (world, level) tuple.
+    """Parse a start_level spec into None, "random", "sequential",
+    "marathon", or a (world, level) tuple.
 
-    Accepts: None, "default", "random", "W-L" string (e.g. "2-3"),
-    or a (world, level) tuple.
+    Accepts: None, "default", "random", "sequential", "marathon",
+    "W-L" string (e.g. "2-3"), or a (world, level) tuple.
     """
     if spec is None or spec == "default":
         return None
     if spec == "random":
         return "random"
+    if spec == "sequential":
+        return "sequential"
+    if spec in ("marathon", "all_levels"):  # `all_levels` is a back-compat alias
+        return "marathon"
     if isinstance(spec, tuple) and len(spec) == 2:
         w, l = int(spec[0]), int(spec[1])
     elif isinstance(spec, str) and "-" in spec:
@@ -183,20 +188,29 @@ class MarioEnv(gym.Env):
         - time_penalty                        (small per-step cost — pressure
                                                 against noop / oscillation)
 
-    Three modes, decided by `start_level`:
-      - None (campaign): play through the game. Death does NOT end the
-        episode — Mario respawns at level start, life count decremented,
-        max_x tracker resets. Level clear also doesn't end the episode —
-        Mario transitions naturally to the next level and max_x resets.
-        Episode ends only on `game_over()` (all lives exhausted) or the
-        stuck timeout.
-      - "W-L" (fixed): each reset loads the save-state for that level. Any
-        death or level clear ends the episode; next reset replays the same
-        level (so lives are effectively infinite for training).
-      - "random": each reset picks a random usable level from
+    Five modes, decided by `start_level`:
+      - None / "default" (CAMPAIGN): play through the game. Death does NOT
+        end the episode — Mario respawns at level start, life count
+        decremented, max_x tracker resets. Level clear also doesn't end
+        the episode — Mario transitions naturally to the next level and
+        max_x resets. Episode ends only on `game_over()` (all lives
+        exhausted) or the stuck timeout.
+      - "W-L" (FIXED): each reset loads the save-state for that level.
+        Any death or level clear ends the episode; next reset replays the
+        same level (so lives are effectively infinite for training).
+      - "random" (RANDOM): each reset picks a random usable level from
         SML_ALL_LEVELS and loads its state. Death or level clear ends the
         episode so the next reset picks a new level — Mario is always
         training on varied content.
+      - "sequential" (SEQUENTIAL): cycles through SML_ALL_LEVELS. The
+        cursor only ADVANCES on a real level clear; death retries the
+        same level with fresh lives (via state reload).
+      - "marathon" (MARATHON): single-attempt speedrun through every
+        usable level in one episode. On level clear we IMMEDIATELY
+        force-load the next level's save-state — the in-game level-end
+        cutscene (Mario walking off screen, bonus countdown, intro
+        screen) is skipped entirely. ANY death ends the episode.
+        Clearing the last usable level ends the episode with a big bonus.
 
     Rewards fire in every mode: +completion_bonus on level clear,
     -death_penalty on death (whether or not the episode ends).
@@ -274,15 +288,41 @@ class MarioEnv(gym.Env):
         # height scales with A-hold duration up to ~12 frames).
         self.jump_hold_bonus = jump_hold_bonus
         # Starting level:
-        #   None       → SML's default (world 1-1) → CAMPAIGN mode
-        #   (w, l)     → always start there (1-indexed, e.g. (2, 3) = level 2-3)
-        #   "random"   → pick a random level from SML_ALL_LEVELS each reset
+        #   None           → SML's default (world 1-1) → CAMPAIGN mode
+        #                     (respect lives, respawn on death, restart at
+        #                     1-1 on game_over)
+        #   (w, l)         → always start there (1-indexed, e.g. (2, 3))
+        #                     (FIXED mode — die or clear ends episode)
+        #   "random"       → pick a random level each reset
+        #                     (RANDOM mode — die or clear ends episode)
+        #   "sequential"   → cycle through SML_ALL_LEVELS; the index only
+        #                     ADVANCES on a real level clear. Death retries
+        #                     the same level (fresh lives via state reload).
+        #   "marathon"     → single-attempt speedrun through every usable
+        #                     level. On level clear we force-load the next
+        #                     level's state IMMEDIATELY (skipping the ~15 s
+        #                     in-game victory cutscene). ANY death ends the
+        #                     episode. Clearing the last level ends the
+        #                     episode with a large bonus.
         self.start_level = parse_start_level(start_level)
         self._level_rng = _random_mod.Random()
         # Campaign mode = play through the game respecting lives and level
         # progression (deaths respawn, level-clears advance). Only triggered
         # when no start_level is set.
         self._campaign_mode = self.start_level is None
+        # Sequential mode state.
+        # `_sequential_idx` = which entry in SML_ALL_LEVELS is currently
+        # being played. It only advances after Mario actually CLEARS the
+        # level; if he dies, the same level is retried with fresh lives
+        # (loaded from the state file). Set by `step()` when it observes
+        # a world change (level clear), consumed by the next `reset()`.
+        self._sequential_idx = 0
+        self._sequential_advance_pending = False
+        # Marathon ("marathon") mode: count of level clears within the
+        # current episode. When it hits len(SML_ALL_LEVELS) the episode
+        # ends with a big bonus. On game_over we reload the CURRENT level's
+        # state so Mario gets fresh lives without restarting at 1-1.
+        self._marathon_clears = 0
         self._jump_actions = frozenset(i for i, evts in enumerate(self.ACTIONS)
                                         if WindowEvent.PRESS_BUTTON_A in evts)
 
@@ -344,6 +384,21 @@ class MarioEnv(gym.Env):
         target = None
         if self.start_level == "random":
             target = self._level_rng.choice(SML_ALL_LEVELS)
+        elif self.start_level == "sequential":
+            # Advance only after Mario CLEARED the previous level. On death
+            # we stay on the same level (state reload gives fresh lives).
+            # Wraps around at the end of the list.
+            if self._sequential_advance_pending:
+                self._sequential_idx = (self._sequential_idx + 1) % len(SML_ALL_LEVELS)
+                self._sequential_advance_pending = False
+            target = SML_ALL_LEVELS[self._sequential_idx]
+        elif self.start_level == "marathon":
+            # Marathon: start with a natural game boot at 1-1 (like campaign
+            # mode). The game handles level-to-level transitions itself; we
+            # just count clears and intervene on game_over. Reset the clear
+            # counter for the new episode.
+            self._marathon_clears = 0
+            target = None  # natural start, no state load
         elif isinstance(self.start_level, tuple):
             target = self.start_level
 
@@ -442,6 +497,65 @@ class MarioEnv(gym.Env):
             # is via forward progress, coins, kills, or level completion.
             reward -= self.time_penalty
 
+        # Sequential mode: only ADVANCE to the next level on a real clear;
+        # a death should retry the same level. Recorded as a flag for the
+        # next reset() to consume.
+        if self.start_level == "sequential" and level_cleared:
+            self._sequential_advance_pending = True
+
+        # Marathon mode: single-attempt speedrun through every usable level.
+        # ANY death ends the episode. On level clear we do NOT wait for
+        # the in-game level-end cutscene (Mario walks off screen, bonus
+        # countdown, intro screen — ~10-15 seconds of emulator time that
+        # burn training steps for zero learning signal). Instead we
+        # force-load the next level's save-state directly, so the moment
+        # Mario touches the flagpole he's in the next level.
+        if self.start_level == "marathon" and level_cleared:
+            self._marathon_clears += 1
+            if self._marathon_clears >= len(SML_ALL_LEVELS):
+                # Cleared every usable level in one run → marathon win.
+                reward += self.completion_bonus * 3.0
+                self._last_x = x
+                self._last_lives = lives
+                self._last_world = world
+                self._last_score = score
+                self._last_coins = coins
+                self._max_x = x
+                self._stuck = 0
+                return self._obs(), float(reward), True, False, {
+                    "x": x, "max_x": x, "lives": lives,
+                    "world": world, "coins": coins, "score": score,
+                    "stuck": 0, "game_over": is_game_over,
+                    "marathon_done": True,
+                    "marathon_clears": self._marathon_clears,
+                }
+            # Not the final clear — jump straight to the next usable level.
+            # `_reload_level_state` handles load_state + memory refresh +
+            # resets all per-level trackers, so we return immediately with
+            # the accumulated clear reward and skip the rest of step().
+            next_target = SML_ALL_LEVELS[self._marathon_clears]
+            if self._reload_level_state(next_target):
+                return self._obs(), float(reward), False, False, {
+                    "x": self._last_x, "max_x": self._max_x,
+                    "lives": self._last_lives, "world": self._last_world,
+                    "coins": self._last_coins, "score": self._last_score,
+                    "stuck": self._stuck, "game_over": False,
+                    "marathon_clears": self._marathon_clears,
+                    "marathon_skipped_to": next_target,
+                }
+            # No cached save-state for `next_target` — we can't cleanly
+            # skip the cutscene. Terminate the marathon episode explicitly
+            # rather than soft-locking Mario in the level-end sequence.
+            # Callers should have run `ensure_level_states()` upfront so
+            # this is essentially "misconfigured env" territory.
+            return self._obs(), float(reward), True, False, {
+                "x": x, "max_x": self._max_x, "lives": lives,
+                "world": world, "coins": coins, "score": score,
+                "stuck": self._stuck, "game_over": is_game_over,
+                "marathon_clears": self._marathon_clears,
+                "marathon_missing_state": next_target,
+            }
+
         # Termination logic depends on mode
         if self._campaign_mode:
             # Play through: only game_over ends the episode. Death and level
@@ -452,8 +566,13 @@ class MarioEnv(gym.Env):
             if died or level_cleared:
                 self._max_x = x
                 self._stuck = 0
+        elif self.start_level == "marathon":
+            # Marathon: any death ends the run. Level clears are handled
+            # above (either fall through and continue, or terminate with a
+            # bonus if it was the last usable level).
+            terminated = died
         else:
-            # Fixed / random: any death or level clear ends the episode.
+            # Fixed / random / sequential: any death or level clear ends the episode.
             terminated = died or level_cleared
 
         if x > self._max_x:
@@ -475,6 +594,34 @@ class MarioEnv(gym.Env):
         self._last_score = score
         self._last_coins = coins
         return self._obs(), float(reward), terminated, truncated, info
+
+    def _reload_level_state(self, target: tuple[int, int]) -> bool:
+        """Mid-episode reload of a specific level's save-state. Used by
+        marathon mode to jump directly to the next level on a clear
+        (skipping the in-game victory cutscene). Refreshes all internal
+        tracking so reward accounting starts clean for the new level.
+
+        Returns True on success, False if the state file is missing or
+        too small to be a valid save-state. Callers must handle False —
+        continuing with stale trackers would soft-lock marathon mode.
+        """
+        state_file = _level_state_path(*target)
+        if not (state_file.exists() and state_file.stat().st_size > 1000):
+            return False
+        with open(state_file, "rb") as f:
+            self.pyboy.load_state(f)
+        # Refresh memory-mapped state after load
+        for _ in range(4):
+            self.pyboy.tick()
+        # Reset per-level trackers
+        self._last_x = self.gw.level_progress
+        self._max_x = self._last_x
+        self._last_lives = self.gw.lives_left
+        self._last_world = tuple(self.gw.world)
+        self._last_score = self.gw.score
+        self._last_coins = self.gw.coins
+        self._stuck = 0
+        return True
 
     def close(self):
         try:
@@ -504,11 +651,10 @@ def make_pyboy_env(
     if not rom_path.exists():
         raise FileNotFoundError(f"ROM not found: {rom_path}")
 
-    disable_renderer = window_type == "null" and obs_type != "pixels"
-    # Note: for tile obs we can safely disable rendering (we read game_area).
-    # For pixel obs we need rendering even in null mode.
-    if obs_type == "pixels":
-        disable_renderer = False if window_type == "SDL2" else False
+    # Tile obs reads game_area(), so rendering can be disabled in null-window
+    # mode for a small speedup. Pixel obs and the SDL2 window both require
+    # a live framebuffer.
+    disable_renderer = (window_type == "null" and obs_type != "pixels")
     pyboy = PyBoy(
         str(rom_path),
         window_type=window_type,

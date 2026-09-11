@@ -1,15 +1,25 @@
 """Training presets: built-in defaults + user-saved JSON.
 
-A preset is a dict of training-tab field values. User presets live in
-`training_presets.json` next to this file; they override built-ins on
-name collision. Built-ins can be viewed and used but not deleted.
+A preset is a dict of training-tab field values.
+
+Storage:
+  - `builtin_presets.json`  — canonical source for built-in presets. Bundled
+    with the code. If missing, the hardcoded `_HARDCODED_BUILTINS` fallback
+    below is used (and the JSON file is regenerated).
+  - `training_presets.json` — user-saved presets. Overrides built-ins on
+    name collision.
+
+Editing `builtin_presets.json` lets you tweak the shipped defaults without
+touching Python code.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-PRESETS_FILE = Path(__file__).resolve().parent / "training_presets.json"
+_HERE = Path(__file__).resolve().parent
+BUILTINS_FILE = _HERE / "builtin_presets.json"
+PRESETS_FILE = _HERE / "training_presets.json"
 
 # Fields a preset can set. Keep in sync with gui.py's training-tab StringVars.
 PRESET_FIELDS = (
@@ -33,10 +43,17 @@ PRESET_FIELDS = (
 #                       PyBoy's SML wrapper cannot boot). Death or level
 #                       clear ends the episode → next episode = new level.
 #                       Best for generalisation across worlds.
+#   - "sequential"   → cycles through all 10 usable levels. The cursor
+#                       advances ONLY on a real clear; death retries the
+#                       same level with fresh lives.
+#   - "marathon"     → single-attempt speedrun through every usable level
+#                       in one episode. Level-end cutscene is skipped by
+#                       force-loading the next level's state the instant
+#                       Mario clears. ANY death ends the episode.
 #   - "1-1", "2-1"…  → FIXED level. Same level every episode; death or
 #                       clear terminates and next episode replays the same
 #                       state. Best for drilling one hard level.
-BUILTIN_PRESETS: dict[str, dict] = {
+_HARDCODED_BUILTINS: dict[str, dict] = {
     # ---- Campaign (play through the game respecting lives) ----
     "Mario — Quick smoke test (30 s)": {
         "game": "mario",
@@ -156,6 +173,90 @@ BUILTIN_PRESETS: dict[str, dict] = {
         "n_eval_episodes": 3,
         "device": "cpu",
     },
+    # ---- Sequential: cycle through all 10 usable levels. Death retries
+    #      the same level; a clear advances to the next. Best for training
+    #      an agent that has to reliably beat every level, not just the
+    #      easy ones the current best-model happens to be good at. ----
+    "Mario — No return, cycle levels (~1 h)": {
+        "game": "mario",
+        "obs_type": "tiles",
+        "start_level": "sequential",
+        "timesteps": 10_000_000,
+        "n_envs": 10,
+        "ent_coef": 0.02,
+        "learning_rate": 2.5e-4,
+        "n_steps": 512,
+        "batch_size": 128,
+        "n_epochs": 4,
+        "action_repeat": 4,
+        "frame_stack": 4,
+        "seed": 0,
+        "checkpoint_freq": 250_000,
+        "eval_freq": 100_000,
+        "n_eval_episodes": 3,
+        "device": "cpu",
+    },
+    "Mario — No return, overnight (~8 h)": {
+        "game": "mario",
+        "obs_type": "tiles",
+        "start_level": "sequential",
+        "timesteps": 60_000_000,
+        "n_envs": 10,
+        "ent_coef": 0.02,
+        "learning_rate": 2.5e-4,
+        "n_steps": 512,
+        "batch_size": 128,
+        "n_epochs": 4,
+        "action_repeat": 4,
+        "frame_stack": 4,
+        "seed": 0,
+        "checkpoint_freq": 500_000,
+        "eval_freq": 250_000,
+        "n_eval_episodes": 3,
+        "device": "cpu",
+    },
+    # ---- Marathon: one episode = single-attempt speedrun through ALL 10
+    #      usable levels. On level clear the in-game cutscene is skipped by
+    #      force-loading the next level's state (instant). ANY death ends
+    #      the episode. Big bonus if Mario clears the final level. ----
+    "Mario — Marathon, all levels (~1 h)": {
+        "game": "mario",
+        "obs_type": "tiles",
+        "start_level": "marathon",
+        "timesteps": 10_000_000,
+        "n_envs": 10,
+        "ent_coef": 0.02,
+        "learning_rate": 2.5e-4,
+        "n_steps": 512,
+        "batch_size": 128,
+        "n_epochs": 4,
+        "action_repeat": 4,
+        "frame_stack": 4,
+        "seed": 0,
+        "checkpoint_freq": 250_000,
+        "eval_freq": 100_000,
+        "n_eval_episodes": 3,
+        "device": "cpu",
+    },
+    "Mario — Marathon, overnight (~8 h)": {
+        "game": "mario",
+        "obs_type": "tiles",
+        "start_level": "marathon",
+        "timesteps": 60_000_000,
+        "n_envs": 10,
+        "ent_coef": 0.02,
+        "learning_rate": 2.5e-4,
+        "n_steps": 512,
+        "batch_size": 128,
+        "n_epochs": 4,
+        "action_repeat": 4,
+        "frame_stack": 4,
+        "seed": 0,
+        "checkpoint_freq": 500_000,
+        "eval_freq": 250_000,
+        "n_eval_episodes": 3,
+        "device": "cpu",
+    },
     # ---- Single-level drilling (example: 3-2, a tricky one). Copy this
     #      and change start_level to focus on any specific level. ----
     "Mario — Practice level 3-2 (~30 min)": {
@@ -220,9 +321,53 @@ BUILTIN_PRESETS: dict[str, dict] = {
 }
 
 
+def _load_builtin_from_file() -> dict[str, dict] | None:
+    """Load built-in presets from `builtin_presets.json` if it exists and
+    parses cleanly. Returns None otherwise (caller falls back to hardcoded).
+    """
+    if not BUILTINS_FILE.exists():
+        return None
+    try:
+        data = json.loads(BUILTINS_FILE.read_text())
+        if isinstance(data, dict) and all(isinstance(v, dict) for v in data.values()):
+            return data
+    except (json.JSONDecodeError, OSError):
+        pass
+    return None
+
+
+def _write_builtin_file(data: dict[str, dict]) -> None:
+    try:
+        BUILTINS_FILE.write_text(json.dumps(data, indent=2, sort_keys=False))
+    except OSError:
+        pass
+
+
+def _init_builtins() -> dict[str, dict]:
+    """Load bundled JSON if present; otherwise write hardcoded defaults
+    to disk. In either case the returned dict is `hardcoded ⊕ file` — the
+    hardcoded set is the baseline (so any newly-added built-in preset in
+    the codebase automatically appears), and the JSON file overrides on
+    name collision (so users can hand-edit built-ins). Missing JSON is
+    written from the current hardcoded defaults.
+    """
+    from_file = _load_builtin_from_file()
+    merged = dict(_HARDCODED_BUILTINS)
+    if from_file is not None:
+        merged.update(from_file)
+    else:
+        _write_builtin_file(_HARDCODED_BUILTINS)
+    return merged
+
+
+BUILTIN_PRESETS: dict[str, dict] = _init_builtins()
+
+
 def load_all() -> dict[str, dict]:
-    """Return builtin + user presets. User overrides builtin on collision."""
-    merged = dict(BUILTIN_PRESETS)
+    """Return builtin + user presets. User overrides builtin on collision.
+    Built-ins are re-read from JSON on every call so hand-edits are picked up.
+    """
+    merged = dict(_init_builtins())
     for name, cfg in load_user().items():
         merged[name] = cfg
     return merged

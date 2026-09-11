@@ -37,7 +37,8 @@ TRACKED_STATS = ("total_timesteps", "ep_rew_mean", "ep_len_mean", "fps", "time_e
 SPEED_CHOICES = [("0.5×", 0.5), ("1× (real time)", 1.0), ("2×", 2.0),
                  ("4×", 4.0), ("Unlimited", 0.0)]
 
-LEVEL_CHOICES = ["default", "random"] + [f"{w}-{l}" for (w, l) in SML_ALL_LEVELS]
+LEVEL_CHOICES = (["default", "random", "sequential", "marathon"]
+                 + [f"{w}-{l}" for (w, l) in SML_ALL_LEVELS])
 
 
 class GameBoyAIGUI:
@@ -60,6 +61,9 @@ class GameBoyAIGUI:
         self.play_thread: threading.Thread | None = None
         self.preview_stop = threading.Event()
         self.preview_thread: threading.Thread | None = None
+        self.tune_stop = threading.Event()
+        self.tune_thread: threading.Thread | None = None
+        self.tune_proc: subprocess.Popen | None = None
         self._train_target_steps = 1
         self._train_baseline_steps: int | None = None
 
@@ -113,12 +117,22 @@ class GameBoyAIGUI:
 
         nb = ttk.Notebook(self.root)
         nb.pack(fill="both", expand=True, padx=10, pady=(4, 10))
+        # Workflow order: 1) Tune → find good hyperparams,
+        #                 2) Train → full training run with those,
+        #                 3) Play → watch the trained agent.
+        tune_tab = ttk.Frame(nb, padding=10)
         train_tab = ttk.Frame(nb, padding=10)
         play_tab = ttk.Frame(nb, padding=10)
+        nb.add(tune_tab, text="Tune")
         nb.add(train_tab, text="Train")
         nb.add(play_tab, text="Play")
+        # Build Train first (defines vars the other tabs may reference)
         self._build_train(train_tab)
         self._build_play(play_tab)
+        self._build_tune(tune_tab)
+        # Train is the primary workflow — open focused on it, even though
+        # Tune sits to its left in the tab strip (Tune → Train → Play).
+        nb.select(train_tab)
 
     def _build_train(self, parent: ttk.Frame) -> None:
         # 2-column params layout so the tab fits on a laptop screen.
@@ -250,8 +264,6 @@ class GameBoyAIGUI:
         self.train_progress.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         self.train_progress_label = ttk.Label(pb_frame, text="—", width=22)
         self.train_progress_label.grid(row=0, column=1, sticky="e")
-
-        row = 3
 
         # ---- Live stats + training log, side by side ----
         monitor = ttk.Frame(parent)
@@ -404,6 +416,401 @@ class GameBoyAIGUI:
         )
         self._canvas_img_id = self.canvas.create_image(0, 0, anchor="nw", image=self._tk_img)
 
+    # ---------- Tuning tab ----------
+
+    def _build_tune(self, parent: ttk.Frame) -> None:
+        """Hyperparameter tuning tab. Runs each trial as a `main.py train`
+        subprocess (grid search over the sweep JSON, or random search of N
+        combos), then reads the trial's best eval reward from
+        evaluations.npz. Best-first results, one-click save-as-preset or
+        load-into-train-tab from any row.
+        """
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(4, weight=1)
+
+        # Widgets on the Tune tab that must be disabled while a train or
+        # tune subprocess is running (prevents mid-run edits + confused UX).
+        self._tune_config_widgets: list[tk.Widget] = []
+
+        # ---- Base config (loaded from preset) ----
+        cfg_frame = ttk.LabelFrame(parent, text="Trial config", padding=6)
+        cfg_frame.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        cfg_frame.columnconfigure(1, weight=1)
+        cfg_frame.columnconfigure(3, weight=1)
+
+        ttk.Label(cfg_frame, text="Base preset:").grid(row=0, column=0, sticky="w")
+        self.tune_preset_var = tk.StringVar(value="")
+        self.tune_preset_combo = ttk.Combobox(cfg_frame, textvariable=self.tune_preset_var,
+                                               state="readonly")
+        self.tune_preset_combo.grid(row=0, column=1, sticky="ew", padx=6)
+        self._tune_config_widgets.append(self.tune_preset_combo)
+
+        ttk.Label(cfg_frame, text="Timesteps / trial:").grid(row=0, column=2, sticky="w")
+        self.tune_trial_steps_var = tk.IntVar(value=50_000)
+        tune_steps_spin = ttk.Spinbox(cfg_frame, from_=2000, to=10_000_000, increment=10000,
+                                       textvariable=self.tune_trial_steps_var, width=12)
+        tune_steps_spin.grid(row=0, column=3, sticky="w", padx=6)
+        self._tune_config_widgets.append(tune_steps_spin)
+
+        ttk.Label(cfg_frame, text="Run-name prefix:").grid(row=1, column=0, sticky="w",
+                                                             pady=(4, 0))
+        self.tune_run_prefix_var = tk.StringVar(value="tune")
+        tune_prefix_entry = ttk.Entry(cfg_frame, textvariable=self.tune_run_prefix_var, width=20)
+        tune_prefix_entry.grid(row=1, column=1, sticky="ew", padx=6, pady=(4, 0))
+        self._tune_config_widgets.append(tune_prefix_entry)
+
+        ttk.Label(cfg_frame, text="Metric:").grid(row=1, column=2, sticky="w", pady=(4, 0))
+        self.tune_metric_var = tk.StringVar(value="best eval reward")
+        tune_metric_combo = ttk.Combobox(cfg_frame, textvariable=self.tune_metric_var,
+                                          values=["best eval reward", "final eval reward",
+                                                  "mean eval reward"],
+                                          state="readonly", width=18)
+        tune_metric_combo.grid(row=1, column=3, sticky="w", padx=6, pady=(4, 0))
+        self._tune_config_widgets.append(tune_metric_combo)
+
+        # Search-type row
+        ttk.Label(cfg_frame, text="Search:").grid(row=2, column=0, sticky="w", pady=(4, 0))
+        search_frame = ttk.Frame(cfg_frame)
+        search_frame.grid(row=2, column=1, columnspan=3, sticky="w",
+                           padx=6, pady=(4, 0))
+        self.tune_search_type_var = tk.StringVar(value="grid")
+        rb_grid = ttk.Radiobutton(search_frame, text="Grid (all combinations)",
+                                    variable=self.tune_search_type_var, value="grid")
+        rb_grid.pack(side="left", padx=(0, 12))
+        rb_random = ttk.Radiobutton(search_frame, text="Random",
+                                     variable=self.tune_search_type_var, value="random")
+        rb_random.pack(side="left", padx=(0, 4))
+        ttk.Label(search_frame, text="N trials:").pack(side="left", padx=(4, 2))
+        self.tune_n_random_var = tk.IntVar(value=10)
+        n_random_spin = ttk.Spinbox(search_frame, from_=1, to=1000,
+                                     textvariable=self.tune_n_random_var, width=6)
+        n_random_spin.pack(side="left")
+        self._tune_config_widgets.extend([rb_grid, rb_random, n_random_spin])
+
+        # ---- Sweep spec ----
+        sweep_frame = ttk.LabelFrame(parent, text="Sweep (JSON — param → list of values)",
+                                       padding=6)
+        sweep_frame.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        sweep_frame.columnconfigure(0, weight=1)
+        self.tune_sweep_text = tk.Text(sweep_frame, height=5, wrap="word",
+                                        font=("Menlo", 10))
+        self.tune_sweep_text.grid(row=0, column=0, sticky="ew")
+        self.tune_sweep_text.insert("1.0",
+            '{\n  "ent_coef": [0.005, 0.01, 0.02, 0.05],\n'
+            '  "learning_rate": [1e-4, 2.5e-4, 5e-4]\n}')
+        self._tune_config_widgets.append(self.tune_sweep_text)
+        ttk.Label(sweep_frame, text="Cartesian product of all values → total trials",
+                   foreground="#888").grid(row=1, column=0, sticky="w", pady=(2, 0))
+
+        # ---- Buttons + progress ----
+        ctrl = ttk.Frame(parent)
+        ctrl.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        ctrl.columnconfigure(2, weight=1)
+        self.btn_tune_start = ttk.Button(ctrl, text="Start tuning",
+                                          command=self.start_tuning)
+        self.btn_tune_start.grid(row=0, column=0, padx=(0, 4))
+        self.btn_tune_stop = ttk.Button(ctrl, text="Stop",
+                                         command=self.stop_tuning, state="disabled")
+        self.btn_tune_stop.grid(row=0, column=1, padx=4)
+        self.tune_progress = ttk.Progressbar(ctrl, mode="determinate", maximum=100)
+        self.tune_progress.grid(row=0, column=2, sticky="ew", padx=6)
+        self.tune_progress_label = ttk.Label(ctrl, text="—", width=18)
+        self.tune_progress_label.grid(row=0, column=3, sticky="e")
+
+        # ---- Results table ----
+        res_frame = ttk.LabelFrame(parent, text="Results (best first)", padding=4)
+        res_frame.grid(row=4, column=0, sticky="nsew")
+        res_frame.columnconfigure(0, weight=1)
+        res_frame.rowconfigure(0, weight=1)
+        self.tune_tree = ttk.Treeview(res_frame,
+                                       columns=("trial", "config", "reward",
+                                                "steps", "duration", "run"),
+                                       show="headings", height=8)
+        for c, w, anc in [("trial", 50, "e"), ("config", 320, "w"),
+                          ("reward", 90, "e"), ("steps", 80, "e"),
+                          ("duration", 80, "e"), ("run", 160, "w")]:
+            self.tune_tree.heading(c, text=c)
+            self.tune_tree.column(c, width=w, anchor=anc)
+        self.tune_tree.grid(row=0, column=0, sticky="nsew")
+        tune_scroll = ttk.Scrollbar(res_frame, command=self.tune_tree.yview)
+        tune_scroll.grid(row=0, column=1, sticky="ns")
+        self.tune_tree.config(yscrollcommand=tune_scroll.set)
+
+        # ---- Actions on selected row ----
+        actions = ttk.Frame(parent)
+        actions.grid(row=5, column=0, sticky="ew", pady=(6, 0))
+        self.btn_tune_save_preset = ttk.Button(
+            actions, text="Save selected as preset",
+            command=self._tune_save_as_preset)
+        self.btn_tune_save_preset.pack(side="left", padx=(0, 4))
+        self.btn_tune_to_train = ttk.Button(
+            actions, text="Load selected into Train tab",
+            command=self._tune_load_into_train)
+        self.btn_tune_to_train.pack(side="left", padx=4)
+        ttk.Label(actions, text="→ then switch to the Train tab and Start",
+                   foreground="#888").pack(side="left", padx=8)
+
+        # Per-trial full-config cache, keyed by trial number (int).
+        # Populated by _tuning_loop, consumed by save/load buttons.
+        self._tune_configs: dict[int, dict] = {}
+
+    # ---------- Tuning execution ----------
+
+    def start_tuning(self) -> None:
+        if self.tune_thread is not None and self.tune_thread.is_alive():
+            messagebox.showwarning("Tune", "Tuning already running.")
+            return
+        if self.train_proc is not None and self.train_proc.poll() is None:
+            messagebox.showwarning(
+                "Tune",
+                "Training is currently running. Stop training first."
+            )
+            return
+        preset_name = self.tune_preset_var.get()
+        if not preset_name or preset_name not in self._all_presets:
+            messagebox.showerror("Tune", "Pick a base preset first.")
+            return
+        base = dict(self._all_presets[preset_name])
+
+        # Parse sweep JSON
+        try:
+            import json as _json
+            sweep = _json.loads(self.tune_sweep_text.get("1.0", "end"))
+            assert isinstance(sweep, dict), "sweep must be a dict"
+            for k, v in sweep.items():
+                assert isinstance(v, list) and v, f"{k}: must be non-empty list"
+        except Exception as e:
+            messagebox.showerror("Tune", f"Bad sweep JSON: {e}")
+            return
+
+        keys = list(sweep.keys())
+        search_type = self.tune_search_type_var.get()
+        if search_type == "grid":
+            from itertools import product
+            combos = list(product(*(sweep[k] for k in keys)))
+        else:  # random
+            import random as _random
+            n = max(1, int(self.tune_n_random_var.get()))
+            rng = _random.Random()
+            combos = [tuple(rng.choice(sweep[k]) for k in keys) for _ in range(n)]
+        if not combos:
+            messagebox.showerror("Tune", "Sweep produced 0 configs.")
+            return
+
+        # Clear results + per-trial cache
+        for row in self.tune_tree.get_children():
+            self.tune_tree.delete(row)
+        self._tune_configs.clear()
+        self.tune_progress["value"] = 0
+        self.tune_progress_label.config(text=f"0 / {len(combos)}")
+        self.btn_tune_start.config(state="disabled")
+        self.btn_tune_stop.config(state="normal")
+        # Lock the train-start button so the user can't kick off a training
+        # session that would collide with the tuner's own train subprocess.
+        self.btn_train_start.config(state="disabled")
+        self._set_subprocess_widgets_disabled(True)
+        self.tune_stop.clear()
+
+        self.tune_thread = threading.Thread(
+            target=self._tuning_loop,
+            args=(base, keys, combos,
+                  int(self.tune_trial_steps_var.get()),
+                  self.tune_run_prefix_var.get().strip() or "tune",
+                  self.tune_metric_var.get()),
+            daemon=True,
+        )
+        self.tune_thread.start()
+
+    def stop_tuning(self) -> None:
+        self.tune_stop.set()
+        if self.tune_proc is not None and self.tune_proc.poll() is None:
+            try:
+                self.tune_proc.terminate()
+            except Exception:
+                pass
+
+    def _tuning_loop(self, base_cfg: dict, keys: list, combos: list,
+                     trial_steps: int, run_prefix: str, metric_name: str) -> None:
+        """Runs each config as a subprocess. After completion, reads eval
+        reward from `models/mario/<run>/logs/evaluations.npz`. Emits progress
+        + rows via stats_queue.
+        """
+        import numpy as np
+        from itertools import chain
+        game = base_cfg.get("game", "mario")
+        best_eval_freq = min(trial_steps, base_cfg.get("eval_freq", trial_steps))
+        for i, combo in enumerate(combos):
+            if self.tune_stop.is_set():
+                self.stats_queue.put(("tune_status", "cancelled"))
+                break
+            overrides = dict(zip(keys, combo))
+            cfg = {**base_cfg, **overrides}
+            # Snapshot the exact config that will run so save/load buttons can
+            # recover it later. Trial number is 1-indexed to match display.
+            self._tune_configs[i + 1] = dict(cfg)
+            run_name = f"{run_prefix}-{i + 1:03d}"
+            cfg_summary = ", ".join(f"{k}={overrides[k]}" for k in keys)
+            self.stats_queue.put(("tune_progress", i, len(combos),
+                                   f"trial {i + 1}/{len(combos)}: {cfg_summary}"))
+            # Build subprocess cmd
+            cmd = [
+                sys.executable, "-u", "main.py", "train",
+                "--game", game,
+                "--n-envs", str(cfg["n_envs"]),
+                "--timesteps", str(trial_steps),
+                "--ent-coef", str(cfg["ent_coef"]),
+                "--learning-rate", str(cfg["learning_rate"]),
+                "--n-steps", str(cfg["n_steps"]),
+                "--batch-size", str(cfg["batch_size"]),
+                "--obs-type", cfg["obs_type"],
+                "--start-level", cfg.get("start_level", "default"),
+                "--device", cfg.get("device", "cpu"),
+                "--action-repeat", str(cfg.get("action_repeat", 4)),
+                "--frame-stack", str(cfg.get("frame_stack", 4)),
+                "--n-epochs", str(cfg.get("n_epochs", 4)),
+                "--seed", str(cfg.get("seed", 0)),
+                "--checkpoint-freq", str(max(trial_steps, 1)),  # only save at end
+                "--eval-freq", str(best_eval_freq),
+                "--n-eval-episodes", str(cfg.get("n_eval_episodes", 3)),
+                "--run-name", run_name,
+            ]
+            t0 = time.time()
+            try:
+                self.tune_proc = subprocess.Popen(
+                    cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    cwd=str(self.project_dir),
+                )
+                rc = self.tune_proc.wait()
+            except Exception as e:
+                self.stats_queue.put(("log", f"[tune] trial {i + 1} err: {e}\n"))
+                continue
+            duration = time.time() - t0
+            self.tune_proc = None
+            if self.tune_stop.is_set():
+                break
+            # Read eval reward
+            eval_file = (self.project_dir / "models" / game / run_name
+                          / "logs" / "evaluations.npz")
+            reward = float("-inf")
+            actual_steps = trial_steps
+            if eval_file.exists():
+                try:
+                    data = np.load(eval_file)
+                    means = data["results"].mean(axis=1)
+                    if metric_name == "best eval reward":
+                        reward = float(means.max())
+                    elif metric_name == "final eval reward":
+                        reward = float(means[-1])
+                    else:  # mean
+                        reward = float(means.mean())
+                    actual_steps = int(data["timesteps"][-1])
+                except Exception:
+                    pass
+            self.stats_queue.put((
+                "tune_result",
+                {
+                    "trial": i + 1,
+                    "config": cfg_summary,
+                    "reward": reward,
+                    "steps": actual_steps,
+                    "duration": duration,
+                    "run": run_name,
+                },
+            ))
+        self.stats_queue.put(("tune_done", None))
+
+    def _selected_tune_config(self) -> dict | None:
+        """Return the full config of the currently-selected tune-tab row,
+        or None if nothing selected."""
+        sel = self.tune_tree.selection()
+        if not sel:
+            messagebox.showwarning("Tune",
+                                    "Select a row in the results table first.")
+            return None
+        vals = self.tune_tree.item(sel[0], "values")
+        try:
+            trial_num = int(vals[0])
+        except (ValueError, IndexError):
+            return None
+        cfg = self._tune_configs.get(trial_num)
+        if cfg is None:
+            messagebox.showerror("Tune", f"No cached config for trial {trial_num}.")
+            return None
+        return cfg
+
+    def _tune_save_as_preset(self) -> None:
+        """Save the selected trial's full config as a user preset so it
+        appears in the Train tab's preset dropdown."""
+        cfg = self._selected_tune_config()
+        if cfg is None:
+            return
+        name = simpledialog.askstring(
+            "Save tune result as preset",
+            "Name this preset (this exact config, including tuned hyperparams,\n"
+            "will be saved for use on the Train tab):",
+            parent=self.root,
+        )
+        if not name:
+            return
+        name = name.strip()
+        if not name:
+            return
+        try:
+            presets.upsert(name, cfg)
+        except ValueError as e:
+            messagebox.showerror("Save preset", str(e))
+            return
+        self._refresh_presets()
+        # Auto-select the just-saved preset on the Train tab too
+        self.preset_var.set(name)
+        self._apply_preset()
+        messagebox.showinfo(
+            "Saved",
+            f"Preset '{name}' saved. It's now selected on the Train tab —\n"
+            f"switch there and click Start to train with these hyperparams.",
+        )
+
+    def _tune_load_into_train(self) -> None:
+        """Populate the Train tab's widgets from the selected trial's
+        config, without saving a preset. One-click promotion from tuning
+        to a full training run."""
+        cfg = self._selected_tune_config()
+        if cfg is None:
+            return
+        var_map = {
+            "game": self.game_var,
+            "timesteps": self.tsteps_var,
+            "n_envs": self.n_envs_var,
+            "ent_coef": self.ent_coef_var,
+            "learning_rate": self.lr_var,
+            "n_steps": self.nsteps_var,
+            "batch_size": self.batch_var,
+            "device": self.device_var,
+            "obs_type": self.obs_type_var,
+            "start_level": self.start_level_var,
+            "action_repeat": self.action_repeat_var,
+            "frame_stack": self.frame_stack_var,
+            "n_epochs": self.n_epochs_var,
+            "seed": self.seed_var,
+            "checkpoint_freq": self.ckpt_freq_var,
+            "eval_freq": self.eval_freq_var,
+            "n_eval_episodes": self.n_eval_var,
+        }
+        for key, var in var_map.items():
+            if key in cfg:
+                var.set(cfg[key])
+        # Clear the Train-tab preset selection to signal "custom config"
+        self.preset_var.set("")
+        # Play tab should track the same obs/level for a smooth handoff
+        self.play_obs_type_var.set(cfg.get("obs_type", self.play_obs_type_var.get()))
+        if "start_level" in cfg:
+            self.play_level_var.set(cfg["start_level"])
+        self._refresh_models()
+        messagebox.showinfo(
+            "Loaded",
+            "Trial config copied into the Train tab. Switch tabs and click Start.",
+        )
+
     # ---------- Model discovery ----------
 
     def _list_models(self, game_filter: str | None = None) -> list[tuple[str, Path]]:
@@ -456,6 +863,11 @@ class GameBoyAIGUI:
         def sort_key(name):
             return (name != recommended, not presets.is_builtin(name), name.lower())
         names = sorted(self._all_presets.keys(), key=sort_key)
+        # Also feed the Tune tab's preset combo
+        if hasattr(self, "tune_preset_combo"):
+            self.tune_preset_combo["values"] = names
+            if not self.tune_preset_var.get() and names:
+                self.tune_preset_var.set(names[0])
         prev = self.preset_var.get()
         self.preset_combo["values"] = names
         if prev in names:
@@ -618,7 +1030,10 @@ class GameBoyAIGUI:
         )
         self.btn_train_start.config(state="disabled")
         self.btn_train_stop.config(state="normal")
-        self._set_training_widgets_disabled(True)
+        # Lock the tune-start button so the user can't kick off a tuning
+        # session that would collide with the running trainer.
+        self.btn_tune_start.config(state="disabled")
+        self._set_subprocess_widgets_disabled(True)
         self.stat_labels["status"].config(text="running")
         self._train_target_steps = max(1, int(self.tsteps_var.get()))
         # Baseline = model's prior step count. First observed total_timesteps
@@ -852,7 +1267,7 @@ class GameBoyAIGUI:
             # Bootstrap save-state file for the requested level if missing
             # (subprocess with timeout, so a stuck level can't wedge the GUI).
             if game == "mario" and start_level is not None:
-                if start_level == "random":
+                if start_level in ("random", "sequential", "marathon"):
                     ensure_level_states(rom_path)
                 else:
                     w, l = (int(x) for x in start_level.split("-"))
@@ -989,7 +1404,8 @@ class GameBoyAIGUI:
                     self.stat_labels["status"].config(text=f"finished (rc={rc})")
                     self.btn_train_start.config(state="normal")
                     self.btn_train_stop.config(state="disabled")
-                    self._set_training_widgets_disabled(False)
+                    self.btn_tune_start.config(state="normal")
+                    self._set_subprocess_widgets_disabled(False)
                     self.train_proc = None
                     self.preview_stop.set()
                     # Reset progress bar unless training reached the target cleanly
@@ -1023,6 +1439,50 @@ class GameBoyAIGUI:
                     if not training_active:
                         self.btn_play_start.config(state="normal")
                     self.btn_play_stop.config(state="disabled")
+                elif kind == "tune_progress":
+                    _, done_n, total, label = item
+                    pct = 100.0 * done_n / max(1, total)
+                    self.tune_progress["value"] = pct
+                    self.tune_progress_label.config(text=f"{done_n}/{total}")
+                    self._append_log(f"[tune] {label}\n")
+                elif kind == "tune_result":
+                    r = item[1]
+                    reward_str = f"{r['reward']:.1f}" if r['reward'] != float("-inf") else "—"
+                    # Insert sorted by reward (best first)
+                    inserted = False
+                    for existing in self.tune_tree.get_children():
+                        existing_vals = self.tune_tree.item(existing, "values")
+                        try:
+                            existing_r = float(existing_vals[2])
+                        except (ValueError, IndexError):
+                            existing_r = float("-inf")
+                        if r["reward"] > existing_r:
+                            self.tune_tree.insert("", self.tune_tree.index(existing),
+                                                   values=(r["trial"], r["config"],
+                                                           reward_str, r["steps"],
+                                                           f"{r['duration']:.0f}s",
+                                                           r["run"]))
+                            inserted = True
+                            break
+                    if not inserted:
+                        self.tune_tree.insert("", "end",
+                                               values=(r["trial"], r["config"],
+                                                       reward_str, r["steps"],
+                                                       f"{r['duration']:.0f}s",
+                                                       r["run"]))
+                    self._append_log(
+                        f"[tune] trial {r['trial']} done → reward={reward_str} "
+                        f"steps={r['steps']} ({r['duration']:.0f}s)\n"
+                    )
+                elif kind == "tune_status":
+                    self._append_log(f"[tune] {item[1]}\n")
+                elif kind == "tune_done":
+                    self.btn_tune_start.config(state="normal")
+                    self.btn_tune_stop.config(state="disabled")
+                    self.btn_train_start.config(state="normal")
+                    self._set_subprocess_widgets_disabled(False)
+                    self.tune_proc = None
+                    self._append_log("[tune] done\n")
         except queue.Empty:
             pass
 
@@ -1043,11 +1503,13 @@ class GameBoyAIGUI:
         except tk.TclError:
             pass
 
-    def _set_training_widgets_disabled(self, disabled: bool) -> None:
-        """Enable/disable every training-tab config widget and the Play tab's
-        input widgets while training is running. Prevents the user from
-        mid-run edits and from starting a play session that would compete
-        for CPU with the training subprocess.
+    def _set_subprocess_widgets_disabled(self, disabled: bool) -> None:
+        """Enable/disable every input widget on the Train, Play, and Tune
+        tabs while any training or tuning subprocess is running. Prevents
+        mid-run edits and prevents starting another CPU-hungry session
+        that would collide with the one already going. Action buttons
+        (Start / Stop / other-tab Start) are managed by their own callers
+        — this method only touches inputs and secondary buttons.
         """
         # Comboboxes with state='readonly' need 'readonly' (not 'normal') to
         # re-enable properly; other widgets use 'normal'.
@@ -1059,21 +1521,15 @@ class GameBoyAIGUI:
             return "normal"
 
         enabled = not disabled
-        # Training tab config widgets
-        for w in self._train_config_widgets:
-            try:
-                w.config(state=_state_for(w, enabled))
-            except tk.TclError:
-                pass
-        # Preset bar + resume/preview checkboxes on the training tab
-        for w in (self.preset_combo, self.btn_preset_save, self.btn_preset_delete,
-                  self.btn_preset_reload, self.resume_check, self.preview_check):
-            try:
-                w.config(state=_state_for(w, enabled))
-            except tk.TclError:
-                pass
-        # Play tab input widgets (avoid competing for CPU with training)
-        for w in self._play_widgets:
+        all_widgets: list[tk.Widget] = [
+            *self._train_config_widgets,
+            self.preset_combo, self.btn_preset_save, self.btn_preset_delete,
+            self.btn_preset_reload, self.resume_check, self.preview_check,
+            *self._play_widgets,
+            *self._tune_config_widgets,
+            self.btn_tune_save_preset, self.btn_tune_to_train,
+        ]
+        for w in all_widgets:
             try:
                 w.config(state=_state_for(w, enabled))
             except tk.TclError:
@@ -1090,6 +1546,16 @@ class GameBoyAIGUI:
         self._closing = True
         self.play_stop.set()
         self.preview_stop.set()
+        self.tune_stop.set()
+        if self.tune_proc is not None and self.tune_proc.poll() is None:
+            try:
+                self.tune_proc.terminate()
+                self.tune_proc.wait(timeout=5)
+            except Exception:
+                try:
+                    self.tune_proc.kill()
+                except Exception:
+                    pass
         if self.train_proc is not None and self.train_proc.poll() is None:
             self.train_proc.terminate()
             try:
