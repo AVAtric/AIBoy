@@ -144,6 +144,22 @@ class ResultTests(unittest.TestCase):
                                             duration=tuning.trial_duration(run, cfg, 100_000))
             self.assertAlmostEqual(got.per_minute, 600.0 / (42.5 / 60))
 
+    def test_prune_trial_runs_keeps_best(self):
+        mk = lambda i, v, run: tuning.ConfigResult(index=i, overrides={}, config={}, metric="m",
+                                                  values=[v] if v is not None else [], runs=[run])
+        results = [mk(1, 10.0, "t-001"), mk(2, 50.0, "t-002"), mk(3, None, "t-003"), mk(4, 30.0, "t-004")]
+        deleted = []
+        gone = tuning.prune_trial_runs(results, 2, "mario", lambda g, r: deleted.append(r))
+        self.assertEqual(sorted(gone), ["t-001", "t-003"])          # worst scored + unscored
+        self.assertEqual(sorted(deleted), ["t-001", "t-003"])
+        self.assertTrue(results[0].pruned and results[2].pruned)
+        self.assertFalse(results[1].pruned or results[3].pruned)
+        self.assertEqual(tuning.prune_trial_runs(results, 2, "mario", lambda g, r: deleted.append(r)), [])
+        self.assertEqual(tuning.prune_trial_runs(results, 0, "mario", lambda g, r: deleted.append(r)), [])
+        # a later, better result pushes an older one out
+        results.append(mk(5, 99.0, "t-005"))
+        self.assertEqual(tuning.prune_trial_runs(results, 2, "mario", lambda g, r: deleted.append(r)), ["t-004"])
+
     def test_nan_scores_rank_last(self):
         a = tuning.ConfigResult(index=1, overrides={}, config={}, metric="m", values=[float("nan")],
                                 runs=["r"])

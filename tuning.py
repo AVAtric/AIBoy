@@ -434,6 +434,7 @@ class ConfigResult:
     timesteps: int = 0
     duration: float = 0.0
     reused: int = 0                 # seeds skipped because results already existed
+    pruned: bool = False            # run folders deleted to save space (scores kept)
 
     @property
     def score(self) -> float:
@@ -479,6 +480,30 @@ def load_results(path: Path) -> tuple[dict, list[ConfigResult]]:
 def full_config(base: dict, overrides: dict) -> dict:
     """Base preset + defaults for optional fields + sweep overrides."""
     return {**PRESET_DEFAULTS, **base, **overrides}
+
+
+def prune_trial_runs(results, keep: int, game: str, delete_run) -> list[str]:
+    """Delete the run folders of every config outside the `keep` best.
+
+    Scores stay in `results` (and in the saved results file); only the
+    training artefacts on disk go. Unscored configs (crashed trials) are
+    pruned too. `keep <= 0` disables pruning. Returns the deleted run names.
+    """
+    if keep <= 0:
+        return []
+    ranked = rank_results(results)
+    deleted: list[str] = []
+    for res in ranked[keep:]:
+        if res.pruned:
+            continue
+        for run_name in res.runs:
+            try:
+                delete_run(game, run_name)
+                deleted.append(run_name)
+            except (OSError, ValueError):
+                pass
+        res.pruned = True
+    return deleted
 
 
 def _sortable(score: float) -> float:

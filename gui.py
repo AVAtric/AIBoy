@@ -579,12 +579,17 @@ class GameBoyAIGUI:
         _field(2, 1, "Metric:", metric_combo)
         self.tune_metric_note = ttk.Label(cfg_frame, text=tuning.METRIC_NOTES[tuning.METRIC_BEST],
                                           foreground=THEME.muted, wraplength=640)
-        self.tune_metric_note.grid(row=4, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        self.tune_metric_note.grid(row=6, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        self.tune_keep_best_var = tk.IntVar(value=9)
+        _field(3, 0, "Keep best N trial runs:", ttk.Spinbox(
+            cfg_frame, from_=0, to=100, width=6, textvariable=self.tune_keep_best_var))
+        ttk.Label(cfg_frame, text="(0 = keep all; scores of deleted runs stay in the table)",
+                  foreground=THEME.muted).grid(row=3, column=2, columnspan=2, sticky="w", padx=12)
         self.tune_skip_done_var = tk.BooleanVar(value=True)
         skip_cb = ttk.Checkbutton(
             cfg_frame, variable=self.tune_skip_done_var,
             text="Reuse finished trials with the same prefix and config (resumes a sweep)")
-        skip_cb.grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        skip_cb.grid(row=5, column=0, columnspan=4, sticky="w", pady=(4, 0))
         self._tune_config_widgets.append(skip_cb)
 
 
@@ -605,7 +610,7 @@ class GameBoyAIGUI:
                                             wraplength=620)
         self.tune_template_note.grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 4))
 
-        self.tune_sweep_text = tk.Text(sweep_frame, height=6, wrap="word", font=MONO, undo=True)
+        self.tune_sweep_text = tk.Text(sweep_frame, height=5, wrap="word", font=MONO, undo=True)
         self.tune_sweep_text.grid(row=2, column=0, columnspan=3, sticky="ew")
         self.tune_sweep_text.bind("<<Modified>>", self._on_sweep_modified)
         self._tune_config_widgets.append(self.tune_sweep_text)
@@ -687,8 +692,11 @@ class GameBoyAIGUI:
         self._rescore_results(metric)
 
     def _rescore_results(self, metric: str) -> None:
-        """Recompute every finished config's score from its trial files."""
+        """Recompute every finished config's score from its trial files.
+        Configs whose run folders were pruned keep their current values."""
         for res in self._tune_results.values():
+            if res.pruned:
+                continue
             values, ep_lens = [], []
             for run_name in res.runs:
                 run_dir = runs.run_paths(self.game, run_name)["base"]
@@ -735,6 +743,7 @@ class GameBoyAIGUI:
             n_seeds = max(1, int(self.tune_seeds_var.get()))
             n_random = max(1, int(self.tune_n_random_var.get()))
             evals = max(1, int(self.tune_evals_var.get()))
+            keep_best = max(0, int(self.tune_keep_best_var.get()))
         except (tk.TclError, ValueError):
             return None, "steps / seeds / evals / N must be whole numbers"
         if trial_steps < 2000:
@@ -750,6 +759,7 @@ class GameBoyAIGUI:
             "prefix": self.tune_run_prefix_var.get().strip() or "tune",
             "metric": self.tune_metric_var.get(),
             "skip_done": bool(self.tune_skip_done_var.get()),
+            "keep_best": keep_best,
         }, None
 
     def tune_update_summary(self, *_args) -> None:
@@ -935,6 +945,12 @@ class GameBoyAIGUI:
             res.duration = time.time() - t0
             if res.runs:
                 results.append(res)
+                # Keep only the best `keep_best` configs on disk; scores stay.
+                deleted = tuning.prune_trial_runs(results, plan["keep_best"], game, runs.delete_run)
+                if deleted:
+                    self.stats_queue.put(("tune_status",
+                                          f"deleted {len(deleted)} trial run(s) outside the best "
+                                          f"{plan['keep_best']}: {', '.join(deleted)}"))
                 self.stats_queue.put(("tune_result", res))
                 try:
                     tuning.save_results(out_path, meta, results)
@@ -958,6 +974,8 @@ class GameBoyAIGUI:
             self.tune_tree.delete(row)
         for rank, r in enumerate(self.tune_results(), start=1):
             run_txt = ", ".join(r.runs) + (f"  ({r.reused} reused)" if r.reused else "")
+            if r.pruned:
+                run_txt += "  (deleted)"
             self.tune_tree.insert(
                 "", "end", iid=str(r.index),
                 values=(rank, r.label or "(base config)", r.score_text(),

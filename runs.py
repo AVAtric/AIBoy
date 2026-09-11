@@ -110,6 +110,24 @@ def _snapshot_steps(path: Path) -> int:
         return 0
 
 
+KEEP_CHECKPOINTS = 5    # step snapshots kept per run (best_model.zip / final.zip are separate)
+
+
+def prune_checkpoints(ckpt_dir: Path, keep: int = KEEP_CHECKPOINTS) -> list[Path]:
+    """Delete all but the newest `keep` step snapshots (`ppo_<N>_steps.zip`).
+    `keep <= 0` keeps everything. Returns the deleted paths."""
+    if keep <= 0 or not ckpt_dir.exists():
+        return []
+    snaps = sorted(ckpt_dir.glob("ppo_*_steps.zip"), key=_snapshot_steps)
+    doomed = snaps[:-keep] if len(snaps) > keep else []
+    for p in doomed:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    return doomed
+
+
 def latest_checkpoint(ckpt_dir: Path) -> Path | None:
     if not ckpt_dir.exists():
         return None

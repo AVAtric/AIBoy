@@ -26,8 +26,9 @@ from env import (
     GAMES, OBS_TYPES, SUPPORTED_GAMES, env_factory, level_choices, make_pyboy_env,
     prepare_level_states, wrap_vec_env,
 )
-from runs import (cpu_count, latest_checkpoint, read_run_config, recommended_n_envs,
-                  resolve_model_path, run_paths, write_run_config)
+from runs import (KEEP_CHECKPOINTS, cpu_count, latest_checkpoint, prune_checkpoints,
+                  read_run_config, recommended_n_envs, resolve_model_path, run_paths,
+                  write_run_config)
 
 PROJECT_DIR = Path(__file__).resolve().parent
 
@@ -51,6 +52,25 @@ def build_play_env(game, action_repeat, frame_stack, emulation_speed, obs_type, 
         return Monitor(env)
 
     return wrap_vec_env(DummyVecEnv([_init]), obs_type, frame_stack)
+
+
+class PruningCheckpointCallback(CheckpointCallback):
+    """CheckpointCallback that keeps only the newest `keep` step snapshots.
+
+    Long runs otherwise accumulate hundreds of multi-megabyte zips; the
+    newest few are all that resume or inspection ever needs. `best_model.zip`
+    and `final.zip` live elsewhere and are never touched.
+    """
+
+    def __init__(self, *args, keep: int = KEEP_CHECKPOINTS, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.keep = keep
+
+    def _on_step(self) -> bool:
+        result = super()._on_step()
+        if self.n_calls % self.save_freq == 0:
+            prune_checkpoints(Path(self.save_path), self.keep)
+        return result
 
 
 def pick_policy(obs_type: str) -> tuple[str, dict]:
@@ -194,10 +214,11 @@ def cmd_train(args: argparse.Namespace) -> None:
 
     # SB3 counts callback frequency in vec-env steps; the flags are env steps.
     per_env = max(1, args.n_envs)
-    checkpoint_cb = CheckpointCallback(
+    checkpoint_cb = PruningCheckpointCallback(
         save_freq=max(args.checkpoint_freq // per_env, 1),
         save_path=str(paths["checkpoints"]),
         name_prefix="ppo",
+        keep=args.keep_checkpoints,
     )
     eval_cb = EvalCallback(
         eval_env,
@@ -296,6 +317,8 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--resume", action="store_true", help="Resume from newest checkpoint")
     t.add_argument("--run-name", default=None, help="Sub-dir name (defaults to 'default')")
     t.add_argument("--checkpoint-freq", type=int, default=25_000)
+    t.add_argument("--keep-checkpoints", type=int, default=KEEP_CHECKPOINTS,
+                   help="Step snapshots to keep per run; older ones are deleted (0 = keep all)")
     t.add_argument("--eval-freq", type=int, default=10_000)
     t.add_argument("--n-eval-episodes", type=int, default=3)
     t.add_argument("--learning-rate", type=float, default=2.5e-4)

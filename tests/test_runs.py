@@ -72,6 +72,20 @@ class RunDiscoveryTests(unittest.TestCase):
         cmd = runs.build_train_cmd(presets.normalize({"game": "mario"}), "r")
         self.assertEqual(cmd[cmd.index("--n-envs") + 1], str(presets.DEFAULT_CONFIG["n_envs"]))
 
+    def test_prune_checkpoints(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            p = self._make_run(root, "mario", "r", best=True, final=True,
+                               snaps=(1000, 3000, 2000, 5000, 4000, 7000, 6000))
+            deleted = runs.prune_checkpoints(p["checkpoints"], keep=5)
+            self.assertEqual(sorted(x.name for x in deleted), ["ppo_1000_steps.zip", "ppo_2000_steps.zip"])
+            left = sorted(x.name for x in p["checkpoints"].glob("*.zip"))
+            self.assertEqual(left, ["final.zip", "ppo_3000_steps.zip", "ppo_4000_steps.zip",
+                                    "ppo_5000_steps.zip", "ppo_6000_steps.zip", "ppo_7000_steps.zip"])
+            self.assertEqual(runs.prune_checkpoints(p["checkpoints"], keep=5), [])
+            self.assertEqual(runs.prune_checkpoints(p["checkpoints"], keep=0), [])
+            self.assertTrue((p["logs"] / "best_model.zip").exists())
+
     def test_housekeeping(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)

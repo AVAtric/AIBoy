@@ -30,6 +30,7 @@ TITLE = ("Helvetica", 15, "bold")
 # Run-name prefix of the wizard's tuning trials. Overridable so automated
 # tests never share trial directories with a real wizard session.
 WIZARD_PREFIX = os.environ.get("GAMEBOY_WIZARD_PREFIX", "wizard")
+KEEP_BEST_TRIALS = 9            # run folders kept during a search; the rest are deleted
 INTRO = {
     0: "Pick a training goal and a group of hyperparameters to compare. Every "
        "candidate is trained briefly and scored on its best evaluation reward. "
@@ -207,10 +208,8 @@ class WizardTab:
         ttk.Label(form, textvariable=self.summary_var, font=MONO).grid(
             row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
         self.auto_var = tk.BooleanVar(value=False)
-        auto_cb = ttk.Checkbutton(
-            form, variable=self.auto_var,
-            text="Auto-complete: after the search, save the best as a preset, start training "
-                 "and switch to the screen when it is done")
+        auto_cb = ttk.Checkbutton(form, variable=self.auto_var,
+                                  text="Auto-complete: save the best, train, then watch")
         auto_cb.grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self._register(self.goal_combo, self.template_combo, steps_spin, seeds_spin, auto_cb)
 
@@ -483,6 +482,7 @@ class WizardTab:
         except (tk.TclError, ValueError):
             pass
         app.tune_run_prefix_var.set(WIZARD_PREFIX)
+        app.tune_keep_best_var.set(KEEP_BEST_TRIALS)
         app.tune_metric_var.set(tuning.METRIC_BEST)
         app.tune_search_type_var.set("grid")
         app.tune_skip_done_var.set(True)
@@ -548,6 +548,8 @@ class WizardTab:
             self._render_candidates()
             self.btn_use_best.config(state="disabled")
             self.status_var.set("Previous search data deleted.")
+        elif self.app.tune_results():
+            self._render_candidates()
 
     def on_tune_result(self) -> None:
         if self.phase == "tuning":
@@ -603,7 +605,22 @@ class WizardTab:
         self.overrides = dict(best.overrides)
         self.config = presets.normalize(best.config)
         self.preset_name_var.set("")
+        self._discard_search_runs()
         self.goto(1)
+
+    def _discard_search_runs(self) -> None:
+        """The chosen config is all that matters from here on; the trial runs
+        of the search only take up disk space."""
+        try:
+            n_runs, freed = runs.delete_tune_data(self.app.game, WIZARD_PREFIX)
+        except (OSError, ValueError):
+            return
+        if n_runs:
+            for res in self.app.tune_results():
+                res.pruned = True
+            self.app.render_tune_results()
+            self.app.flash(f"Search data deleted: {n_runs} trial run(s), "
+                           f"{runs.format_size(freed)} freed.")
 
     # ---------- step 2: preset ----------
 

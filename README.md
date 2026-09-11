@@ -188,16 +188,28 @@ always shows what is running.
 While training or tuning runs, every input on every tab is locked so a run
 cannot be edited mid-flight and two CPU-hungry sessions cannot collide.
 
-### Housekeeping
+### Disk space and housekeeping
 
-Trial runs and wizard runs accumulate under `models/mario/`. Delete them
-from where they were made: **Delete trial runs…** on the Tune tab removes
-every run of the current prefix plus its results file, **Clear previous
-search data…** on the wizard's first step does the same for the wizard's
-trials, and **Delete run…** on the Train tab removes the run named in the
-run field. Each asks first and shows the size it will free; saved presets
-are never touched. **Open folder** reveals a run in the file manager, and
-**Clear** on the screen panel blanks the emulator view.
+Training artefacts are kept small automatically:
+
+- **Step snapshots**: a run keeps only its newest 5 `ppo_<N>_steps.zip`
+  (CLI: `--keep-checkpoints`, 0 = keep all). `best_model.zip` and
+  `final.zip` are always kept.
+- **Sweeps**: while a sweep runs, only the run folders of the best N
+  candidates are kept (Tune tab **Keep best N trial runs**, default 9; the
+  wizard uses 9). Their scores stay in the table and in the results file,
+  marked *(deleted)*.
+- **Wizard**: **Continue with best** and auto-complete delete all search
+  runs and the results file, because the saved preset carries everything
+  the training needs.
+
+Manual clean-up lives where the data was made: **Delete trial runs…** on
+the Tune tab removes every run of the current prefix plus its results
+file, **Clear previous search data…** on the wizard's first step does the
+same for the wizard's trials, and **Delete run…** on the Train tab removes
+the run named in the run field. Each asks first and shows the size it will
+free; saved presets are never touched. **Open folder** reveals a run in the
+file manager, and **Clear** on the screen panel blanks the emulator view.
 
 ### Screen panel (right)
 
@@ -258,6 +270,7 @@ the command from.
 | `--resume`          | off     | Continue from newest `models/mario/<run>/checkpoints/*.zip`  |
 | `--run-name`        | default | Sub-directory under `models/mario/`                          |
 | `--checkpoint-freq` | 25000   | Env steps between checkpoints                                |
+| `--keep-checkpoints`| 5       | Newest step snapshots kept per run (0 = all)                 |
 | `--eval-freq`       | 10000   | Env steps between evaluations                                |
 | `--n-eval-episodes` | 3       | Mario evals are deterministic; 1 episode is run (see Performance) |
 | `--learning-rate`   | 2.5e-4  |                                                              |
@@ -393,7 +406,7 @@ models/mario/
 ├── _level_states/            per-level save-states (cache)
 ├── _tune/<prefix>.json       sweep results (Tune tab, wizard)
 └── <run-name>/
-    ├── checkpoints/ppo_<N>_steps.zip   periodic snapshots
+    ├── checkpoints/ppo_<N>_steps.zip   periodic snapshots (newest 5 kept)
     ├── checkpoints/final.zip           saved when the run ends or is stopped
     ├── logs/best_model.zip             best evaluation reward
     ├── logs/evaluations.npz            eval history
