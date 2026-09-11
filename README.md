@@ -9,17 +9,21 @@ PPO is the learner, and a Tkinter desktop app wraps the whole workflow:
 Wizard:  1 Tune  →  2 Preset  →  3 Train  →  4 Watch
 ```
 
+The window has two halves: **workflow tabs on the left, the Game Boy screen
+on the right**. Whatever produces something to watch (a finished model, the
+live preview of a training run, the wizard's final step) shows on that
+screen without switching tabs.
+
 - **Wizard** — a guided path: compare hyperparameters on short trials, save
-  the winner as a preset, run the real training, watch the result in an
-  embedded Game Boy screen. No knowledge of PPO needed.
-- **Tune** — hyperparameter sweeps (grid or random, multi-seed) with a
-  best-first results table; any row becomes a preset.
+  the winner as a preset, run the real training, watch the result. No
+  knowledge of PPO needed.
 - **Train** — one headless training run with live stats, a progress bar,
   the full log, TensorBoard, resume, and an optional live preview.
-- **Play** — play any saved model at 0.5× to unlimited speed, deterministic
-  or stochastic, in any level mode.
-- **Presets** — browse, duplicate, edit, rename and delete training presets;
-  send one to the Train tab or the wizard.
+- **Tune** — hyperparameter sweeps (grid or random, multi-seed) with a
+  best-first results table; any row becomes a preset.
+- **Presets** — browse, create, edit, rename and delete training presets.
+- **Screen panel** — plays any saved model at 0.5× to unlimited speed with
+  the settings it was trained with, filled in automatically.
 - **CLI** — `train` and `play` sub-commands for scripts and remote machines.
 
 Only Super Mario Land is supported in this version; see [Roadmap](#roadmap).
@@ -65,12 +69,11 @@ The window opens on the **Wizard** tab.
    elapsed time update live. **Stop** ends the run early and still saves
    the model.
 4. **Watch.** When training finishes the wizard switches here and the agent
-   plays automatically in the emulator with the exact observation setup it
-   was trained with. **Play** again, **Open in Play tab** for more options,
-   or **Start over**.
+   plays on the screen panel with the exact observation setup it was trained
+   with. **Play again**, or **Start over** with a new agent.
 
 Everything the wizard does is visible on the expert tabs: the sweep on
-**Tune**, the log on **Train**, the model selection on **Play**.
+**Tune**, the log on **Train**, the model on the screen panel.
 
 ### Choosing a game
 
@@ -154,7 +157,9 @@ always shows what is running.
 - A **modified** marker appears under the preset selector as soon as a
   field differs from the selected preset.
 - **Show live preview** loads each new `best_model.zip` as it is saved and
-  plays it on the Play tab canvas while training continues (costs some fps).
+  plays it on the screen panel while training continues (costs some fps).
+  When a run ends, its best model is selected on the screen panel, ready
+  to play.
 - **Stop** sends the trainer an interrupt: it saves `checkpoints/final.zip`,
   closes its emulator workers and exits. `logs/best_model.zip` (best
   evaluation reward so far) is always kept.
@@ -166,17 +171,15 @@ always shows what is running.
 While training or tuning runs, every input on every tab is locked so a run
 cannot be edited mid-flight and two CPU-hungry sessions cannot collide.
 
-### Play tab
+### Screen panel (right)
 
-The **model** dropdown lists every `best`, `final` and step snapshot of every
-run. Options: episodes, max steps (0 = unlimited), speed (`0.5×` … `4×`,
-`Unlimited`), deterministic or stochastic actions, and the observation setup
-(**obs type**, **action repeat**, **frame stack**, **start level**). These
-must match training, and they are filled in automatically: every run
-records its settings in `run.json`, and selecting a model applies them.
-Older runs without that file show a reminder to set them by hand. The live
-panel shows episode, reward, world, position, lives, coins and the chosen
-action.
+The emulator view with the live episode (episode, reward, world, position,
+steps, lives, coins, action) and the controls to **play a model**: the
+model dropdown lists every `best`, `final` and step snapshot of every run,
+plus episodes and speed (`0.5×` … `4×`, `Unlimited`). Selecting a model
+applies the observation settings recorded in its `run.json`; **Advanced…**
+opens max steps, stochastic actions and the observation setup for models
+from older runs without that file.
 
 ### Presets tab
 
@@ -332,7 +335,7 @@ models/mario/
 
 ```
 main.py               CLI entry point: gui | train | play
-gui.py                Tkinter app: Tune, Train, Play tabs, status bar, event pump
+gui.py                Tkinter app: Train / Tune tabs, screen panel, status bar, event pump
 wizard.py             Wizard tab (guided Tune → Preset → Train → Watch)
 presets_tab.py        Presets tab (browse / edit / organise presets)
 widgets.py            Shared Tk pieces: parameter form (ConfigForm), uniform tables

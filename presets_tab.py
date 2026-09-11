@@ -49,7 +49,7 @@ class PresetsTab:
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(1, weight=1)
 
-        ttk.Label(parent, wraplength=980, foreground="#444",
+        ttk.Label(parent, wraplength=640, foreground="#444",
                   text="A preset is a complete training configuration. Select one to edit it "
                        "below; double-click to load it into the Train tab. Built-in presets "
                        "keep their shipped values behind your edits, so they can always be "
@@ -62,9 +62,9 @@ class PresetsTab:
         table_frame = ttk.Frame(top)
         table_frame.grid(row=0, column=0, sticky="nsew")
         self.tree = make_table(table_frame, [
-            ("name", "preset", 400, "w", True), ("kind", "type", 80, "w", False),
-            ("mode", "mode", 100, "w", False), ("steps", "steps", 100, "e", False),
-            ("envs", "envs", 50, "e", False), ("obs", "obs", 60, "w", False),
+            ("name", "preset", 280, "w", True), ("kind", "type", 76, "w", False),
+            ("mode", "mode", 90, "w", False), ("steps", "steps", 90, "e", False),
+            ("envs", "envs", 44, "e", False), ("obs", "obs", 56, "w", False),
         ], height=7)
         self.tree.tag_configure("user", background="#e8f5e9")
         self.tree.tag_configure("modified", background="#fff4e0")
@@ -80,14 +80,16 @@ class PresetsTab:
         self.btn_from_train.pack(side="left", padx=4)
         self.btn_dup = ttk.Button(lbtns, text="Duplicate…", command=self.duplicate)
         self.btn_dup.pack(side="left", padx=4)
-        self.btn_rename = ttk.Button(lbtns, text="Rename…", command=self.rename)
-        self.btn_rename.pack(side="left", padx=4)
-        self.btn_delete = ttk.Button(lbtns, text="Delete", command=self.delete)
-        self.btn_delete.pack(side="left", padx=4)
-        self.btn_reset = ttk.Button(lbtns, text="Reset to default", command=self.reset_default)
-        self.btn_reset.pack(side="left", padx=4)
         ttk.Button(lbtns, text="Reload from disk", command=self.app.refresh_presets).pack(
             side="right")
+        lbtns2 = ttk.Frame(top)
+        lbtns2.grid(row=2, column=0, sticky="ew", pady=(4, 0))
+        self.btn_rename = ttk.Button(lbtns2, text="Rename…", command=self.rename)
+        self.btn_rename.pack(side="left")
+        self.btn_delete = ttk.Button(lbtns2, text="Delete", command=self.delete)
+        self.btn_delete.pack(side="left", padx=4)
+        self.btn_reset = ttk.Button(lbtns2, text="Reset to default", command=self.reset_default)
+        self.btn_reset.pack(side="left", padx=4)
 
         editor = ttk.Frame(parent)
         editor.grid(row=2, column=0, sticky="ew")
@@ -99,7 +101,7 @@ class PresetsTab:
         self.kind_var = tk.StringVar(value="")
         ttk.Label(head, textvariable=self.kind_var, foreground=MUTED).pack(side="left", padx=8)
         self.note_var = tk.StringVar(value="")
-        ttk.Label(editor, textvariable=self.note_var, foreground=MUTED, wraplength=960).grid(
+        ttk.Label(editor, textvariable=self.note_var, foreground=MUTED, wraplength=640).grid(
             row=1, column=0, sticky="w", pady=(0, 6))
         self.form = ConfigForm(editor, on_change=self._on_edit)
         self.form.grid(row=2, column=0, sticky="ew")

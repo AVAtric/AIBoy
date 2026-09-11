@@ -6,9 +6,8 @@ emulator tick pushes the screen into `frame_queue`, and per-step numbers go
 into `event_queue` using the GUI's `_pump` protocol:
 
     ("log", text)                 training-log line
-    ("stat", key, value)          Train-tab live stat (preview only)
-    ("play_status", text)         Play-tab status line
-    ("play_stat", key, value)     Play-tab live-episode panel
+    ("play_status", text)         screen-panel status line
+    ("play_stat", key, value)     screen-panel live-episode stats
     ("play_done", summary)        playback finished; summary = list of
                                   {"reward", "steps"} per completed episode
     ("play_error", traceback)
@@ -129,8 +128,7 @@ class EmbeddedPlayer:
     def _emit(self, *item) -> None:
         self.events.put(item)
 
-    def _report_step(self, game: str, action, info, ep_reward: float, ep_steps: int,
-                     mirror_train_stats: bool) -> None:
+    def _report_step(self, game: str, action, info, ep_reward: float, ep_steps: int) -> None:
         from env import MarioEnv
         act_id = int(np.asarray(action).flat[0])
         names = MarioEnv.ACTION_NAMES
@@ -143,17 +141,10 @@ class EmbeddedPlayer:
             self._emit("play_stat", "x", f"{i0['x']} (max {i0.get('max_x', '?')})")
         if "world" in i0:
             w = i0["world"]
-            world = f"{w[0]}-{w[1]}"
-            self._emit("play_stat", "world", world)
-            if mirror_train_stats:
-                self._emit("stat", "world", world)
+            self._emit("play_stat", "world", f"{w[0]}-{w[1]}")
         for key in ("lives", "coins"):
             if key in i0:
                 self._emit("play_stat", key, str(i0[key]))
-                if mirror_train_stats:
-                    self._emit("stat", key, str(i0[key]))
-        if mirror_train_stats and "max_x" in i0:
-            self._emit("stat", "max_x", str(i0["max_x"]))
 
     # ---------- play ----------
 
@@ -187,7 +178,7 @@ class EmbeddedPlayer:
                     obs, reward, done, info = session.vec.step(action)
                     total += float(reward[0])
                     steps += 1
-                    self._report_step(game, action, info, total, steps, mirror_train_stats=False)
+                    self._report_step(game, action, info, total, steps)
                     if max_steps and steps >= max_steps:
                         break
                     if step_period > 0:
@@ -246,7 +237,7 @@ class EmbeddedPlayer:
                 obs, r, done, info = session.vec.step(action)
                 ep_reward += float(r[0])
                 ep_steps += 1
-                self._report_step(game, action, info, ep_reward, ep_steps, mirror_train_stats=True)
+                self._report_step(game, action, info, ep_reward, ep_steps)
                 if done[0]:
                     obs = session.vec.reset()
                     ep_num += 1

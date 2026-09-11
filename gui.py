@@ -82,8 +82,8 @@ class GameBoyAIGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title("Game Boy AI — Super Mario Land")
-        root.geometry("1060x900")
-        root.minsize(980, 840)
+        root.geometry("1240x840")
+        root.minsize(1180, 780)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Cross-thread channels
@@ -226,11 +226,11 @@ class GameBoyAIGUI:
         self.game_combo = ttk.Combobox(top, textvariable=self.game_var, state="readonly", width=12)
         self.game_combo.pack(side="left", padx=6)
         self.game_combo.bind("<<ComboboxSelected>>", lambda e: self._on_game_changed())
-        self.btn_rescan = ttk.Button(top, text="Rescan ROMs", command=self.rescan_roms)
-        self.btn_rescan.pack(side="left", padx=(0, 12))
         self.game_status_var = tk.StringVar(value="")
         self.game_status_label = ttk.Label(top, textvariable=self.game_status_var, font=MONO)
-        self.game_status_label.pack(side="left")
+        self.game_status_label.pack(side="left", padx=(6, 0))
+        self.btn_rescan = ttk.Button(top, text="Rescan ROMs", command=self.rescan_roms)
+        self.btn_rescan.pack(side="right")
 
         # Status bar (bottom): what is running right now.
         self.status_bar_var = tk.StringVar(value="Idle")
@@ -238,24 +238,30 @@ class GameBoyAIGUI:
         bar.pack(side="bottom", fill="x")
         ttk.Label(bar, textvariable=self.status_bar_var, font=MONO, foreground="#444").pack(
             side="left")
-        ttk.Label(bar, text="Super Mario Land · PPO", foreground=MUTED).pack(side="right")
+        ttk.Label(bar, text="PyBoy · Stable-Baselines3 PPO", foreground=MUTED).pack(side="right")
 
-        self.nb = ttk.Notebook(self.root)
-        self.nb.pack(fill="both", expand=True, padx=10, pady=(8, 4))
-        self.wizard_tab = ttk.Frame(self.nb, padding=10)
-        self.tune_tab = ttk.Frame(self.nb, padding=10)
-        self.train_tab = ttk.Frame(self.nb, padding=10)
-        self.play_tab = ttk.Frame(self.nb, padding=10)
-        self.presets_frame = ttk.Frame(self.nb, padding=10)
+        # Main area: workflow tabs on the left, the Game Boy screen on the right.
+        main = ttk.Frame(self.root)
+        main.pack(fill="both", expand=True, padx=10, pady=(8, 4))
+        main.columnconfigure(0, weight=1)
+        main.rowconfigure(0, weight=1)
+        self.nb = ttk.Notebook(main)
+        self.nb.grid(row=0, column=0, sticky="nsew")
+        screen = ttk.LabelFrame(main, text="Game Boy screen", padding=8)
+        screen.grid(row=0, column=1, sticky="ns", padx=(10, 0))
+
+        self.wizard_tab = ttk.Frame(self.nb, padding=8)
+        self.train_tab = ttk.Frame(self.nb, padding=8)
+        self.tune_tab = ttk.Frame(self.nb, padding=8)
+        self.presets_frame = ttk.Frame(self.nb, padding=8)
         self.nb.add(self.wizard_tab, text="Wizard")
-        self.nb.add(self.tune_tab, text="Tune")
         self.nb.add(self.train_tab, text="Train")
-        self.nb.add(self.play_tab, text="Play")
+        self.nb.add(self.tune_tab, text="Tune")
         self.nb.add(self.presets_frame, text="Presets")
-        # Train defines the variables the other tabs reference; build it first.
+        # Train and Tune define the variables the wizard mirrors; build them first.
         self._build_train(self.train_tab)
-        self._build_play(self.play_tab)
         self._build_tune(self.tune_tab)
+        self._build_screen(screen)
         self.wizard = WizardTab(self, self.wizard_tab)
         self.presets_tab = PresetsTab(self, self.presets_frame)
         self.nb.select(self.wizard_tab)
@@ -321,10 +327,10 @@ class GameBoyAIGUI:
             run_row, text="Resume from newest checkpoint", variable=self.resume_var)
         self.resume_check.pack(side="left", padx=(18, 0))
         self.run_hint_var = tk.StringVar(value="")
-        ttk.Label(controls, textvariable=self.run_hint_var, foreground=MUTED, font=MONO).grid(
-            row=1, column=0, sticky="w", pady=(2, 0))
+        ttk.Label(controls, textvariable=self.run_hint_var, foreground=MUTED, font=MONO,
+                  wraplength=640).grid(row=1, column=0, sticky="w", pady=(2, 0))
         self.preview_check = ttk.Checkbutton(
-            controls, text="Show live preview on the Play tab while training (slower)",
+            controls, text="Show live preview on the screen while training (slower)",
             variable=self.preview_var)
         self.preview_check.grid(row=2, column=0, sticky="w", pady=(4, 0))
 
@@ -337,7 +343,6 @@ class GameBoyAIGUI:
         self.btn_train_stop.pack(side="left", padx=4)
         ttk.Button(btns, text="TensorBoard", command=self.open_tensorboard).pack(
             side="left", padx=(16, 4))
-        ttk.Label(btns, text="(all runs, incl. tune trials)", foreground="#888").pack(side="left")
 
         pb_frame = ttk.Frame(controls)
         pb_frame.grid(row=4, column=0, sticky="ew", pady=(4, 0))
@@ -360,125 +365,150 @@ class GameBoyAIGUI:
         stats = ttk.LabelFrame(monitor, text="Live stats", padding=8)
         stats.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
         self.stat_vars: dict[str, tk.StringVar] = {}
-        # Left column: trainer stats. Right column: game state, fed by the
-        # preview thread when live preview is on.
         columns = [
-            [("status", "idle"), ("total_timesteps", "—"), ("ep_rew_mean", "—"),
-             ("ep_len_mean", "—"), ("fps", "—"), ("time_elapsed", "—")],
-            [("world", "—"), ("lives", "—"), ("coins", "—"), ("max_x", "—")],
+            [("status", "idle"), ("total_timesteps", "—"), ("ep_rew_mean", "—")],
+            [("ep_len_mean", "—"), ("fps", "—"), ("time_elapsed", "—")],
         ]
         for col, items in enumerate(columns):
             for row, (k, v) in enumerate(items):
                 self.stat_vars[k] = tk.StringVar(value=v)
                 ttk.Label(stats, text=f"{k}:").grid(row=row, column=col * 2, sticky="w",
                                                     padx=(0 if col == 0 else 18, 8))
-                ttk.Label(stats, textvariable=self.stat_vars[k], font=MONO_BOLD, width=12,
+                ttk.Label(stats, textvariable=self.stat_vars[k], font=MONO_BOLD, width=10,
                           anchor="w").grid(row=row, column=col * 2 + 1, sticky="w")
 
         log_frame = ttk.LabelFrame(monitor, text="Training log", padding=4)
         log_frame.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
-        self.log_text = tk.Text(log_frame, height=6, wrap="none", font=MONO,
+        self.log_text = tk.Text(log_frame, height=5, width=34, wrap="none", font=MONO,
                                 background="#111", foreground="#ddd", insertbackground="#ddd")
         self.log_text.pack(side="left", fill="both", expand=True)
         yscroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
         yscroll.pack(side="right", fill="y")
         self.log_text.config(yscrollcommand=yscroll.set)
 
-    # ---------- Play tab ----------
+    # ---------- Screen panel (always visible) ----------
 
-    def _build_play(self, parent: ttk.Frame) -> None:
-        left = ttk.Frame(parent, width=320)
-        left.pack(side="left", fill="y", padx=(0, 10))
-        left.pack_propagate(False)
-        right = ttk.Frame(parent)
-        right.pack(side="left", fill="both", expand=True)
+    def _build_screen(self, parent: ttk.Frame) -> None:
+        """The emulator view plus the controls to play a saved model. Live
+        preview during training and the wizard's Watch step render here too,
+        so nothing has to switch tabs to be seen."""
+        self.canvas = tk.Canvas(parent, width=CANVAS_W, height=CANVAS_H, bg="#222",
+                                highlightthickness=0)
+        self.canvas.pack()
+        self.register_canvas(self.canvas)
+        self.play_status_var = tk.StringVar(value="idle")
+        ttk.Label(parent, textvariable=self.play_status_var, font=MONO, wraplength=CANVAS_W).pack(
+            fill="x", pady=(4, 2))
 
-        model_frame = ttk.LabelFrame(left, text="Model", padding=8)
-        model_frame.pack(fill="x", pady=(0, 6))
+        # Live episode, two columns.
+        stats = ttk.Frame(parent)
+        stats.pack(fill="x", pady=(0, 6))
+        keys = ["episode", "reward", "world", "x", "steps", "lives", "coins", "action"]
+        self.play_stat_vars = {k: tk.StringVar(value="—") for k in keys}
+        for i, key in enumerate(keys):
+            col, row = divmod(i, 4)
+            ttk.Label(stats, text=f"{key}:", foreground=MUTED).grid(
+                row=row, column=col * 2, sticky="w", padx=(0 if col == 0 else 16, 6))
+            ttk.Label(stats, textvariable=self.play_stat_vars[key], font=MONO_BOLD, width=15,
+                      anchor="w").grid(row=row, column=col * 2 + 1, sticky="w")
+
+        # Play controls.
+        ctl = ttk.LabelFrame(parent, text="Play a model", padding=6)
+        ctl.pack(fill="x")
+        ctl.columnconfigure(1, weight=1)
+        ctl.columnconfigure(3, weight=1)
         self.model_var = tk.StringVar(value="")
-        self.model_combo = ttk.Combobox(model_frame, textvariable=self.model_var,
-                                        state="readonly", width=32)
-        self.model_combo.pack(fill="x", pady=(0, 4))
+        self.model_combo = ttk.Combobox(ctl, textvariable=self.model_var, state="readonly")
+        self.model_combo.grid(row=0, column=0, columnspan=4, sticky="ew")
         self.model_combo.bind("<<ComboboxSelected>>", lambda e: self._on_model_selected())
-        self.btn_model_refresh = ttk.Button(model_frame, text="Refresh model list",
-                                            command=self.refresh_models)
-        self.btn_model_refresh.pack(fill="x")
         self.model_note_var = tk.StringVar(value="")
-        ttk.Label(model_frame, textvariable=self.model_note_var, foreground=MUTED,
-                  wraplength=290).pack(fill="x", pady=(4, 0))
-        self._play_widgets: list[tk.Widget] = [self.model_combo, self.btn_model_refresh]
-
-        opts_frame = ttk.LabelFrame(left, text="Options (observation setup follows the model)",
-                                    padding=8)
-        opts_frame.pack(fill="x", pady=(0, 6))
-        opts_frame.columnconfigure(1, weight=1)
+        ttk.Label(ctl, textvariable=self.model_note_var, foreground=MUTED,
+                  wraplength=CANVAS_W - 20).grid(row=1, column=0, columnspan=4, sticky="w",
+                                                 pady=(2, 4))
         self.play_episodes_var = tk.IntVar(value=3)
+        self.play_speed_label_var = tk.StringVar(value=SPEED_CHOICES[1][0])
+        ttk.Label(ctl, text="Episodes:").grid(row=2, column=0, sticky="w")
+        ep_spin = ttk.Spinbox(ctl, from_=1, to=100, textvariable=self.play_episodes_var, width=5)
+        ep_spin.grid(row=2, column=1, sticky="w", padx=(4, 12))
+        ttk.Label(ctl, text="Speed:").grid(row=2, column=2, sticky="w")
+        speed_combo = ttk.Combobox(ctl, textvariable=self.play_speed_label_var, state="readonly",
+                                   values=[c[0] for c in SPEED_CHOICES], width=13)
+        speed_combo.grid(row=2, column=3, sticky="w", padx=(4, 0))
+
+        btns = ttk.Frame(ctl)
+        btns.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        self.btn_play_start = ttk.Button(btns, text="▶ Play", command=self.start_playing)
+        self.btn_play_start.pack(side="left")
+        self.btn_play_stop = ttk.Button(btns, text="■ Stop", command=self.stop_playing,
+                                        state="disabled")
+        self.btn_play_stop.pack(side="left", padx=4)
+        self.btn_model_refresh = ttk.Button(btns, text="Refresh", command=self.refresh_models)
+        self.btn_model_refresh.pack(side="left", padx=4)
+        self.btn_play_adv = ttk.Button(btns, text="Advanced…", command=self._open_play_advanced)
+        self.btn_play_adv.pack(side="right")
+
+        # Advanced options live in a small dialog (see _open_play_advanced). The
+        # observation setup is normally filled in from the model's run.json.
         self.play_max_steps_var = tk.IntVar(value=0)
         self.play_stochastic_var = tk.BooleanVar(value=False)
         self.play_action_repeat_var = tk.IntVar(value=4)
         self.play_frame_stack_var = tk.IntVar(value=4)
         self.play_obs_type_var = tk.StringVar(value="tiles")
         self.play_level_var = tk.StringVar(value="default")
-        self.play_speed_label_var = tk.StringVar(value=SPEED_CHOICES[1][0])
+        self._play_adv_win: tk.Toplevel | None = None
+        self._play_widgets: list[tk.Widget] = [self.model_combo, self.btn_model_refresh,
+                                               ep_spin, speed_combo, self.btn_play_start,
+                                               self.btn_play_adv]
 
-        row = [0]
+    def _open_play_advanced(self) -> None:
+        """Rarely needed playback options, in a small window next to the screen."""
+        if self._play_adv_win is not None and self._play_adv_win.winfo_exists():
+            self._play_adv_win.lift()
+            return
+        win = tk.Toplevel(self.root)
+        win.title("Advanced playback options")
+        win.resizable(False, False)
+        win.transient(self.root)
+        self._play_adv_win = win
+        body = ttk.Frame(win, padding=12)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+        r = 0
 
-        def add(label, widget):
-            ttk.Label(opts_frame, text=label).grid(row=row[0], column=0, sticky="w", pady=2)
-            widget.grid(row=row[0], column=1, sticky="ew", pady=2, padx=6)
-            row[0] += 1
-            self._play_widgets.append(widget)
+        def row(label, widget):
+            nonlocal r
+            ttk.Label(body, text=label).grid(row=r, column=0, sticky="w", pady=2)
+            widget.grid(row=r, column=1, sticky="w", padx=8, pady=2)
+            r += 1
 
-        add("Episodes:", ttk.Spinbox(opts_frame, from_=1, to=100,
-                                     textvariable=self.play_episodes_var, width=10))
-        add("Max steps (0=∞):", ttk.Spinbox(opts_frame, from_=0, to=1_000_000, increment=100,
-                                            textvariable=self.play_max_steps_var, width=10))
-        add("Action repeat:", ttk.Spinbox(opts_frame, from_=1, to=16,
-                                          textvariable=self.play_action_repeat_var, width=10))
-        add("Frame stack:", ttk.Spinbox(opts_frame, from_=1, to=8,
-                                        textvariable=self.play_frame_stack_var, width=10))
-        add("Obs type (match training):",
-            ttk.Combobox(opts_frame, textvariable=self.play_obs_type_var,
-                         values=["tiles", "pixels"], state="readonly", width=10))
-        add("Start level:", ttk.Combobox(opts_frame, textvariable=self.play_level_var,
+        row("Max steps per episode (0 = no cap):", ttk.Spinbox(
+            body, from_=0, to=1_000_000, increment=100, textvariable=self.play_max_steps_var,
+            width=8))
+        ttk.Checkbutton(body, text="Stochastic actions (sample from the policy)",
+                        variable=self.play_stochastic_var).grid(
+            row=r, column=0, columnspan=2, sticky="w", pady=2)
+        r += 1
+        ttk.Separator(body).grid(row=r, column=0, columnspan=2, sticky="ew", pady=8)
+        r += 1
+        ttk.Label(body, wraplength=360, foreground=MUTED,
+                  text="Observation setup. Filled in automatically from the model's run.json; "
+                       "only change it for models from older runs, and make it match how "
+                       "the model was trained.").grid(row=r, column=0, columnspan=2, sticky="w",
+                                                      pady=(0, 6))
+        r += 1
+        row("Obs type:", ttk.Combobox(body, textvariable=self.play_obs_type_var,
+                                      values=["tiles", "pixels"], state="readonly", width=8))
+        row("Start level:", ttk.Combobox(body, textvariable=self.play_level_var,
                                          values=LEVEL_CHOICES, state="readonly", width=10))
-        add("Speed:", ttk.Combobox(opts_frame, textvariable=self.play_speed_label_var,
-                                   values=[c[0] for c in SPEED_CHOICES],
-                                   state="readonly", width=15))
-        stoch_check = ttk.Checkbutton(opts_frame, text="Stochastic (sample actions)",
-                                      variable=self.play_stochastic_var)
-        stoch_check.grid(row=row[0], column=0, columnspan=2, sticky="w", pady=4)
-        self._play_widgets.append(stoch_check)
-
-        btns = ttk.Frame(left)
-        btns.pack(fill="x", pady=6)
-        self.btn_play_start = ttk.Button(btns, text="Start playing", command=self.start_playing)
-        self.btn_play_start.pack(fill="x", pady=2)
-        self.btn_play_stop = ttk.Button(btns, text="Stop", command=self.stop_playing,
-                                        state="disabled")
-        self.btn_play_stop.pack(fill="x", pady=2)
-        self._play_widgets.append(self.btn_play_start)
-
-        pstats = ttk.LabelFrame(left, text="Live episode", padding=8)
-        pstats.pack(fill="x", pady=6)
-        pstats.columnconfigure(1, weight=1)
-        self.play_stat_vars = {k: tk.StringVar(value="—") for k in
-                               ("episode", "reward", "world", "x", "steps", "lives", "coins", "action")}
-        for i, key in enumerate(self.play_stat_vars):
-            ttk.Label(pstats, text=f"{key}:").grid(row=i, column=0, sticky="w", padx=(0, 8))
-            ttk.Label(pstats, textvariable=self.play_stat_vars[key], font=MONO_BOLD).grid(
-                row=i, column=1, sticky="w")
-
-        self.play_status_var = tk.StringVar(value="idle")
-        ttk.Label(left, textvariable=self.play_status_var, font=MONO, wraplength=280).pack(
-            fill="x", pady=(6, 0))
-
-        canvas_frame = ttk.LabelFrame(right, text=f"Game Boy ({SCALE}×)", padding=6)
-        canvas_frame.pack(fill="both", expand=True)
-        self.canvas = tk.Canvas(canvas_frame, width=CANVAS_W, height=CANVAS_H,
-                                bg="#222", highlightthickness=0)
-        self.canvas.pack()
-        self.register_canvas(self.canvas)
+        row("Action repeat:", ttk.Spinbox(body, from_=1, to=16,
+                                          textvariable=self.play_action_repeat_var, width=5))
+        row("Frame stack:", ttk.Spinbox(body, from_=1, to=8,
+                                        textvariable=self.play_frame_stack_var, width=5))
+        ttk.Button(body, text="Close", command=win.destroy).grid(row=r, column=1, sticky="e",
+                                                                 pady=(10, 0))
+        win.update_idletasks()
+        x = self.root.winfo_rootx() + self.canvas.winfo_rootx() - self.root.winfo_rootx()
+        win.geometry(f"+{x}+{self.root.winfo_rooty() + 80}")
 
     # ---------- Tune tab ----------
 
@@ -497,7 +527,7 @@ class GameBoyAIGUI:
 
         cfg_frame = ttk.LabelFrame(parent, text="Trial config", padding=6)
         cfg_frame.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        for c in (1, 3, 5):
+        for c in (1, 3):
             cfg_frame.columnconfigure(c, weight=1)
 
         def _field(row, col, label, widget):
@@ -516,24 +546,23 @@ class GameBoyAIGUI:
             cfg_frame, from_=2000, to=10_000_000, increment=10_000, width=10,
             textvariable=self.tune_trial_steps_var, command=self.tune_update_summary))
         self.tune_seeds_var = tk.IntVar(value=1)
-        _field(0, 2, "Seeds / config:", ttk.Spinbox(
+        _field(1, 0, "Seeds / config:", ttk.Spinbox(
             cfg_frame, from_=1, to=10, width=6,
             textvariable=self.tune_seeds_var, command=self.tune_update_summary))
+        self.tune_evals_var = tk.IntVar(value=5)
+        _field(1, 1, "Evals / trial:", ttk.Spinbox(
+            cfg_frame, from_=1, to=50, width=6, textvariable=self.tune_evals_var))
         self.tune_run_prefix_var = tk.StringVar(value="tune")
-        _field(1, 0, "Run-name prefix:", ttk.Entry(cfg_frame, textvariable=self.tune_run_prefix_var))
+        _field(2, 0, "Run-name prefix:", ttk.Entry(cfg_frame, textvariable=self.tune_run_prefix_var))
         self.tune_metric_var = tk.StringVar(value="best eval reward")
-        _field(1, 1, "Metric:", ttk.Combobox(
+        _field(2, 1, "Metric:", ttk.Combobox(
             cfg_frame, textvariable=self.tune_metric_var, state="readonly", width=16,
             values=["best eval reward", "final eval reward", "mean eval reward"]))
-        self.tune_evals_var = tk.IntVar(value=5)
-        _field(1, 2, "Evals / trial:", ttk.Spinbox(
-            cfg_frame, from_=1, to=50, width=6, textvariable=self.tune_evals_var))
         self.tune_skip_done_var = tk.BooleanVar(value=True)
         skip_cb = ttk.Checkbutton(
             cfg_frame, variable=self.tune_skip_done_var,
-            text="Reuse finished trials with the same run-name prefix and config "
-                 "(resumes an interrupted sweep)")
-        skip_cb.grid(row=2, column=0, columnspan=6, sticky="w", pady=(4, 0))
+            text="Reuse finished trials with the same prefix and config (resumes a sweep)")
+        skip_cb.grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
         self._tune_config_widgets.append(skip_cb)
 
         sweep_frame = ttk.LabelFrame(parent, text="Sweep", padding=6)
@@ -549,7 +578,7 @@ class GameBoyAIGUI:
                                             command=self.apply_tune_template)
         self.btn_tune_template.grid(row=0, column=2)
         self._tune_config_widgets.extend([tmpl_combo, self.btn_tune_template])
-        self.tune_template_note = ttk.Label(sweep_frame, text="", foreground="#888", wraplength=900)
+        self.tune_template_note = ttk.Label(sweep_frame, text="", foreground="#888", wraplength=620)
         self.tune_template_note.grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 4))
 
         self.tune_sweep_text = tk.Text(sweep_frame, height=6, wrap="word", font=MONO, undo=True)
@@ -575,8 +604,9 @@ class GameBoyAIGUI:
         n_random_spin.pack(side="left", padx=4)
         ttk.Label(search_row, text="configs").pack(side="left")
         self.tune_summary_var = tk.StringVar(value="")
-        self.tune_summary_label = ttk.Label(search_row, textvariable=self.tune_summary_var, font=MONO)
-        self.tune_summary_label.pack(side="right")
+        self.tune_summary_label = ttk.Label(sweep_frame, textvariable=self.tune_summary_var,
+                                            font=MONO, wraplength=640)
+        self.tune_summary_label.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
         self._tune_config_widgets.extend([rb_grid, rb_random, n_random_spin])
 
         ctrl = ttk.Frame(parent)
@@ -601,10 +631,10 @@ class GameBoyAIGUI:
         res_frame = ttk.LabelFrame(parent, text="Results (best first)", padding=4)
         res_frame.grid(row=4, column=0, sticky="nsew")
         self.tune_tree = make_table(res_frame, [
-            ("rank", "#", 36, "e", False), ("config", "config (overrides)", 300, "w", True),
-            ("score", "score", 110, "e", False), ("ep_len", "ep len", 60, "e", False),
-            ("steps", "steps", 80, "e", False), ("time", "time", 60, "e", False),
-            ("runs", "runs", 200, "w", True),
+            ("rank", "#", 30, "e", False), ("config", "config (overrides)", 190, "w", True),
+            ("score", "score", 90, "e", False), ("ep_len", "ep len", 52, "e", False),
+            ("steps", "steps", 66, "e", False), ("time", "time", 52, "e", False),
+            ("runs", "runs", 110, "w", True),
         ], height=8)
         self.tune_tree.bind("<Double-1>", lambda e: self._tune_load_into_train())
 
@@ -616,8 +646,8 @@ class GameBoyAIGUI:
         self.btn_tune_to_train = ttk.Button(actions, text="Load selected into Train tab",
                                             command=self._tune_load_into_train)
         self.btn_tune_to_train.pack(side="left", padx=4)
-        ttk.Label(actions, text="→ then switch to the Train tab, set a run name and Start",
-                  foreground="#888").pack(side="left", padx=8)
+        ttk.Label(actions, text="(double-click a row to load it)", foreground="#888").pack(
+            side="left", padx=8)
 
         self.apply_tune_template()
 
@@ -994,10 +1024,10 @@ class GameBoyAIGUI:
         best = runs.best_model_for_run(self.game, name)
         if best is not None:
             n_ckpt = len(list(paths["checkpoints"].glob("*.zip")))
-            self.run_hint_var.set(f"→ {paths['base']}/  exists ({n_ckpt} checkpoint(s)) — "
-                                  f"tick Resume to continue it, or choose a new name")
+            self.run_hint_var.set(f"{paths['base']}/ exists ({n_ckpt} checkpoints): tick Resume "
+                                  f"to continue it, or choose a new name")
         else:
-            self.run_hint_var.set(f"→ {paths['base']}/  (new run)")
+            self.run_hint_var.set(f"{paths['base']}/ (new run)")
 
     def current_config(self) -> dict:
         """Train-tab values as a preset dict. Raises ValueError naming the
@@ -1119,7 +1149,7 @@ class GameBoyAIGUI:
         self.btn_tune_start.config(state="disabled")
         self.set_inputs_disabled(True)
         self.stat_vars["status"].set("running")
-        for k in TRACKED_STATS[1:] + ("world", "lives", "coins", "max_x"):
+        for k in TRACKED_STATS[1:]:
             self.stat_vars[k].set("—")
         self._train_target_steps = max(1, cfg["timesteps"])
         # Baseline = the model's prior step count (0 unless resuming). The
@@ -1378,6 +1408,10 @@ class GameBoyAIGUI:
         self.preview_stop.set()
         self.refresh_models()       # new checkpoints may have arrived
         self.refresh_run_names()    # a new run dir may have appeared
+        best = runs.best_model_for_run(self.game, self._train_run_name)
+        if best is not None and self.select_model(best):
+            self.flash(f"Run '{self._train_run_name}' {status} — its best model is selected on "
+                       f"the screen panel, click ▶ Play to watch it.", seconds=12)
         if self.wizard is not None:
             self.wizard.on_train_done(rc, self._train_stop_requested)
 

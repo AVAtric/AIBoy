@@ -21,7 +21,6 @@ from tkinter import messagebox, ttk
 import presets
 import runs
 import tuning
-from player import CANVAS_H, CANVAS_W, SCALE, SPEED_CHOICES
 from widgets import ACCENT, MONO, MONO_BOLD, MUTED, make_table
 
 STEPS = ("Tune", "Preset", "Train", "Watch")
@@ -37,7 +36,7 @@ INTRO = {
     2: "The real training run. It writes to models/mario/<run name>/ and keeps "
        "the best-scoring model as best_model.zip. You can stop early; the best "
        "model so far is kept.",
-    3: "The trained agent plays in the emulator below. Playback uses the exact "
+    3: "The trained agent plays on the Game Boy screen to the right, with the exact "
        "observation setup it was trained with.",
 }
 
@@ -116,10 +115,10 @@ class WizardTab:
 
         self.status_var = tk.StringVar(value="")
         ttk.Label(parent, textvariable=self.status_var, font=MONO, foreground=MUTED,
-                  wraplength=980).grid(row=3, column=0, sticky="w", pady=(8, 0))
+                  wraplength=600).grid(row=3, column=0, sticky="w", pady=(8, 0))
 
     def _intro(self, pane: ttk.Frame, step: int, row: int) -> None:
-        ttk.Label(pane, text=INTRO[step], wraplength=960, foreground="#444").grid(
+        ttk.Label(pane, text=INTRO[step], wraplength=600, foreground="#444").grid(
             row=row, column=0, sticky="w", pady=(0, 10))
 
     def _register(self, *widgets: tk.Widget) -> None:
@@ -147,7 +146,7 @@ class WizardTab:
                                            values=list(tuning.SWEEP_TEMPLATES))
         self.template_combo.grid(row=2, column=1, sticky="ew", padx=6, pady=(8, 2))
         self.template_combo.bind("<<ComboboxSelected>>", lambda e: self._on_template_changed())
-        self.template_note = ttk.Label(form, text="", foreground=MUTED, wraplength=800)
+        self.template_note = ttk.Label(form, text="", foreground=MUTED, wraplength=520)
         self.template_note.grid(row=3, column=1, sticky="w", padx=6)
 
         budget = ttk.Frame(form)
@@ -164,7 +163,8 @@ class WizardTab:
                                  command=self._sync_tune_tab)
         seeds_spin.pack(side="left", padx=(6, 16))
         self.summary_var = tk.StringVar(value="")
-        ttk.Label(budget, textvariable=self.summary_var, font=MONO).pack(side="left")
+        ttk.Label(form, textvariable=self.summary_var, font=MONO).grid(
+            row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
         self._register(self.goal_combo, self.template_combo, steps_spin, seeds_spin)
 
         btns = ttk.Frame(pane)
@@ -195,8 +195,8 @@ class WizardTab:
         res.grid(row=5, column=0, sticky="nsew")
         pane.rowconfigure(5, weight=1)
         self.tree = make_table(res, [
-            ("rank", "#", 36, "e", False), ("config", "hyperparameters", 420, "w", True),
-            ("score", "best eval reward", 140, "e", False), ("time", "time", 70, "e", False),
+            ("rank", "#", 32, "e", False), ("config", "hyperparameters", 300, "w", True),
+            ("score", "best eval reward", 130, "e", False), ("time", "time", 64, "e", False),
         ], height=6)
 
     # ----- pane 2: preset -----
@@ -290,67 +290,36 @@ class WizardTab:
             ttk.Label(stats, textvariable=self.app.stat_vars[key], font=MONO_BOLD, width=22,
                       anchor="w").grid(row=i % 3, column=(i // 3) * 2 + 1, sticky="w")
         self.train_result_var = tk.StringVar()
-        ttk.Label(pane, textvariable=self.train_result_var, wraplength=960).grid(
+        ttk.Label(pane, textvariable=self.train_result_var, wraplength=640).grid(
             row=5, column=0, sticky="w", pady=(10, 0))
 
     # ----- pane 4: watch -----
 
     def _build_watch(self, pane: ttk.Frame) -> None:
         self._intro(pane, 3, 0)
-        body = ttk.Frame(pane)
-        body.grid(row=1, column=0, sticky="nsew")
-        pane.rowconfigure(1, weight=1)
-        left = ttk.Frame(body, width=300)
-        left.pack(side="left", fill="y", padx=(0, 10))
-        left.pack_propagate(False)
-        right = ttk.Frame(body)
-        right.pack(side="left", fill="both", expand=True)
-
+        box = ttk.LabelFrame(pane, text="Trained model", padding=8)
+        box.grid(row=1, column=0, sticky="ew")
+        box.columnconfigure(0, weight=1)
         self.model_var = tk.StringVar(value="—")
-        ttk.Label(left, text="Model:").pack(anchor="w")
-        ttk.Label(left, textvariable=self.model_var, font=MONO, wraplength=290).pack(
-            anchor="w", pady=(0, 8))
-        opts = ttk.Frame(left)
-        opts.pack(fill="x")
-        ttk.Label(opts, text="Episodes:").grid(row=0, column=0, sticky="w")
-        self.episodes_var = tk.IntVar(value=3)
-        ep_spin = ttk.Spinbox(opts, from_=1, to=50, width=5, textvariable=self.episodes_var)
-        ep_spin.grid(row=0, column=1, sticky="w", padx=6)
-        ttk.Label(opts, text="Speed:").grid(row=1, column=0, sticky="w", pady=(4, 0))
-        self.speed_var = tk.StringVar(value=SPEED_CHOICES[1][0])
-        speed_combo = ttk.Combobox(opts, textvariable=self.speed_var, state="readonly", width=14,
-                                   values=[c[0] for c in SPEED_CHOICES])
-        speed_combo.grid(row=1, column=1, sticky="w", padx=6, pady=(4, 0))
-        self._register(ep_spin, speed_combo)
+        ttk.Label(box, textvariable=self.model_var, font=MONO, wraplength=600).grid(
+            row=0, column=0, sticky="w")
+        ttk.Label(box, foreground=MUTED, wraplength=600,
+                  text="Episodes and speed are set on the screen panel to the right; "
+                       "the live episode stats update there while it plays.").grid(
+            row=1, column=0, sticky="w", pady=(4, 0))
 
-        btns = ttk.Frame(left)
-        btns.pack(fill="x", pady=10)
-        self.btn_play = ttk.Button(btns, text="Play", command=self.start_watch)
-        self.btn_play.pack(fill="x", pady=2)
-        self.btn_play_stop = ttk.Button(btns, text="Stop", command=self.app.stop_playing,
+        btns = ttk.Frame(pane)
+        btns.grid(row=2, column=0, sticky="ew", pady=(10, 6))
+        self.btn_play = ttk.Button(btns, text="▶ Play again", command=self.start_watch)
+        self.btn_play.pack(side="left")
+        self.btn_play_stop = ttk.Button(btns, text="■ Stop", command=self.app.stop_playing,
                                         state="disabled")
-        self.btn_play_stop.pack(fill="x", pady=2)
-        ttk.Button(btns, text="Open in Play tab", command=self._open_play_tab).pack(fill="x", pady=2)
-        ttk.Button(btns, text="Start over", command=self.restart).pack(fill="x", pady=(14, 2))
-
-        pstats = ttk.LabelFrame(left, text="Live episode", padding=8)
-        pstats.pack(fill="x")
-        for i, key in enumerate(("episode", "reward", "world", "x", "lives", "coins", "action")):
-            ttk.Label(pstats, text=f"{key}:").grid(row=i, column=0, sticky="w", padx=(0, 8))
-            ttk.Label(pstats, textvariable=self.app.play_stat_vars[key], font=MONO_BOLD).grid(
-                row=i, column=1, sticky="w")
-        ttk.Label(left, textvariable=self.app.play_status_var, font=MONO, wraplength=290).pack(
-            anchor="w", pady=(8, 0))
+        self.btn_play_stop.pack(side="left", padx=4)
+        ttk.Button(btns, text="Start over with a new agent", command=self.restart).pack(
+            side="right")
         self.watch_result_var = tk.StringVar()
-        ttk.Label(left, textvariable=self.watch_result_var, wraplength=290).pack(
-            anchor="w", pady=(8, 0))
-
-        canvas_frame = ttk.LabelFrame(right, text=f"Game Boy ({SCALE}×)", padding=6)
-        canvas_frame.pack(anchor="n")
-        self.canvas = tk.Canvas(canvas_frame, width=CANVAS_W, height=CANVAS_H, bg="#222",
-                                highlightthickness=0)
-        self.canvas.pack()
-        self.app.register_canvas(self.canvas)
+        ttk.Label(pane, textvariable=self.watch_result_var, wraplength=600).grid(
+            row=3, column=0, sticky="w", pady=(8, 0))
 
     # ---------- navigation ----------
 
@@ -655,11 +624,6 @@ class WizardTab:
             messagebox.showerror("Wizard", f"Model not listed on the Play tab: {best}")
             return
         app.sync_play_options(self.config)
-        try:
-            app.play_episodes_var.set(max(1, int(self.episodes_var.get())))
-        except (tk.TclError, ValueError):
-            app.play_episodes_var.set(3)
-        app.play_speed_label_var.set(self.speed_var.get())
         app.play_max_steps_var.set(0)
         app.play_stochastic_var.set(False)
         if not app.start_playing():
@@ -681,8 +645,7 @@ class WizardTab:
             self.watch_result_var.set(
                 f"{len(summary)} episode(s): mean reward {sum(rewards) / len(rewards):.0f}, "
                 f"best {max(rewards):.0f}.")
-        self.status_var.set("Done. Play again, open the model on the Play tab, or start over "
-                            "to train the next agent.")
+        self.status_var.set("Done. Play again, or start over to train the next agent.")
 
     def on_play_error(self, _traceback: str) -> None:
         if self.phase != "playing":
@@ -691,14 +654,6 @@ class WizardTab:
         self.btn_play.config(state="normal")
         self.btn_play_stop.config(state="disabled")
         self.status_var.set("Playback failed — see the error dialog.")
-
-    def _open_play_tab(self) -> None:
-        best = self._best_model()
-        if best is not None:
-            self.app.refresh_models()
-            self.app.select_model(best)
-            self.app.sync_play_options(self.config)
-        self.app.show_tab(self.app.play_tab)
 
     # ---------- test / scripting support ----------
 
