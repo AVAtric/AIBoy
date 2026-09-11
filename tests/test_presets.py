@@ -38,11 +38,26 @@ class PresetTests(unittest.TestCase):
         presets.delete("mine")
         self.assertFalse(presets.is_user("mine"))
 
-    def test_builtin_names_are_protected(self):
+    def test_builtin_override_and_reset(self):
+        name = presets.RECOMMENDED_PRESET
+        shipped = presets.BUILTIN_PRESETS[name]
+        self.assertEqual(presets.kind(name), "built-in")
         with self.assertRaises(ValueError):
-            presets.upsert(presets.RECOMMENDED_PRESET, {})
+            presets.delete(name)                      # nothing to delete yet
+        presets.upsert(name, {**shipped, "ent_coef": 0.5})
+        self.assertEqual(presets.kind(name), "modified")
+        self.assertTrue(presets.is_overridden(name))
+        self.assertEqual(presets.load_all()[name]["ent_coef"], 0.5)
+        self.assertEqual(presets.BUILTIN_PRESETS[name]["ent_coef"], shipped["ent_coef"])
         with self.assertRaises(ValueError):
-            presets.delete(presets.RECOMMENDED_PRESET)
+            presets.rename(name, "x")                 # built-ins keep their name
+        presets.reset(name)
+        self.assertEqual(presets.kind(name), "built-in")
+        self.assertEqual(presets.load_all()[name]["ent_coef"], shipped["ent_coef"])
+        with self.assertRaises(ValueError):
+            presets.reset("not a builtin")
+        presets.upsert("mine", {"game": "mario"})
+        self.assertEqual(presets.kind("mine"), "user")
 
     def test_rename_rules(self):
         presets.upsert("a", {"game": "mario"})

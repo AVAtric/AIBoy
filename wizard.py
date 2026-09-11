@@ -90,8 +90,10 @@ class WizardTab:
         header.grid(row=0, column=0, sticky="ew")
         self._step_labels: list[ttk.Label] = []
         for i, name in enumerate(STEPS):
-            lbl = ttk.Label(header, text=f"  {i + 1}  {name}  ", font=MONO_BOLD, padding=(6, 4))
+            lbl = ttk.Label(header, text=f"  {i + 1}  {name}  ", font=MONO_BOLD, padding=(6, 4),
+                            cursor="hand2")
             lbl.pack(side="left")
+            lbl.bind("<Button-1>", lambda e, step=i: self._click_step(step))
             self._step_labels.append(lbl)
             if i < len(STEPS) - 1:
                 ttk.Label(header, text="→", foreground=MUTED).pack(side="left")
@@ -351,6 +353,14 @@ class WizardTab:
         self.app.register_canvas(self.canvas)
 
     # ---------- navigation ----------
+
+    def _click_step(self, step: int) -> None:
+        """Completed steps in the indicator are links back; later ones are not."""
+        if self.phase != "idle" or step >= self.step:
+            return
+        if step >= 1 and not self.config:
+            return
+        self.goto(step)
 
     def goto(self, step: int) -> None:
         self.step = step

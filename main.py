@@ -26,7 +26,7 @@ from env import (
     GAMES, SUPPORTED_GAMES, env_factory, level_choices, make_pyboy_env,
     prepare_level_states, wrap_vec_env,
 )
-from runs import latest_checkpoint, resolve_model_path, run_paths
+from runs import latest_checkpoint, resolve_model_path, run_paths, write_run_config
 
 PROJECT_DIR = Path(__file__).resolve().parent
 
@@ -100,6 +100,7 @@ def cmd_train(args: argparse.Namespace) -> None:
           f"batch={args.batch_size} lr={args.learning_rate} n_epochs={args.n_epochs} "
           f"gamma={args.gamma} gae_lambda={args.gae_lambda} clip_range={args.clip_range}")
     print(f"[train] writing to {paths['base']}")
+    write_run_config(args.game, run_name, vars(args))
     rollout = args.n_steps * args.n_envs
     if rollout % args.batch_size:
         print(f"[train] note: rollout size n_steps*n_envs={rollout} is not a multiple of "

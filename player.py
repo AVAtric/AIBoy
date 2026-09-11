@@ -31,12 +31,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
-from pyboy import PyBoy
-from stable_baselines3 import PPO
-from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv
 
-from env import GAMES, ROM_DIR, MarioEnv, prepare_level_states, wrap_vec_env
+from games import GAMES, ROM_DIR, prepare_level_states
 
 GB_FPS = 60.0
 PREVIEW_STEP_SLEEP = 0.02   # cap the preview at ~50 env-steps/s so training keeps the CPU
@@ -54,6 +50,13 @@ class _Session:
 
     def __init__(self, game: str, obs_type: str, action_repeat: int, frame_stack: int,
                  start_level, frame_queue: queue.Queue):
+        # Heavy imports (PyBoy, SB3 / torch) happen here, on the playback
+        # thread, so the GUI window opens without loading them.
+        from pyboy import PyBoy
+        from stable_baselines3.common.monitor import Monitor
+        from stable_baselines3.common.vec_env import DummyVecEnv
+        from env import MarioEnv, wrap_vec_env
+
         spec = GAMES[game]
         rom_path = ROM_DIR / spec.rom_file
         if not rom_path.exists():
@@ -128,6 +131,7 @@ class EmbeddedPlayer:
 
     def _report_step(self, game: str, action, info, ep_reward: float, ep_steps: int,
                      mirror_train_stats: bool) -> None:
+        from env import MarioEnv
         act_id = int(np.asarray(action).flat[0])
         names = MarioEnv.ACTION_NAMES
         action_name = names[act_id] if game == "mario" and act_id < len(names) else str(act_id)
@@ -155,6 +159,7 @@ class EmbeddedPlayer:
 
     def _play_loop(self, model_path, game, obs_type, action_repeat, frame_stack, start_level,
                    episodes, max_steps, deterministic, speed_mult, stop) -> None:
+        from stable_baselines3 import PPO
         session = None
         summary: list[dict] = []
         try:
@@ -204,6 +209,7 @@ class EmbeddedPlayer:
 
     def _preview_loop(self, model_path, game, obs_type, action_repeat, frame_stack, start_level,
                       stop, training_active) -> None:
+        from stable_baselines3 import PPO
         session = None
         model = None
         model_mtime = 0.0

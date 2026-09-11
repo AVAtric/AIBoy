@@ -149,7 +149,10 @@ always shows what is running.
 
 - **Resume from newest checkpoint** continues the selected run. The saved
   model's architecture, `n_steps` and `batch_size` are kept; `ent_coef`,
-  `learning_rate` and `n_epochs` are taken from the fields.
+  `learning_rate` and `n_epochs` are taken from the fields. The hint under
+  the run name shows the target folder and whether it already exists.
+- A **modified** marker appears under the preset selector as soon as a
+  field differs from the selected preset.
 - **Show live preview** loads each new `best_model.zip` as it is saved and
   plays it on the Play tab canvas while training continues (costs some fps).
 - **Stop** sends the trainer an interrupt: it saves `checkpoints/final.zip`,
@@ -168,20 +171,30 @@ cannot be edited mid-flight and two CPU-hungry sessions cannot collide.
 The **model** dropdown lists every `best`, `final` and step snapshot of every
 run. Options: episodes, max steps (0 = unlimited), speed (`0.5×` … `4×`,
 `Unlimited`), deterministic or stochastic actions, and the observation setup
-(**obs type**, **action repeat**, **frame stack**, **start level**) — these
-must match training and are filled in automatically when you apply a preset
-or arrive from the wizard. The live panel shows episode, reward, world,
-position, lives, coins and the chosen action.
+(**obs type**, **action repeat**, **frame stack**, **start level**). These
+must match training, and they are filled in automatically: every run
+records its settings in `run.json`, and selecting a model applies them.
+Older runs without that file show a reminder to set them by hand. The live
+panel shows episode, reward, world, position, lives, coins and the chosen
+action.
 
 ### Presets tab
 
-Every preset in one table (built-in or user, level mode, steps, envs, obs)
-with the selected one shown in the same Basic / Advanced form as the Train
-tab. Built-ins are read-only: **Duplicate…** makes an editable user copy.
-User presets can be edited and saved, renamed and deleted. **New from Train
-tab…** captures the Train tab's current fields, **Load into Train tab** and
-**Use in Wizard** send a preset onward. User presets are stored in
-`training_presets.json`, built-ins in `builtin_presets.json` (hand-editable).
+Every preset in one table (type, level mode, steps, envs, obs) with the
+selected one shown in the same Basic / Advanced form as the Train tab.
+Every preset is editable:
+
+- **built-in** presets keep their shipped values behind your edits. Saving
+  stores your version (the row turns *modified*); **Reset to default**
+  brings the shipped values back.
+- **user** presets (created here, on the Train tab or by the wizard) can be
+  edited, renamed and deleted.
+
+**New…** creates a preset from the selected one, **New from Train tab…**
+from the Train tab's current fields, **Duplicate…** copies. Double-click a
+row (or **Load into Train tab**) to train with it; **Use in Wizard** makes
+it the wizard's goal. User presets and overrides live in
+`training_presets.json`, built-ins in `builtin_presets.json`.
 
 ---
 
@@ -309,6 +322,7 @@ models/mario/
     ├── logs/best_model.zip             best evaluation reward
     ├── logs/evaluations.npz            eval history
     ├── tensorboard/                    TensorBoard events
+    ├── run.json                        training settings (Play tab reads it)
     └── trial.json                      (tune trials only) config of this trial
 ```
 
@@ -323,7 +337,8 @@ wizard.py             Wizard tab (guided Tune → Preset → Train → Watch)
 presets_tab.py        Presets tab (browse / edit / organise presets)
 widgets.py            Shared Tk pieces: parameter form (ConfigForm), uniform tables
 player.py             Embedded playback / live preview engine (background thread)
-env.py                MarioEnv, level modes, save-state bootstrap, VecEnv wrapping
+games.py              Game registry, ROM discovery / probe, level facts (no emulator imports)
+env.py                MarioEnv, save-state bootstrap, VecEnv wrapping
 runs.py               Run directories, model discovery, trainer command line
 tuning.py             Sweep templates, grid/random expansion, trial scoring, results files
 presets.py            Built-in and user presets

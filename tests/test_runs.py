@@ -54,6 +54,19 @@ class RunDiscoveryTests(unittest.TestCase):
             self.assertEqual(labels, ["mario/a — best", "mario/a — final", "mario/a — 25,000 steps"])
             self.assertEqual(runs.list_models("mario", root / "missing"), [])
 
+    def test_run_config_roundtrip(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self.assertIsNone(runs.read_run_config("mario", "r", root))
+            runs.write_run_config("mario", "r", {"obs_type": "tiles", "frame_stack": 4,
+                                                 "junk": 1, "seed": 0}, root)
+            cfg = runs.read_run_config("mario", "r", root)
+            self.assertEqual(cfg["frame_stack"], 4)
+            self.assertEqual(cfg["game"], "mario")
+            self.assertNotIn("junk", cfg)
+            model = runs.run_paths("mario", "r", root)["logs"] / "best_model.zip"
+            self.assertEqual(runs.run_of_model(model), ("mario", "r"))
+
     def test_build_train_cmd(self):
         cfg = {"game": "mario", "n_envs": 2, "timesteps": 4000, "ent_coef": 0.01,
                "learning_rate": 2.5e-4, "n_steps": 128, "batch_size": 128}

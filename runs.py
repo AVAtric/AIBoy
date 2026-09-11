@@ -17,11 +17,12 @@ and are hidden from every listing.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
 
-from presets import PRESET_DEFAULTS
+from presets import PRESET_DEFAULTS, PRESET_FIELDS
 
 MODELS_ROOT = Path("models")
 INTERNAL_PREFIX = "_"
@@ -45,6 +46,39 @@ def run_paths(game: str, run_name: str, root: Path = MODELS_ROOT) -> dict[str, P
         "logs": base / "logs",
         "tensorboard": base / "tensorboard",
     }
+
+
+RUN_MANIFEST = "run.json"
+
+
+def write_run_config(game: str, run_name: str, cfg: dict, root: Path = MODELS_ROOT) -> None:
+    """Record the training settings of a run so playback can reproduce the
+    observation setup (obs_type, action_repeat, frame_stack, start_level)."""
+    base = run_paths(game, run_name, root)["base"]
+    base.mkdir(parents=True, exist_ok=True)
+    data = {k: cfg[k] for k in PRESET_FIELDS if k in cfg}
+    data["game"] = game
+    (base / RUN_MANIFEST).write_text(json.dumps(data, indent=2, sort_keys=True))
+
+
+def read_run_config(game: str, run_name: str, root: Path = MODELS_ROOT) -> dict | None:
+    path = run_paths(game, run_name, root)["base"] / RUN_MANIFEST
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def run_of_model(path: Path) -> tuple[str, str] | None:
+    """(game, run_name) for a model file under models/<game>/<run>/{logs,checkpoints}/."""
+    try:
+        run_dir = path.parent.parent
+        return run_dir.parent.name, run_dir.name
+    except (IndexError, AttributeError):
+        return None
 
 
 def list_runs(game: str, root: Path = MODELS_ROOT) -> list[str]:

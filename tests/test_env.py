@@ -1,6 +1,7 @@
 import unittest
 
 import env
+import games
 
 
 class LevelSpecTests(unittest.TestCase):
@@ -32,6 +33,23 @@ class LevelSpecTests(unittest.TestCase):
     def test_game_registry(self):
         self.assertEqual(env.SUPPORTED_GAMES, ("mario",))
         self.assertIn("kirby", env.GAMES)
+        self.assertIs(env.GAMES, games.GAMES)          # env re-exports games.py
+
+    def test_light_modules_have_no_heavy_top_level_imports(self):
+        """The GUI must open without loading PyBoy / SB3 / torch."""
+        import ast
+        heavy = {"torch", "pyboy", "stable_baselines3", "env"}
+        for mod in ("games", "presets", "runs", "tuning", "widgets", "player", "gui",
+                    "wizard", "presets_tab"):
+            tree = ast.parse(open(f"{mod}.py").read())
+            for node in tree.body:                      # module level only
+                names = []
+                if isinstance(node, ast.Import):
+                    names = [a.name.split(".")[0] for a in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    names = [node.module.split(".")[0]]
+                bad = heavy & set(names)
+                self.assertFalse(bad, f"{mod}.py imports {bad} at module level")
 
 
 class RomDiscoveryTests(unittest.TestCase):

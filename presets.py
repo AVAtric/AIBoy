@@ -381,12 +381,37 @@ def save_user(user: dict[str, dict]) -> None:
 
 
 def upsert(name: str, config: dict) -> None:
-    """Save or overwrite a user preset. Reject overwriting a builtin."""
-    if name in BUILTIN_PRESETS:
-        raise ValueError(f"'{name}' is a built-in preset; pick a different name.")
+    """Save or overwrite a user preset.
+
+    Saving under a built-in name stores a user *override* that shadows the
+    shipped values (see `is_overridden` / `reset`); the built-in itself is
+    never modified.
+    """
     user = load_user()
     user[name] = normalize(config)
     save_user(user)
+
+
+def is_overridden(name: str) -> bool:
+    """A built-in preset that the user has edited (override present)."""
+    return name in BUILTIN_PRESETS and name in load_user()
+
+
+def reset(name: str) -> None:
+    """Drop the user override of a built-in preset, restoring shipped values."""
+    if name not in BUILTIN_PRESETS:
+        raise ValueError(f"'{name}' is not a built-in preset.")
+    user = load_user()
+    if name in user:
+        del user[name]
+        save_user(user)
+
+
+def kind(name: str) -> str:
+    """'built-in' | 'modified' (built-in with override) | 'user'."""
+    if name in BUILTIN_PRESETS:
+        return "modified" if name in load_user() else "built-in"
+    return "user"
 
 
 def rename(old: str, new: str) -> None:
@@ -405,7 +430,8 @@ def rename(old: str, new: str) -> None:
 
 
 def delete(name: str) -> None:
-    if name in BUILTIN_PRESETS:
+    """Delete a user preset. For a built-in this removes the override only."""
+    if name in BUILTIN_PRESETS and name not in load_user():
         raise ValueError(f"Cannot delete built-in preset '{name}'.")
     user = load_user()
     if name in user:
@@ -418,6 +444,7 @@ def is_builtin(name: str) -> bool:
 
 
 def is_user(name: str) -> bool:
+    """True for a user preset or a user override of a built-in."""
     return name in load_user()
 
 

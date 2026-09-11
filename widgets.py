@@ -13,7 +13,7 @@ import tkinter as tk
 from dataclasses import dataclass
 from tkinter import ttk
 
-from env import level_choices
+from games import level_choices
 from presets import PRESET_DEFAULTS
 
 MONO = ("Menlo", 10)
