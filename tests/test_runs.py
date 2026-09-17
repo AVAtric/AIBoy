@@ -67,6 +67,21 @@ class RunDiscoveryTests(unittest.TestCase):
             model = runs.run_paths("mario", "r", root)["logs"] / "best_model.zip"
             self.assertEqual(runs.run_of_model(model), ("mario", "r"))
 
+    def test_run_of_model_requires_run_layout(self):
+        self.assertEqual(runs.run_of_model(Path("models/mario/r/checkpoints/final.zip")), ("mario", "r"))
+        self.assertIsNone(runs.run_of_model(Path("/tmp/somewhere/final.zip")))
+        self.assertIsNone(runs.run_of_model(Path("models/mario/_level_states/logs/x.zip")))
+
+    def test_redundant_checkpoints_matches_compact(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            p = self._make_run(root, "mario", "r", snaps=(3000, 1000, 2000, 5000, 4000, 7000, 6000))
+            doomed = runs.redundant_checkpoints("mario", "r", root, keep=5)
+            self.assertEqual([x.name for x in doomed], ["ppo_1000_steps.zip", "ppo_2000_steps.zip"])
+            (p["checkpoints"] / "final.zip").write_bytes(b"x")
+            self.assertEqual(len(runs.redundant_checkpoints("mario", "r", root)), 7)
+            self.assertEqual(runs.redundant_checkpoints("mario", "missing", root), [])
+
     def test_build_train_cmd_accepts_sparse_normalized_preset(self):
         import presets
         cmd = runs.build_train_cmd(presets.normalize({"game": "mario"}), "r")
@@ -83,8 +98,30 @@ class RunDiscoveryTests(unittest.TestCase):
             self.assertEqual(left, ["final.zip", "ppo_3000_steps.zip", "ppo_4000_steps.zip",
                                     "ppo_5000_steps.zip", "ppo_6000_steps.zip", "ppo_7000_steps.zip"])
             self.assertEqual(runs.prune_checkpoints(p["checkpoints"], keep=5), [])
-            self.assertEqual(runs.prune_checkpoints(p["checkpoints"], keep=0), [])
+            self.assertEqual(runs.prune_checkpoints(p["checkpoints"], keep=None), [])   # disabled
+            self.assertEqual(len(runs.prune_checkpoints(p["checkpoints"], keep=0)), 5)  # delete all
+            self.assertTrue((p["checkpoints"] / "final.zip").exists())
             self.assertTrue((p["logs"] / "best_model.zip").exists())
+
+    def test_compact_and_slim(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            p = self._make_run(root, "mario", "done", best=True, final=True, snaps=(1000, 2000, 3000))
+            (p["tensorboard"]).mkdir(); (p["tensorboard"] / "events").write_bytes(b"e" * 10)
+            freed = runs.compact_run("mario", "done", root)
+            self.assertGreater(freed, 0)
+            self.assertEqual(sorted(x.name for x in p["checkpoints"].glob("*.zip")), ["final.zip"])
+            self.assertTrue((p["logs"] / "best_model.zip").exists())
+            self.assertTrue((p["tensorboard"] / "events").exists())
+            q = self._make_run(root, "mario", "stopped", best=True, snaps=tuple(range(1000, 9000, 1000)))
+            runs.compact_run("mario", "stopped", root, keep=5)
+            self.assertEqual(len(list(q["checkpoints"].glob("ppo_*"))), 5)   # no final.zip: keep 5
+            t = self._make_run(root, "mario", "tune-001", best=True, final=True, snaps=(500,))
+            t["tensorboard"].mkdir(); (t["tensorboard"] / "events").write_bytes(b"e")
+            self.assertGreater(runs.slim_trial_run("mario", "tune-001", root), 0)
+            self.assertFalse(t["checkpoints"].exists()); self.assertFalse(t["tensorboard"].exists())
+            self.assertTrue((t["logs"] / "best_model.zip").exists())
+            self.assertEqual(runs.slim_trial_run("mario", "tune-001", root), 0)
 
     def test_housekeeping(self):
         with tempfile.TemporaryDirectory() as d:
@@ -122,6 +159,8 @@ class RunDiscoveryTests(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--timesteps") + 1], "999")
         self.assertEqual(cmd[cmd.index("--eval-freq") + 1], "500")
         self.assertEqual(cmd[cmd.index("--gamma") + 1], "0.99")
+        self.assertEqual(cmd[cmd.index("--time-budget") + 1], "250")
+        self.assertEqual(cmd[cmd.index("--stall-steps") + 1], "0")
         self.assertEqual(cmd[cmd.index("--run-name") + 1], "run1")
         self.assertNotIn("--resume", runs.build_train_cmd(cfg, "run1"))
 

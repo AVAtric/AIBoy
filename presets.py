@@ -15,11 +15,11 @@ touching Python code.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
-_HERE = Path(__file__).resolve().parent
-BUILTINS_FILE = _HERE / "builtin_presets.json"
-PRESETS_FILE = _HERE / "training_presets.json"
+from paths import BUNDLE_DIR, DATA_DIR, recommended_n_envs
+
+BUILTINS_FILE = BUNDLE_DIR / "builtin_presets.json"     # shipped with the program
+PRESETS_FILE = DATA_DIR / "training_presets.json"       # the user's own, next to the program
 
 # Fields a preset can set. Keep in sync with gui.py's training-tab StringVars.
 PRESET_FIELDS = (
@@ -27,6 +27,7 @@ PRESET_FIELDS = (
     "n_steps", "batch_size", "n_epochs", "gamma", "gae_lambda", "clip_range",
     "device", "obs_type", "start_level", "action_repeat", "frame_stack",
     "seed", "checkpoint_freq", "eval_freq", "n_eval_episodes",
+    "time_budget", "stall_steps",
 )
 
 # Optional fields: presets that omit them (all shipped ones) get these,
@@ -35,6 +36,8 @@ PRESET_DEFAULTS: dict[str, float] = {
     "gamma": 0.99,
     "gae_lambda": 0.95,
     "clip_range": 0.2,
+    "time_budget": 250,     # timer units (of 400) an attempt may use; 0 = whole timer
+    "stall_steps": 0,       # steps without progress before truncation; 0 = off
 }
 
 # A complete configuration. `normalize()` fills any field a preset lacks
@@ -355,10 +358,24 @@ def _load_builtin_from_file() -> dict[str, dict] | None:
 
 
 def _write_builtin_file(data: dict[str, dict]) -> None:
+    """Write the built-ins with every field present, so the hand-editable
+    file shows all knobs (including ones added later, such as time_budget)."""
+    complete = {name: {**DEFAULT_CONFIG, **cfg} for name, cfg in data.items()}
     try:
-        BUILTINS_FILE.write_text(json.dumps(data, indent=2, sort_keys=False))
+        BUILTINS_FILE.write_text(json.dumps(complete, indent=2, sort_keys=False))
     except OSError:
         pass
+
+
+def fit_to_machine(cfg: dict) -> dict:
+    """A shipped preset assumes a ~10-core machine. Cap its parallel
+    emulators at what this machine can actually run (see
+    `paths.recommended_n_envs`); more processes than cores only add
+    scheduling overhead and memory. User presets are taken literally."""
+    n_envs = cfg.get("n_envs")
+    if isinstance(n_envs, int) and n_envs > recommended_n_envs():
+        return {**cfg, "n_envs": recommended_n_envs()}
+    return cfg
 
 
 def _init_builtins() -> dict[str, dict]:
@@ -367,7 +384,8 @@ def _init_builtins() -> dict[str, dict]:
     hardcoded set is the baseline (so any newly-added built-in preset in
     the codebase automatically appears), and the JSON file overrides on
     name collision (so users can hand-edit built-ins). Missing JSON is
-    written from the current hardcoded defaults.
+    written from the current hardcoded defaults. Every built-in is fitted
+    to this machine's core count.
     """
     from_file = _load_builtin_from_file()
     merged = dict(_HARDCODED_BUILTINS)
@@ -375,7 +393,7 @@ def _init_builtins() -> dict[str, dict]:
         merged.update(from_file)
     else:
         _write_builtin_file(_HARDCODED_BUILTINS)
-    return merged
+    return {name: fit_to_machine(cfg) for name, cfg in merged.items()}
 
 
 BUILTIN_PRESETS: dict[str, dict] = _init_builtins()

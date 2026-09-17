@@ -25,25 +25,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from presets import PRESET_DEFAULTS, PRESET_FIELDS
+from paths import app_command, cpu_count, recommended_n_envs  # noqa: F401  (re-exported)
+from presets import PRESET_FIELDS, normalize
 
 MODELS_ROOT = Path("models")
 INTERNAL_PREFIX = "_"
-
-def cpu_count() -> int:
-    return os.cpu_count() or 4
-
-
-def recommended_n_envs() -> int:
-    """Emulator processes worth running on this machine: one per core, at
-    most 12 (beyond that the PPO update, not the rollout, dominates)."""
-    return max(1, min(12, cpu_count()))
-
-
-# Baseline cadence used when a config does not specify one.
-DEFAULT_CHECKPOINT_FREQ = 25_000
-DEFAULT_EVAL_FREQ = 10_000
-DEFAULT_N_EVAL_EPISODES = 3
 
 
 def is_run_name(name: str) -> bool:
@@ -86,12 +72,15 @@ def read_run_config(game: str, run_name: str, root: Path = MODELS_ROOT) -> dict 
 
 
 def run_of_model(path: Path) -> tuple[str, str] | None:
-    """(game, run_name) for a model file under models/<game>/<run>/{logs,checkpoints}/."""
-    try:
-        run_dir = path.parent.parent
-        return run_dir.parent.name, run_dir.name
-    except (IndexError, AttributeError):
+    """(game, run_name) for a model file under models/<game>/<run>/{logs,checkpoints}/;
+    None for a file that does not sit in that layout."""
+    path = Path(path)
+    if path.parent.name not in ("logs", "checkpoints"):
         return None
+    run_dir = path.parent.parent
+    if not is_run_name(run_dir.name) or not run_dir.parent.name:
+        return None
+    return run_dir.parent.name, run_dir.name
 
 
 def list_runs(game: str, root: Path = MODELS_ROOT) -> list[str]:
@@ -113,19 +102,60 @@ def _snapshot_steps(path: Path) -> int:
 KEEP_CHECKPOINTS = 5    # step snapshots kept per run (best_model.zip / final.zip are separate)
 
 
-def prune_checkpoints(ckpt_dir: Path, keep: int = KEEP_CHECKPOINTS) -> list[Path]:
+def prune_checkpoints(ckpt_dir: Path, keep: int | None = KEEP_CHECKPOINTS) -> list[Path]:
     """Delete all but the newest `keep` step snapshots (`ppo_<N>_steps.zip`).
-    `keep <= 0` keeps everything. Returns the deleted paths."""
-    if keep <= 0 or not ckpt_dir.exists():
+    `keep=0` deletes every snapshot; `keep=None` disables pruning.
+    Returns the deleted paths."""
+    if keep is None or keep < 0 or not ckpt_dir.exists():
         return []
     snaps = sorted(ckpt_dir.glob("ppo_*_steps.zip"), key=_snapshot_steps)
-    doomed = snaps[:-keep] if len(snaps) > keep else []
+    doomed = snaps[:-keep] if keep else snaps
     for p in doomed:
         try:
             p.unlink()
         except OSError:
             pass
     return doomed
+
+
+def redundant_checkpoints(game: str, run_name: str, root: Path = MODELS_ROOT,
+                          keep: int = KEEP_CHECKPOINTS) -> list[Path]:
+    """The step snapshots `compact_run` would delete: every one if `final.zip`
+    exists (it holds the last state), otherwise all but the newest `keep`."""
+    ckpt = run_paths(game, run_name, root)["checkpoints"]
+    if not ckpt.exists():
+        return []
+    snaps = sorted(ckpt.glob("ppo_*_steps.zip"), key=_snapshot_steps)
+    return snaps if (ckpt / "final.zip").exists() else snaps[:-keep] if keep else snaps
+
+
+def compact_run(game: str, run_name: str, root: Path = MODELS_ROOT,
+                keep: int = KEEP_CHECKPOINTS) -> int:
+    """Free space in a finished run without losing anything needed to play
+    or resume it (see `redundant_checkpoints`). Returns bytes freed.
+    `best_model.zip`, `final.zip`, eval history and TensorBoard events are
+    never touched."""
+    freed = 0
+    for p in redundant_checkpoints(game, run_name, root, keep):
+        try:
+            size = p.stat().st_size
+            p.unlink()
+            freed += size
+        except OSError:
+            pass
+    return freed
+
+
+def slim_trial_run(game: str, run_name: str, root: Path = MODELS_ROOT) -> int:
+    """A tuning trial only needs its eval history (and best model) to be
+    scored; drop its checkpoints and TensorBoard events. Returns bytes freed."""
+    paths = run_paths(game, run_name, root)
+    freed = 0
+    for d in (paths["checkpoints"], paths["tensorboard"]):
+        if d.exists():
+            freed += dir_size(d)
+            shutil.rmtree(d, ignore_errors=True)
+    return freed
 
 
 def latest_checkpoint(ckpt_dir: Path) -> Path | None:
@@ -175,28 +205,25 @@ def list_models(game_filter: str | None = None, root: Path = MODELS_ROOT) -> lis
     Labels look like `mario/default — best`, `mario/default — final` and
     `mario/default — 25,000 steps` and double as the GUI dropdown text.
     """
-    entries: list[tuple[str, Path]] = []
-    games = [game_filter] if game_filter else sorted(
-        d.name for d in root.iterdir() if d.is_dir()) if root.exists() else []
+    if game_filter:
+        games = [game_filter]
+    elif root.exists():
+        games = sorted(d.name for d in root.iterdir() if d.is_dir())
+    else:
+        games = []
+    bests, finals, snapshots = [], [], []
     for game in games:
         for run in list_runs(game, root):
             paths = run_paths(game, run, root)
             best = paths["logs"] / "best_model.zip"
             if best.exists():
-                entries.append((f"{game}/{run} — best", best))
-    for game in games:
-        for run in list_runs(game, root):
-            paths = run_paths(game, run, root)
+                bests.append((f"{game}/{run} — best", best))
             final = paths["checkpoints"] / "final.zip"
             if final.exists():
-                entries.append((f"{game}/{run} — final", final))
-    for game in games:
-        for run in list_runs(game, root):
-            snaps = sorted(run_paths(game, run, root)["checkpoints"].glob("ppo_*_steps.zip"),
-                           key=_snapshot_steps)
-            for p in snaps:
-                entries.append((f"{game}/{run} — {_snapshot_steps(p):,} steps", p))
-    return entries
+                finals.append((f"{game}/{run} — final", final))
+            for p in sorted(paths["checkpoints"].glob("ppo_*_steps.zip"), key=_snapshot_steps):
+                snapshots.append((f"{game}/{run} — {_snapshot_steps(p):,} steps", p))
+    return bests + finals + snapshots
 
 
 # ------------------------- housekeeping -------------------------
@@ -205,10 +232,17 @@ TRIAL_NAME = re.compile(r"^(?P<prefix>.+)-(?P<config>\d{3})(?:-s(?P<seed>\d+))?$
 
 
 def dir_size(path: Path) -> int:
-    """Bytes used below `path` (0 if it does not exist)."""
-    if not path.exists():
-        return 0
-    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+    """Bytes used below `path` (0 if it does not exist). Tolerates files and
+    folders disappearing mid-scan: the GUI measures on a background thread
+    while runs may be deleted (tuner pruning, Delete run)."""
+    total = 0
+    for dirpath, _dirs, files in os.walk(path):        # unreadable dirs are skipped
+        for name in files:
+            try:
+                total += os.stat(os.path.join(dirpath, name)).st_size
+            except OSError:
+                pass
+    return total
 
 
 def format_size(n_bytes: int) -> str:
@@ -265,6 +299,18 @@ def delete_tune_data(game: str, prefix: str, root: Path = MODELS_ROOT) -> tuple[
     return len(names), freed
 
 
+def keep_awake(pid: int) -> "subprocess.Popen | None":
+    """macOS: prevent idle sleep while process `pid` runs (caffeinate exits
+    with it). Elsewhere a no-op. Overnight runs depend on this."""
+    if sys.platform != "darwin" or shutil.which("caffeinate") is None:
+        return None
+    try:
+        return subprocess.Popen(["caffeinate", "-i", "-w", str(pid)],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+
+
 def open_in_file_manager(path: Path) -> None:
     """Reveal a folder in Finder / Explorer / the desktop's file manager."""
     path = Path(path)
@@ -278,40 +324,26 @@ def open_in_file_manager(path: Path) -> None:
 
 def build_train_cmd(cfg: dict, run_name: str, *, resume: bool = False,
                     timesteps: int | None = None, checkpoint_freq: int | None = None,
-                    eval_freq: int | None = None, script: str = "main.py") -> list[str]:
-    """`main.py train` argv for a preset-style config (see presets.PRESET_FIELDS).
+                    eval_freq: int | None = None) -> list[str]:
+    """`train` command line for a preset-style config (see presets.PRESET_FIELDS).
 
     The Train tab, the tuner and the wizard all launch training through this
-    so every run gets exactly the same flag set. `timesteps`,
-    `checkpoint_freq` and `eval_freq` override the config (the tuner uses
-    them to give every trial the same length and scoring cadence).
+    so every run gets exactly the same flag set. Fields missing from `cfg`
+    take the preset defaults. `timesteps`, `checkpoint_freq` and `eval_freq`
+    override the config (the tuner uses them to give every trial the same
+    length and scoring cadence).
     """
-    cmd = [
-        sys.executable, "-u", script, "train",
-        "--game", str(cfg.get("game", "mario")),
-        "--n-envs", str(cfg["n_envs"]),
-        "--timesteps", str(timesteps if timesteps is not None else cfg["timesteps"]),
-        "--ent-coef", str(cfg["ent_coef"]),
-        "--learning-rate", str(cfg["learning_rate"]),
-        "--n-steps", str(cfg["n_steps"]),
-        "--batch-size", str(cfg["batch_size"]),
-        "--obs-type", str(cfg.get("obs_type", "tiles")),
-        "--start-level", str(cfg.get("start_level", "default")),
-        "--device", str(cfg.get("device", "cpu")),
-        "--action-repeat", str(cfg.get("action_repeat", 4)),
-        "--frame-stack", str(cfg.get("frame_stack", 4)),
-        "--n-epochs", str(cfg.get("n_epochs", 4)),
-        "--gamma", str(cfg.get("gamma", PRESET_DEFAULTS["gamma"])),
-        "--gae-lambda", str(cfg.get("gae_lambda", PRESET_DEFAULTS["gae_lambda"])),
-        "--clip-range", str(cfg.get("clip_range", PRESET_DEFAULTS["clip_range"])),
-        "--seed", str(cfg.get("seed", 0)),
-        "--checkpoint-freq", str(checkpoint_freq if checkpoint_freq is not None
-                                 else cfg.get("checkpoint_freq", DEFAULT_CHECKPOINT_FREQ)),
-        "--eval-freq", str(eval_freq if eval_freq is not None
-                           else cfg.get("eval_freq", DEFAULT_EVAL_FREQ)),
-        "--n-eval-episodes", str(cfg.get("n_eval_episodes", DEFAULT_N_EVAL_EPISODES)),
-        "--run-name", run_name,
-    ]
+    cfg = normalize(cfg)
+    if timesteps is not None:
+        cfg["timesteps"] = timesteps
+    if checkpoint_freq is not None:
+        cfg["checkpoint_freq"] = checkpoint_freq
+    if eval_freq is not None:
+        cfg["eval_freq"] = eval_freq
+    cmd = app_command("train")
+    for key in PRESET_FIELDS:
+        cmd += [f"--{key.replace('_', '-')}", str(cfg[key])]
+    cmd += ["--run-name", run_name]
     if resume:
         cmd.append("--resume")
     return cmd

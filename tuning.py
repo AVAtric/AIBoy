@@ -88,6 +88,114 @@ TEMPLATE_NOTES: dict[str, str] = {
 
 DEFAULT_TEMPLATE = "Quick start — entropy × learning rate (6 configs)"
 
+# ------------------------- plain language (wizard) -------------------------
+# The wizard is for people who have never heard of a learning rate. Every
+# template, tunable field and search effort has a plain name here; the
+# expert names stay on the Tune tab.
+
+TEMPLATE_PLAIN: dict[str, str] = {
+    "Quick start — entropy × learning rate (6 configs)":
+        "Curiosity × learning speed — the two that matter most (6 variations)",
+    "Learning rate (5 configs)": "Learning speed only (5 variations)",
+    "Exploration — entropy coefficient (5 configs)":
+        "Curiosity: how often it tries something new (5 variations)",
+    "Rollout shape — n_steps × batch size (6 configs)":
+        "How much play it reviews per lesson (6 variations)",
+    "Update intensity — epochs × clip range (6 configs)":
+        "How hard it studies each lesson (6 variations)",
+    "Horizon — gamma × GAE lambda (6 configs)": "How far ahead it plans (6 variations)",
+    "Input — frame stack × action repeat (4 configs)":
+        "How it sees the screen and how quickly it reacts (4 variations)",
+    "Broad random search (use Random, ~12 trials)": "A bit of everything: 12 random mixes",
+}
+TEMPLATE_FROM_PLAIN = {plain: name for name, plain in TEMPLATE_PLAIN.items()}
+TEMPLATE_PLAIN_NOTES: dict[str, str] = {
+    "Quick start — entropy × learning rate (6 configs)": "Start here. Usually the biggest win.",
+    "Learning rate (5 configs)": "Too fast and it forgets; too slow and it never gets past 1-1.",
+    "Exploration — entropy coefficient (5 configs)":
+        "More curiosity helps when it keeps getting stuck at one spot.",
+    "Rollout shape — n_steps × batch size (6 configs)":
+        "Longer reviews see whole levels; bigger batches learn more smoothly.",
+    "Update intensity — epochs × clip range (6 configs)":
+        "Studying harder gets more out of each lesson but can over-fit it.",
+    "Horizon — gamma × GAE lambda (6 configs)": "Long levels favour planning further ahead.",
+    "Input — frame stack × action repeat (4 configs)":
+        "Changes what the agent sees; the winner cannot continue an older run.",
+    "Broad random search (use Random, ~12 trials)":
+        "A rough map of everything at once; follow up with a focused search.",
+}
+
+
+def template_search(name: str) -> tuple[str, int]:
+    """(search type, sample size) a template is meant to be run with: the
+    broad template's full grid is hundreds of configs, so it samples."""
+    if name == "Broad random search (use Random, ~12 trials)":
+        return "random", 12
+    return "grid", 0
+
+
+PLAIN_KEYS: dict[str, str] = {
+    "ent_coef": "curiosity", "learning_rate": "learning speed", "n_steps": "review length",
+    "batch_size": "batch size", "n_epochs": "study passes", "clip_range": "step size",
+    "gamma": "foresight", "gae_lambda": "smoothing", "frame_stack": "frames seen",
+    "action_repeat": "reaction time", "n_envs": "parallel games", "obs_type": "eyes",
+    "start_level": "level", "device": "device", "time_budget": "time budget",
+    "stall_steps": "stall limit",
+}
+BASELINE_PLAIN = "the goal's own settings"
+
+
+def plain_overrides(overrides: dict) -> str:
+    """'curiosity 0.03 · learning speed 0.0003' for a set of tuned values;
+    the baseline (no overrides) reads as `BASELINE_PLAIN`."""
+    if not overrides:
+        return BASELINE_PLAIN
+    parts = []
+    for key, value in overrides.items():
+        text = f"{value:g}" if isinstance(value, float) else str(value)
+        parts.append(f"{PLAIN_KEYS.get(key, key)} {text}")
+    return " · ".join(parts)
+
+
+# Search effort: (seeds per variation, trial length as a share of the
+# suggested 5 % of the goal). One seed cannot separate luck from skill;
+# two is the sweet spot, three for a decision that matters.
+EFFORT_LEVELS: dict[str, tuple[int, float]] = {
+    "Quick": (1, 0.5), "Normal": (2, 1.0), "Thorough": (3, 2.0),
+}
+DEFAULT_EFFORT = "Normal"
+EFFORT_NOTES = {
+    "Quick": "each variation trained once, briefly — a first impression",
+    "Normal": "each variation trained twice — a fair comparison (recommended)",
+    "Thorough": "each variation trained three times, twice as long — for a decision that matters",
+}
+
+
+def effort_plan(goal_timesteps: int, level: str) -> tuple[int, int]:
+    """(seeds, steps per trial) for an effort level and a training goal."""
+    seeds, factor = EFFORT_LEVELS[level]
+    steps = suggested_trial_steps(goal_timesteps) * factor
+    return seeds, int(round(max(50_000, min(1_000_000, steps)) / 50_000) * 50_000)
+
+
+def explain_winner(results) -> tuple["ConfigResult | None", str]:
+    """`pick_winner` with a plain-language explanation for the wizard."""
+    winner, _why = pick_winner(results)
+    if winner is None:
+        return None, "No variation could be scored."
+    best = best_result(results)
+    baseline = next((r for r in results if not r.overrides and r.values), None)
+    if baseline is None or best is baseline:
+        return winner, (f"{plain_overrides(winner.overrides).capitalize()} scored best "
+                        f"({winner.score_text()})." + ("" if baseline is None
+                                                        else " No variation did better."))
+    if winner is best:
+        return winner, (f"'{plain_overrides(best.overrides)}' scored {best.score_text()}, clearly "
+                        f"better than {BASELINE_PLAIN} ({baseline.score_text()}).")
+    return winner, (f"'{plain_overrides(best.overrides)}' scored {best.score_text()} against "
+                    f"{baseline.score_text()} for {BASELINE_PLAIN}: too close to call, so the "
+                    f"goal's own settings are kept.")
+
 
 # ------------------------- sweep expansion -------------------------
 
@@ -150,6 +258,46 @@ def sample_random(sweep: dict[str, list], n: int, seed: int | None = None) -> li
 
 def describe_overrides(overrides: dict) -> str:
     return ", ".join(f"{k}={v}" for k, v in overrides.items())
+
+
+BASELINE_LABEL = "(base preset, unchanged)"
+
+
+def with_baseline(combos: list[dict]) -> list[dict]:
+    """The base preset itself as candidate 1, so a sweep can only 'win' by
+    beating what the user already had."""
+    return [{}] + [c for c in combos if c]
+
+
+def suggested_trial_steps(goal_timesteps: int) -> int:
+    """Trial length for the wizard: 5% of the final run, 100k..1M, rounded
+    to 50k. Short trials rank learning speed, not final skill; 5% is the
+    smallest share that has been informative here."""
+    steps = int(goal_timesteps) * 0.05
+    steps = min(1_000_000, max(100_000, steps))
+    return int(round(steps / 50_000) * 50_000)
+
+
+def pick_winner(results) -> tuple["ConfigResult | None", str]:
+    """The candidate to train with, and why.
+
+    The best-scoring candidate wins only if it beats the baseline (overrides
+    == {}) by more than the larger of the two seed spreads; otherwise the
+    baseline is kept. Without a baseline the best candidate wins.
+    """
+    best = best_result(results)
+    if best is None:
+        return None, "no scored candidate"
+    baseline = next((r for r in results if not r.overrides and r.values), None)
+    if baseline is None or best is baseline:
+        return best, ("the base preset scored best; no candidate beat it" if best is baseline
+                      else "best candidate")
+    margin = max(best.spread, baseline.spread)
+    if best.score - baseline.score > margin:
+        return best, (f"beats the base preset by {best.score - baseline.score:.0f} "
+                      f"(spread {margin:.0f})")
+    return baseline, (f"'{best.label}' leads by only {best.score - baseline.score:.0f}, within "
+                      f"the seed spread of {margin:.0f}; keeping the base preset")
 
 
 # ------------------------- timing -------------------------
@@ -290,13 +438,17 @@ class SweepEta:
 # ------------------------- trial results -------------------------
 
 METRIC_BEST = "best eval reward"
+METRIC_LATE = "late eval reward"
 METRIC_FINAL = "final eval reward"
 METRIC_MEAN = "mean eval reward"
 METRIC_PER_MINUTE = "reward per compute-minute"
-METRICS = (METRIC_BEST, METRIC_FINAL, METRIC_MEAN, METRIC_PER_MINUTE)
+METRICS = (METRIC_LATE, METRIC_BEST, METRIC_FINAL, METRIC_MEAN, METRIC_PER_MINUTE)
 METRIC_NOTES = {
-    METRIC_BEST: "Highest evaluation reward reached during the trial.",
-    METRIC_FINAL: "Evaluation reward at the end of the trial.",
+    METRIC_LATE: "Average of the last third of the evaluations: where the trial ended up, "
+                 "smoothed over several evals. The most reliable predictor of a long run; "
+                 "the wizard uses it.",
+    METRIC_BEST: "Highest single evaluation reached during the trial (rewards lucky spikes).",
+    METRIC_FINAL: "Evaluation reward at the very end of the trial (a single, noisy sample).",
     METRIC_MEAN: "Average over all evaluations (rewards a fast, steady learner).",
     METRIC_PER_MINUTE: "Best eval reward divided by the trial's wall-clock minutes: how much "
                        "reward each minute of compute bought. Candidates that train slower "
@@ -314,6 +466,7 @@ class TrialMetrics:
     timesteps: int
     n_evals: int
     duration: float | None = None      # wall-clock seconds the trial took (None = unknown)
+    late: float = float("nan")         # mean of the last third of the evaluations
 
     @property
     def per_minute(self) -> float:
@@ -323,7 +476,7 @@ class TrialMetrics:
         return max(self.best, 0.0) / (self.duration / 60.0)
 
     def by_name(self, metric: str) -> float:
-        return {METRIC_BEST: self.best, METRIC_FINAL: self.final,
+        return {METRIC_BEST: self.best, METRIC_LATE: self.late, METRIC_FINAL: self.final,
                 METRIC_MEAN: self.mean, METRIC_PER_MINUTE: self.per_minute}[metric]
 
 
@@ -336,10 +489,11 @@ def read_trial_metrics(eval_file: Path, duration: float | None = None) -> TrialM
         means = data["results"].mean(axis=1)
         lens = data["ep_lengths"].mean(axis=1)
         best_i = int(np.argmax(means))
+        n_late = min(len(means), max(2, (len(means) + 2) // 3))   # last third, at least 2 evals
         return TrialMetrics(
             best=float(means[best_i]), final=float(means[-1]), mean=float(means.mean()),
             ep_len=float(lens[best_i]), timesteps=int(data["timesteps"][-1]),
-            n_evals=int(len(means)), duration=duration,
+            n_evals=int(len(means)), duration=duration, late=float(means[-n_late:].mean()),
         )
     except Exception:
         return None
@@ -450,7 +604,7 @@ class ConfigResult:
 
     @property
     def label(self) -> str:
-        return describe_overrides(self.overrides)
+        return describe_overrides(self.overrides) or BASELINE_LABEL
 
     def score_text(self) -> str:
         if not self.values or np.isnan(self.score):

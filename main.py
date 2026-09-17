@@ -6,71 +6,81 @@ Usage:
     python main.py train --game mario --n-envs 10 --timesteps 500000   # train headless
     python main.py play  --game mario --episodes 3                     # watch in an SDL2 window
 
-All paths (ROMs/, models/) are relative to the project directory, which
-`main()` makes the working directory so the commands work from anywhere.
+Two internal sub-commands run PyBoy in a throw-away process for the GUI
+(`probe-rom <file>`, `level-state <rom> <world> <level> <out>`); they are what
+lets the GUI stay responsive even for a ROM the emulator cannot boot.
+
+All paths (ROMs/, models/) are relative to the data directory (the project
+folder, or the folder next to the built app; see paths.py), which `main()`
+makes the working directory so the commands work from anywhere. The heavy
+libraries (torch, Stable-Baselines3, PyBoy) are imported only by the
+commands that need them, so the GUI and the helper sub-commands start fast.
 """
 from __future__ import annotations
 
 import argparse
+import multiprocessing
 import os
 import sys
 from functools import partial
 from pathlib import Path
 
-from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
-from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
-
-from env import (
-    GAMES, OBS_TYPES, SUPPORTED_GAMES, env_factory, level_choices, make_pyboy_env,
-    prepare_level_states, wrap_vec_env,
-)
+from games import (DEFAULT_STALL_STEPS, DEFAULT_TIME_BUDGET, GAMES, OBS_TYPES, SUPPORTED_GAMES,
+                   level_choices, level_state_worker, prepare_level_states, probe_rom_worker)
+from paths import DATA_DIR, FROZEN, recommended_n_envs
 from runs import (KEEP_CHECKPOINTS, cpu_count, latest_checkpoint, prune_checkpoints,
-                  read_run_config, recommended_n_envs, resolve_model_path, run_paths,
-                  write_run_config)
-
-PROJECT_DIR = Path(__file__).resolve().parent
+                  read_run_config, resolve_model_path, run_paths, write_run_config)
 
 
 # ------------------------- vec-env plumbing -------------------------
 
-def build_vec_env(game, n_envs, seed, action_repeat, frame_stack, obs_type, start_level=None):
-    fns = [partial(env_factory, game, seed + i, "null", action_repeat, obs_type, start_level)
+def build_vec_env(game, n_envs, seed, action_repeat, frame_stack, obs_type, start_level=None,
+                  training=False, time_budget=DEFAULT_TIME_BUDGET, stall_steps=DEFAULT_STALL_STEPS):
+    from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+    from env import env_factory, wrap_vec_env
+    fns = [partial(env_factory, game, seed + i, "null", action_repeat, obs_type, start_level,
+                   training, time_budget, stall_steps)
            for i in range(n_envs)]
     vec = SubprocVecEnv(fns, start_method="spawn") if n_envs > 1 else DummyVecEnv(fns)
     return wrap_vec_env(vec, obs_type, frame_stack)
 
 
-def build_play_env(game, action_repeat, frame_stack, emulation_speed, obs_type, start_level=None):
+def build_play_env(game, action_repeat, frame_stack, emulation_speed, obs_type, start_level=None,
+                   time_budget=DEFAULT_TIME_BUDGET, stall_steps=DEFAULT_STALL_STEPS):
+    from stable_baselines3.common.monitor import Monitor
+    from stable_baselines3.common.vec_env import DummyVecEnv
+    from env import make_pyboy_env, wrap_vec_env
+
     def _init():
         env = make_pyboy_env(
             game=game, window_type="SDL2",
             action_repeat=action_repeat, emulation_speed=emulation_speed,
             obs_type=obs_type, start_level=start_level,
+            time_budget=time_budget, stall_steps=stall_steps,
         )
         return Monitor(env)
 
     return wrap_vec_env(DummyVecEnv([_init]), obs_type, frame_stack)
 
 
-class PruningCheckpointCallback(CheckpointCallback):
-    """CheckpointCallback that keeps only the newest `keep` step snapshots.
+def _pruning_checkpoint_callback(keep: int | None, **kwargs):
+    """A CheckpointCallback that keeps only the newest `keep` step snapshots.
 
     Long runs otherwise accumulate hundreds of multi-megabyte zips; the
     newest few are all that resume or inspection ever needs. `best_model.zip`
-    and `final.zip` live elsewhere and are never touched.
+    and `final.zip` live elsewhere and are never touched. Defined inside a
+    function so importing this module does not import torch.
     """
+    from stable_baselines3.common.callbacks import CheckpointCallback
 
-    def __init__(self, *args, keep: int = KEEP_CHECKPOINTS, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.keep = keep
+    class PruningCheckpointCallback(CheckpointCallback):
+        def _on_step(self) -> bool:
+            result = super()._on_step()
+            if self.n_calls % self.save_freq == 0:
+                prune_checkpoints(Path(self.save_path), keep)    # None = keep every snapshot
+            return result
 
-    def _on_step(self) -> bool:
-        result = super()._on_step()
-        if self.n_calls % self.save_freq == 0:
-            prune_checkpoints(Path(self.save_path), self.keep)
-        return result
+    return PruningCheckpointCallback(**kwargs)
 
 
 def pick_policy(obs_type: str) -> tuple[str, dict]:
@@ -92,16 +102,32 @@ def _tune_torch_threads(obs_type: str, device: str) -> None:
         torch.set_num_threads(1)
 
 
+def _start_level(args: argparse.Namespace) -> str | None:
+    """The env's start_level spec: None for the campaign. For Mario the
+    save-states it needs are created here, once, so workers only load them."""
+    start_level = args.start_level if args.start_level != "default" else None
+    if args.game == "mario":
+        failed = prepare_level_states(start_level)
+        if failed:
+            print(f"[{args.mode}] warning: could not bootstrap save-states for "
+                  f"{[f'{w}-{l}' for w, l in failed]}; those levels fall back to "
+                  f"set_world_level + start_game (slower)")
+        elif start_level is not None:
+            print(f"[{args.mode}] save-states ready")
+    return start_level
+
+
 def _eval_start_level(start_level: str | None) -> str | None:
     """Level mode for the evaluation env.
 
-    A fixed level is mirrored so the eval reward is per-level. Every other
-    mode evaluates on the campaign: the reward stays comparable between
-    evals and a campaign episode always terminates (game over or stuck
-    timeout), whereas a random / sequential / marathon eval episode could
-    run for a very long time and stall `evaluate_policy`.
+    A fixed level is mirrored so the eval reward is per-level. Marathon is
+    evaluated as a marathon from 1-1 (any death ends it, so it terminates),
+    which is exactly what a marathon agent is for. Random and sequential
+    evaluate on the campaign: the reward stays comparable between evals
+    and a campaign episode always terminates, whereas a random /
+    sequential eval episode could run for a very long time.
     """
-    if start_level is not None and "-" in start_level:
+    if start_level is not None and ("-" in start_level or start_level == "marathon"):
         return start_level
     return None
 
@@ -109,6 +135,8 @@ def _eval_start_level(start_level: str | None) -> str | None:
 # ------------------------- train -------------------------
 
 def cmd_train(args: argparse.Namespace) -> None:
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.callbacks import EvalCallback
     _tune_torch_threads(args.obs_type, args.device)
     if args.n_envs > cpu_count():
         # More emulator processes than cores only adds scheduling overhead
@@ -142,23 +170,21 @@ def cmd_train(args: argparse.Namespace) -> None:
         print(f"[train] note: rollout size n_steps*n_envs={rollout} is not a multiple of "
               f"batch_size={args.batch_size}; the last minibatch of every epoch is smaller")
 
-    start_level = args.start_level if args.start_level != "default" else None
-    if args.game == "mario":
-        # Save-states are created once here so the workers only load them.
-        failed = prepare_level_states(start_level)
-        if failed:
-            print(f"[train] warning: could not bootstrap save-states for "
-                  f"{[f'{w}-{l}' for w, l in failed]}; those levels fall back to "
-                  f"set_world_level + start_game (slower)")
-        elif start_level is not None:
-            print("[train] save-states ready")
+    start_level = _start_level(args)
     env = build_vec_env(args.game, args.n_envs, args.seed,
                         args.action_repeat, args.frame_stack, args.obs_type,
-                        start_level=start_level)
+                        start_level=start_level, training=True,
+                        time_budget=args.time_budget, stall_steps=args.stall_steps)
+    print(f"[train] attempt limits: time budget {args.time_budget or 'full timer'} of 400 units, "
+          f"stall limit {args.stall_steps or 'off'}")
+    if start_level == "marathon":
+        print("[train] marathon: training episodes start at a random level and run forward; "
+              "evaluation and playback start at 1-1")
     eval_start = _eval_start_level(start_level)
     eval_env = build_vec_env(args.game, 1, args.seed + 10_000,
                              args.action_repeat, args.frame_stack, args.obs_type,
-                             start_level=eval_start)
+                             start_level=eval_start,
+                             time_budget=args.time_budget, stall_steps=args.stall_steps)
     n_eval_episodes = args.n_eval_episodes
     if args.game == "mario" and n_eval_episodes > 1:
         # The eval env (campaign boot or a fixed save-state) and the greedy
@@ -214,11 +240,11 @@ def cmd_train(args: argparse.Namespace) -> None:
 
     # SB3 counts callback frequency in vec-env steps; the flags are env steps.
     per_env = max(1, args.n_envs)
-    checkpoint_cb = PruningCheckpointCallback(
+    checkpoint_cb = _pruning_checkpoint_callback(
+        keep=args.keep_checkpoints or None,     # CLI: 0 = keep all
         save_freq=max(args.checkpoint_freq // per_env, 1),
         save_path=str(paths["checkpoints"]),
         name_prefix="ppo",
-        keep=args.keep_checkpoints,
     )
     eval_cb = EvalCallback(
         eval_env,
@@ -230,6 +256,7 @@ def cmd_train(args: argparse.Namespace) -> None:
         render=False,
     )
 
+    completed = False
     try:
         model.learn(
             total_timesteps=args.timesteps,
@@ -237,10 +264,18 @@ def cmd_train(args: argparse.Namespace) -> None:
             reset_num_timesteps=resumed_from is None,
             progress_bar=False,
         )
+        completed = True
     finally:
         final_path = paths["checkpoints"] / "final.zip"
         model.save(str(final_path))
         print(f"[train] saved final model to {final_path}")
+        if completed:
+            # The run reached its target: final.zip is the last state, so
+            # the step snapshots are redundant. Interrupted runs keep theirs
+            # for --resume.
+            removed = prune_checkpoints(paths["checkpoints"], keep=0)
+            if removed:
+                print(f"[train] removed {len(removed)} step snapshot(s); final.zip supersedes them")
         env.close()
         eval_env.close()
 
@@ -248,16 +283,16 @@ def cmd_train(args: argparse.Namespace) -> None:
 # ------------------------- play -------------------------
 
 def cmd_play(args: argparse.Namespace) -> None:
+    from stable_baselines3 import PPO
     run_name = args.run_name or "default"
     model_path = resolve_model_path(args.model, args.game, run_name)
     print(f"[play] loading model from {model_path}")
 
-    start_level = args.start_level if args.start_level != "default" else None
-    if args.game == "mario":
-        prepare_level_states(start_level)
+    start_level = _start_level(args)
     env = build_play_env(args.game, args.action_repeat, args.frame_stack,
                          args.emulation_speed, args.obs_type,
-                         start_level=start_level)
+                         start_level=start_level,
+                         time_budget=args.time_budget, stall_steps=args.stall_steps)
     model = PPO.load(str(model_path), env=env, device=args.device)
     deterministic = not args.stochastic
     print(f"[play] {args.episodes} episode(s), deterministic={deterministic}")
@@ -291,6 +326,11 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--obs-type", default="tiles", choices=list(OBS_TYPES),
                    help="tiles = 16x20 tile grid + HUD + power-up (fast, MLP; default); "
                         "pixels = 144x160x3 RGB (slow, CNN)")
+    p.add_argument("--time-budget", type=int, default=DEFAULT_TIME_BUDGET,
+                   help="Timer units (of 400) an attempt may use before it is truncated "
+                        "(0 = the whole in-game timer)")
+    p.add_argument("--stall-steps", type=int, default=DEFAULT_STALL_STEPS,
+                   help="Steps without new progress before an attempt is truncated (0 = off)")
     p.add_argument("--start-level", default="default", choices=level_choices(),
                    help="Level mode: 'default' (campaign, respect lives), "
                         "'random' (new random level per episode), "
@@ -334,6 +374,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("gui", help="Launch the Tkinter GUI (wizard, tune, train and play)")
 
+    # Internal helpers the GUI runs in a throw-away process (see games.py).
+    pr = sub.add_parser("probe-rom", help=argparse.SUPPRESS)
+    pr.add_argument("rom")
+    ls = sub.add_parser("level-state", help=argparse.SUPPRESS)
+    ls.add_argument("rom")
+    ls.add_argument("world", type=int)
+    ls.add_argument("level", type=int)
+    ls.add_argument("out")
+
     p = sub.add_parser("play", help="Watch a trained agent in an SDL2 window")
     _add_common(p)
     p.add_argument("--model", default=None, help="Explicit path to a model .zip")
@@ -347,8 +396,28 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _prepare_process() -> None:
+    """Make the process usable whichever way it was started: as a script,
+    as the frozen app double-clicked in Finder (no terminal: stdout and
+    stderr are None) or as a child the GUI reads line by line."""
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name)
+        if stream is None:
+            setattr(sys, name, open(os.devnull, "w"))
+        elif FROZEN:
+            try:
+                stream.reconfigure(line_buffering=True)   # the frozen app has no `-u`
+            except (AttributeError, ValueError):
+                pass
+    os.chdir(DATA_DIR)
+
+
 def main(argv: list[str] | None = None) -> None:
-    os.chdir(PROJECT_DIR)
+    # Must come first: in a frozen build the emulator workers are started
+    # by re-running this executable, and this is what turns such a start
+    # into a worker instead of another copy of the program.
+    multiprocessing.freeze_support()
+    _prepare_process()
     argv = sys.argv[1:] if argv is None else argv
     # `python main.py` with no arguments opens the GUI.
     if not argv:
@@ -363,6 +432,10 @@ def main(argv: list[str] | None = None) -> None:
     elif args.mode == "gui":
         from gui import run as run_gui
         run_gui()
+    elif args.mode == "probe-rom":
+        probe_rom_worker(args.rom)
+    elif args.mode == "level-state":
+        level_state_worker(args.rom, args.world, args.level, args.out)
 
 
 if __name__ == "__main__":

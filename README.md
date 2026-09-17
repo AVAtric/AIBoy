@@ -6,7 +6,7 @@ is the emulator, [Stable-Baselines3](https://stable-baselines3.readthedocs.io/)
 PPO is the learner, and a Tkinter desktop app wraps the whole workflow:
 
 ```
-Wizard:  1 Tune  →  2 Preset  →  3 Train  →  4 Watch
+Wizard:  1 Set up  →  2 Save  →  3 Train  →  4 Watch
 ```
 
 The window has two halves: **workflow tabs on the left, the Game Boy screen
@@ -14,11 +14,13 @@ on the right**. Whatever produces something to watch (a finished model, the
 live preview of a training run, the wizard's final step) shows on that
 screen without switching tabs.
 
-- **Wizard** — a guided path: compare hyperparameters on short trials, save
-  the winner as a preset, run the real training, watch the result. No
-  knowledge of PPO needed.
-- **Train** — one headless training run with live stats, a progress bar,
-  the full log, TensorBoard, resume, and an optional live preview.
+- **Wizard** — a guided path in plain language: pick what the agent should
+  learn, let the app try a few variations of the settings and keep the
+  best, train, watch. One Start button runs the whole pipeline. No
+  knowledge of PPO needed; the expert vocabulary stays on the other tabs.
+- **Train** — one headless training run with the full log, TensorBoard,
+  resume, and an optional live preview; status, progress and ETA are
+  always visible under the screen.
 - **Tune** — hyperparameter sweeps (grid or random, multi-seed) with a
   best-first results table; any row becomes a preset.
 - **Presets** — browse, create, edit, rename and delete training presets.
@@ -54,35 +56,66 @@ python main.py
 
 ## Quick start (the wizard)
 
-The window opens on the **Wizard** tab.
+The window opens on the **Wizard** tab. It asks three plain questions and
+then does the work:
 
-1. **Tune.** Pick a *training goal* (a built-in preset such as
-   `Mario — Campaign, recommended (~15 min)`) and what to *compare* (a sweep
-   template such as `Quick start — entropy × learning rate`). The line next
-   to the budget shows `6 configs = 6 trials · ≈ 4 min`. Click **Start
-   search**. Each candidate trains briefly and is scored by its best
-   evaluation reward; the table fills in best-first. Click **Continue with
-   best**. Or click **Skip search** to use the preset as is.
-   Tick **Auto-complete** and the wizard does the remaining steps by
-   itself: it saves the best candidate as a preset, starts training and
-   switches to the screen when the model is ready. One click, come back to
-   a playing agent.
-2. **Preset.** Review the configuration (tuned values highlighted). The
-   suggested name is the goal plus the tuned values, e.g.
-   `Campaign, recommended · ent 0.03 · lr 0.0003`. **Save preset &
-   continue** puts it in the Train tab's preset list for future runs.
+1. **Set up.**
+   - *What should it learn?* A **goal** such as `Mario — Campaign,
+     recommended (~15 min)`. The line under it says in plain words what
+     the agent will do and how long training takes on this computer.
+   - *Look for better settings first?* **Yes** (recommended) tries a few
+     variations of the goal's settings and keeps the best one. *Vary*
+     picks what to vary, described in plain terms (`Curiosity × learning
+     speed — the two that matter most`); *Effort* is Quick / Normal /
+     Thorough (how many times and how long each variation is trained;
+     Normal trains every variation twice for 5% of the goal's length).
+     **Advanced…** exposes the raw steps and seeds. The goal's own settings
+     always take part, and a variation wins only if it clearly beats them.
+     **No** trains the goal's settings as they are.
+   - *Then:* **run everything by itself** (on by default) chains search →
+     save → train → watch without further clicks; **show it playing while
+     it trains** turns on the live preview.
+
+   The **Plan** line sums it up ("try 6 variations plus the goal's own
+   settings (14 short training runs, about 9 min), then train for about
+   10 min with the winner"). Press **▶ Start**. With the automatic run
+   the next thing to do is come back to a playing agent; otherwise the
+   result appears in the table and **Continue with the best →** moves on.
+2. **Save.** Review the settings (values found by the search are
+   highlighted, fields carry their plain labels). The suggested name is
+   the goal plus the tuned values, e.g. `Campaign, recommended · ent 0.03
+   · lr 0.0003`. **Save & continue** puts it in the Train tab's preset
+   list for future runs.
 3. **Train.** The run name is derived from the preset name
    (`campaign-recommended-ent0.03-lr0.0003`, numbered if it already
-   exists); change it if you like, set the total number of timesteps,
-   optionally tick *live preview*, and **Start training**. Progress,
-   reward, fps, ETA and elapsed time update live. **Stop** ends the run
-   early and still saves the model.
+   exists); change it if you like, set the training length, and **Start
+   training**. Progress, average score, speed, ETA and elapsed time
+   update live. **Stop** ends the run early and still keeps the best model.
 4. **Watch.** When training finishes the wizard switches here and the agent
-   plays on the screen panel with the exact observation setup it was trained
-   with. **Play again**, or **Start over** with a new agent.
+   plays on the screen panel with the exact settings it was trained with.
+   **Play again**, or **Train another agent**.
 
 Everything the wizard does is visible on the expert tabs: the sweep on
-**Tune**, the log on **Train**, the model on the screen panel.
+**Tune** (with the expert names: the wizard's "curiosity" is `ent_coef`,
+"learning speed" is `learning_rate`, and so on), the log on **Train**, the
+model on the screen panel. Training status, progress, ETA, reward and fps
+are always shown under the Game Boy screen, whatever tab is open.
+
+### Running overnight
+
+1. Goal `Mario — Marathon, overnight (~8 h)`, keep *Yes* and the default
+   variation set, leave **run everything by itself** ticked (and tick the
+   live preview if you want to watch), press **Start**. Expect about 1.5 h
+   of search (6 variations plus the goal's settings × 2 seeds × 1 M steps)
+   followed by the 60 M-step training; the ETA is under the screen.
+2. On a Mac the app prevents idle sleep while training or tuning runs
+   (`caffeinate`); the display may still turn off. Do not close the lid.
+3. In the morning the wizard is on **Watch** and the agent is playing. If
+   you restart the app instead, pick the run in the model list under the
+   screen (its settings are applied from `run.json`) and click **▶ Play**.
+   With the **marathon demo** on (default), a death, an exhausted time
+   budget or a stall moves the demo on to the next level, so it plays
+   through the whole game; the status line reports each skip.
 
 ### Choosing a game
 
@@ -128,7 +161,9 @@ scored from its `evaluations.npz` with the same eval cadence (*Evals /
 trial*). Trials are named `<prefix>-<config>[-s<seed>]` under `models/mario/`.
 
 - **Base preset** — the config every trial starts from; the sweep only
-  overrides the listed fields.
+  overrides the listed fields. **Include the base preset** (default on)
+  adds it unchanged as candidate 1, so a sweep can only "win" by beating
+  what you already had.
 - **Sweep template** — curated sweeps for Mario with tile observations, each
   with a one-line rationale. The JSON is editable and validated live:
   `{"param": [values, …]}` over `learning_rate, ent_coef, n_steps,
@@ -139,7 +174,9 @@ trial*). Trials are named `<prefix>-<config>[-s<seed>]` under `models/mario/`.
   same sweep yields the same candidates (this is what makes resuming safe).
 - **Seeds / config** — PPO varies a lot between seeds; with 2–3 seeds the
   table shows `mean ± std`.
-- **Metric** — best, final or mean evaluation reward, or **reward per
+- **Metric** — **late eval reward** (average of the last third of the
+  evaluations, at least two; the most reliable predictor of a long run and
+  the wizard's choice), best, final or mean evaluation reward, or **reward per
   compute-minute**: best reward divided by the trial's measured wall-clock
   minutes, so candidates that learn slightly better but train slower (more
   epochs, smaller batches, pixel observations) are ranked by what each
@@ -193,8 +230,15 @@ cannot be edited mid-flight and two CPU-hungry sessions cannot collide.
 Training artefacts are kept small automatically:
 
 - **Step snapshots**: a run keeps only its newest 5 `ppo_<N>_steps.zip`
-  (CLI: `--keep-checkpoints`, 0 = keep all). `best_model.zip` and
-  `final.zip` are always kept.
+  while it trains (CLI: `--keep-checkpoints`, 0 = keep all), and drops
+  them all when it finishes, because `final.zip` holds the last state.
+  Interrupted runs keep theirs for **Resume**. `best_model.zip` and
+  `final.zip` are always kept. **Compact run…** on the Train tab applies
+  the same rule to older runs.
+- **Tuning trials** keep only `logs/` (eval history, best model) and
+  `trial.json`; checkpoints and TensorBoard events go as soon as the trial
+  is scored.
+- The status bar shows the size of `models/` and the number of runs.
 - **Sweeps**: while a sweep runs, only the run folders of the best N
   candidates are kept (Tune tab **Keep best N trial runs**, default 9; the
   wizard uses 9). Their scores stay in the table and in the results file,
@@ -213,16 +257,33 @@ file manager, and **Clear** on the screen panel blanks the emulator view.
 
 ### Screen panel (right)
 
-The emulator view with the live episode (episode, reward, world, position,
-steps, lives, coins, action) and the controls to **play a model**: the
+When the app starts, the Game Boy screen plays the boot video from
+`assets/` with its sound, and then rests on the video's final logo frame
+with a "No video" line under it until a preview or a playback takes over.
+(The shipped clip shows an "AIboy" logo with a chime of our own; it is
+generated by `python tools/make_intro.py`. If files named
+`assets/orig_gb_intro.npz` / `.wav` are present they are used instead of
+`assets/gb_intro.*`, but the repo does not contain or provide such files and
+`.gitignore` keeps them out of it. To use a clip of your own put it at
+`assets/gb_intro.mp4` and run `python tools/build_intro.py`, which needs
+ffmpeg, to regenerate the frame and sound files the app actually uses. Set
+`GAMEBOY_NO_INTRO=1` to start silently.) Below the screen: the **live episode** (episode, world, power-up,
+reward, position, lives, steps, coins, action) with a status line that
+says how each episode ended (died in 1-2, time budget used up, step cap,
+completed every level); the **training** block with status, progress bar,
+ETA, reward, episode length, fps and elapsed time, visible from every tab;
+and the controls to **play a model**: the
 model dropdown lists every `best`, `final` and step snapshot of every run,
 plus episodes and speed (`0.5×` … `4×`, `Unlimited`), and **Clear** to blank
 the view. Speed is paced per
 emulator frame, so real time is real time even though a jump holds the
 button for 10 frames and a walk step for 4. Selecting a model
 applies the observation settings recorded in its `run.json`; **Advanced…**
-opens max steps, stochastic actions and the observation setup for models
-from older runs without that file.
+opens max steps, stochastic actions, the **marathon demo** switch (after a
+death, an exhausted time budget or a stall the demo continues with the next
+level so it shows the whole game; off gives the strict one-life marathon)
+and the observation setup for
+models from older runs without that file.
 
 ### Presets tab
 
@@ -273,6 +334,8 @@ the command from.
 | `--keep-checkpoints`| 5       | Newest step snapshots kept per run (0 = all)                 |
 | `--eval-freq`       | 10000   | Env steps between evaluations                                |
 | `--n-eval-episodes` | 3       | Mario evals are deterministic; 1 episode is run (see Performance) |
+| `--time-budget`     | 250     | Timer units (of 400) an attempt may use; 0 = whole timer     |
+| `--stall-steps`     | 0       | Steps without progress before truncation; 0 = off            |
 | `--learning-rate`   | 2.5e-4  |                                                              |
 | `--n-steps`         | 256     | PPO rollout length per env                                   |
 | `--batch-size`      | 128     | Shipped presets use 256 (see Performance)                    |
@@ -335,7 +398,14 @@ the model was trained with.
   clear the step Mario touches the goal and a death the step he dies,
   instead of 20–70 steps later when PyBoy's counters catch up. Episodes that
   end on those events end immediately; no samples are wasted in cutscenes.
-- **Stuck timeout.** 200 steps without a new maximum x truncate the episode.
+- **Time per attempt.** The game gives 400 timer units per level (one unit
+  is 0.65 s, so about 4 min 18 s). An attempt may use a **time budget** of
+  250 of them (about 2 min 42 s, ≈ 2,400 steps); after that it is
+  truncated without a death penalty, so a stuck agent does not burn the
+  whole timer. The budget is checked only while playing, never during the
+  level-end countdown. An optional **stall limit** (steps without a new
+  furthest x) is off by default; set it, e.g. to 200, for the old
+  fast-fail behaviour. Both are preset fields and recorded per run.
 
 ### Level modes (`--start-level`)
 
@@ -344,15 +414,33 @@ the model was trained with.
 | `default`    | game over (all lives lost)            | Playing through the game (campaign).    |
 | `random`     | any death or clear; new random level  | Generalising across every level.        |
 | `sequential` | any death or clear; retry on death    | Reliably beating levels in order.       |
-| `marathon`   | any death, or clearing the last level | Speedrunning all 10 levels in one go.   |
+| `marathon`   | any death, or clearing the last level | Playing all 10 levels in one life.      |
 | `W-L`        | any death or clear                    | Drilling one level.                     |
 
 Levels other than 1-1 start from cached PyBoy save-states in
 `models/mario/_level_states/`, created automatically on first use. Levels
 2-3 and 4-3 cannot be booted through PyBoy's wrapper (upstream bug) and are
-skipped by every mode. Evaluation during training runs on the campaign
-(or the fixed level for `W-L`) so eval rewards stay comparable and every
-eval episode terminates.
+skipped by every mode.
+
+**A marathon is one continuous run, not one run per level.** The episode
+starts in a level; the moment Mario touches the goal the next level's
+save-state is loaded (the level-end cutscene is skipped) and play continues
+in the same episode. The episode ends at the first death, when the attempt's time budget is
+used up, or after the last usable level (with a large bonus). There are no
+extra lives in a marathon.
+
+**Marathon training starts at a random level.** If every training episode
+started at 1-1 the agent would reach level 5 only after clearing 1–4
+flawlessly, and later levels would get almost no training signal. Training
+episodes therefore start at a random level and run forward from there (the
+level is part of the observation, so the policy knows where it is);
+evaluation and playback always start at 1-1 and run the real marathon.
+Completing all ten levels in one life is a long project: the `Marathon,
+all levels (~1 h)` preset is a start, the `overnight` preset is realistic.
+
+Evaluation during training mirrors the mode where that terminates cleanly
+(fixed level, marathon from 1-1) and uses the campaign otherwise (random,
+sequential) so eval rewards stay comparable and every eval episode ends.
 
 ### Training (`main.py`)
 
@@ -417,12 +505,43 @@ models/mario/
 
 `models/`, `ROMs/` and `training_presets.json` are git-ignored.
 
+## Building a standalone app (release)
+
+`build_release.py` packages the program with PyInstaller for the computer
+it runs on, so it can be used without Python:
+
+```bash
+pip install pyinstaller
+python build_release.py            # -> release/GameBoyAI/ and release/GameBoyAI-<platform>.zip
+python build_release.py --no-roms  # leave the ROMs folder empty (for handing the build on)
+```
+
+The script first profiles the machine (cores, performance cores, memory,
+chip) and writes `system_profile.json` into the bundle. The number of
+emulators the release runs in parallel comes from that profile (one per
+core, at most 12, and never more than half the memory can hold), and every
+built-in preset is capped to it, so a build uses the cores it has and no
+more. The release folder holds the app (`GameBoyAI.app` on macOS), a
+`ROMs/` folder (your ROM files are copied in unless `--no-roms`; the app
+never ships a game), an empty `models/` folder and a `README.txt`. The
+user's files (ROMs, models, saved presets, `gui_errors.log`) live next to
+the app, never inside it, so replacing the app keeps them. After building,
+the script runs the built app once (probes a ROM and trains a few hundred
+steps with two emulator processes) to prove that process spawning works
+in the frozen app; `--no-selftest` skips that.
+
+Build on each kind of machine you want to ship to: a build is for one
+platform and CPU type (here macOS on Apple Silicon). On macOS the app is
+ad-hoc signed; on another Mac, right-click → Open the first time.
+
 ## Project layout
 
 ```
-main.py               CLI entry point: gui | train | play
+main.py               Entry point: gui | train | play (+ probe-rom / level-state helpers)
+paths.py              Where the program and its data live (source tree vs frozen release)
+build_release.py      Packages a standalone app for this machine (PyInstaller)
 gui.py                Tkinter app: Train / Tune tabs, screen panel, status bar, event pump
-wizard.py             Wizard tab (guided Tune → Preset → Train → Watch)
+wizard.py             Wizard tab (guided Set up → Save → Train → Watch, plain language)
 presets_tab.py        Presets tab (browse / edit / organise presets)
 widgets.py            Shared Tk pieces: parameter form (ConfigForm), uniform tables
 player.py             Embedded playback / live preview engine (background thread)
@@ -432,22 +551,35 @@ runs.py               Run directories, model discovery, trainer command line
 tuning.py             Sweep templates, grid/random expansion, trial scoring, results files
 presets.py            Built-in and user presets
 builtin_presets.json  Shipped presets (hand-editable)
-tests/                Unit tests (python -m unittest discover -s tests)
+assets/               Boot video (mp4 source, generated frames .npz and .wav)
+tools/make_intro.py   Generates the shipped AIboy boot-video assets (npz, wav, mp4)
+tools/build_intro.py  Regenerates the boot-video assets from the mp4 (needs ffmpeg)
+tests/                Unit tests (python -m unittest discover -s tests); tests/gui/ GUI checks
 ```
 
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v
+python -m unittest discover -s tests -v          # unit tests, a few seconds
+python tests/gui/check_layout.py                 # GUI checks: run one at a time, app closed
+python tests/gui/check_games.py
+python tests/gui/check_smoke.py
+python tests/gui/check_e2e.py                    # search -> preset -> train -> watch (~30 s)
+python tests/gui/check_e2e_auto.py               # the same through Auto-complete
+python tests/gui/check_marathon.py               # marathon: train via Train tab, play in demo mode
+python tests/gui/check_intro.py                  # start-up boot video and sound (plays once)
 ```
 
-33 tests cover the emulator-free modules: sweep expansion and the
-trial-reuse rules, run discovery and the `run.json` manifest, preset
+The unit tests cover the emulator-free modules: sweep expansion and the
+trial-reuse rules, run discovery, manifests and clean-up rules, preset
 defaults / overrides / rename rules, level parsing, ROM discovery and the
-ROM probe (the probe test is skipped without `ROMs/mario.gb`), and a guard
-that no GUI module imports PyBoy or Stable-Baselines3 at module level so the
-window keeps opening instantly. The GUI itself is exercised by starting it
-and running the `Mario — Quick smoke test (30 s)` preset through the wizard.
+ROM probe, the power-up observation cell (both skipped without
+`ROMs/mario.gb`), and a guard that no GUI module imports PyBoy or
+Stable-Baselines3 at module level so the window keeps opening instantly.
+
+The GUI checks open the real window, answer their own dialogs, and use a
+separate trial prefix (`e2etest`) so they never touch your runs. Each
+prints an `…_OK` line and removes everything it created.
 
 ## Troubleshooting
 
@@ -460,6 +592,9 @@ and running the `Mario — Quick smoke test (30 s)` preset through the wizard.
   close to your core count. Close the live preview.
 - **TensorBoard button does nothing** — `pip install tensorboard`; the
   button falls back to `python -m tensorboard.main`.
+- **Something went wrong in the window** — unexpected errors are shown in a
+  dialog and appended to `gui_errors.log` in the project folder; a running
+  training or sweep is not affected.
 - **Playback looks wrong** — obs type, action repeat and frame stack must
   match the training run; apply the run's preset (or use the wizard) so
   they are filled in for you.

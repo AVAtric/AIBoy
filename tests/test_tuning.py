@@ -95,6 +95,36 @@ class SweepTests(unittest.TestCase):
         eta.trial_started(40.0); eta.trial_finished(52.0)
         self.assertAlmostEqual(eta.between_trials(), 0.0)
 
+    def test_plain_language_covers_every_template_and_effort(self):
+        self.assertEqual(set(tuning.TEMPLATE_PLAIN), set(tuning.SWEEP_TEMPLATES))
+        self.assertEqual(set(tuning.TEMPLATE_PLAIN_NOTES), set(tuning.SWEEP_TEMPLATES))
+        self.assertEqual(len(tuning.TEMPLATE_FROM_PLAIN), len(tuning.SWEEP_TEMPLATES))  # names unique
+        self.assertEqual(tuning.template_search(tuning.DEFAULT_TEMPLATE), ("grid", 0))
+        self.assertEqual(tuning.template_search("Broad random search (use Random, ~12 trials)"),
+                         ("random", 12))
+        self.assertEqual(set(tuning.EFFORT_NOTES), set(tuning.EFFORT_LEVELS))
+        self.assertEqual(tuning.effort_plan(2_000_000, "Normal"), (2, 100_000))
+        self.assertEqual(tuning.effort_plan(2_000_000, "Quick"), (1, 50_000))
+        self.assertEqual(tuning.effort_plan(60_000_000, "Thorough"), (3, 1_000_000))
+        self.assertEqual(tuning.plain_overrides({"ent_coef": 0.03, "learning_rate": 3e-4}),
+                         "curiosity 0.03 · learning speed 0.0003")
+        self.assertEqual(tuning.plain_overrides({}), tuning.BASELINE_PLAIN)
+        for key in tuning.TUNABLE_FIELDS:
+            self.assertIn(key, tuning.PLAIN_KEYS, key)
+
+    def test_explain_winner(self):
+        mk = lambda i, ov, vals: tuning.ConfigResult(index=i, overrides=ov, config={}, metric="m",
+                                                    values=vals, runs=["r"])
+        base = mk(1, {}, [100.0, 120.0])
+        close = mk(2, {"ent_coef": 0.03}, [115.0, 125.0])
+        clear = mk(3, {"ent_coef": 0.05}, [200.0, 210.0])
+        w, why = tuning.explain_winner([base, close])
+        self.assertIs(w, base); self.assertIn("too close to call", why); self.assertNotIn("ent_coef", why)
+        w, why = tuning.explain_winner([base, close, clear])
+        self.assertIs(w, clear); self.assertIn("clearly better", why); self.assertIn("curiosity 0.05", why)
+        w, why = tuning.explain_winner([base]); self.assertIs(w, base); self.assertIn("No variation", why)
+        self.assertEqual(tuning.explain_winner([])[0], None)
+
     def test_format_duration(self):
         self.assertEqual(tuning.format_duration(30), "30 s")
         self.assertEqual(tuning.format_duration(600), "10 min")
@@ -159,6 +189,34 @@ class ResultTests(unittest.TestCase):
         # a later, better result pushes an older one out
         results.append(mk(5, 99.0, "t-005"))
         self.assertEqual(tuning.prune_trial_runs(results, 2, "mario", lambda g, r: deleted.append(r)), ["t-004"])
+
+    def test_late_metric_baseline_and_winner_rule(self):
+        with tempfile.TemporaryDirectory() as d:
+            run = Path(d)
+            self._write_evals(run, [1, 2, 3, 4, 5, 6], [[10], [20], [30], [40], [50], [60]])
+            m = tuning.read_trial_metrics(run / "logs" / "evaluations.npz")
+            self.assertAlmostEqual(m.late, 55.0)                    # mean of the last third (2 evals)
+        with tempfile.TemporaryDirectory() as d:
+            run = Path(d)
+            self._write_evals(run, [1, 2, 3, 4, 5], [[10], [20], [30], [40], [60]])
+            self.assertAlmostEqual(tuning.read_trial_metrics(run / "logs" / "evaluations.npz").late, 50.0)
+            self.assertEqual(m.by_name(tuning.METRIC_LATE), m.late)
+        self.assertEqual(tuning.with_baseline([{"a": 1}, {"a": 2}]), [{}, {"a": 1}, {"a": 2}])
+        self.assertEqual(tuning.with_baseline([{}, {"a": 1}]), [{}, {"a": 1}])
+        self.assertEqual(tuning.suggested_trial_steps(2_000_000), 100_000)
+        self.assertEqual(tuning.suggested_trial_steps(10_000_000), 500_000)
+        self.assertEqual(tuning.suggested_trial_steps(60_000_000), 1_000_000)
+        mk = lambda i, ov, vals: tuning.ConfigResult(index=i, overrides=ov, config={}, metric="m",
+                                                    values=vals, runs=["r"])
+        base = mk(1, {}, [100.0, 120.0])
+        self.assertEqual(base.label, tuning.BASELINE_LABEL)
+        close = mk(2, {"ent_coef": 0.03}, [115.0, 125.0])       # leads by 10, spread 10 -> not clear
+        clear = mk(3, {"ent_coef": 0.05}, [200.0, 210.0])
+        w, why = tuning.pick_winner([base, close]); self.assertIs(w, base); self.assertIn("keeping", why)
+        w, why = tuning.pick_winner([base, close, clear]); self.assertIs(w, clear); self.assertIn("beats", why)
+        w, _ = tuning.pick_winner([close, clear]); self.assertIs(w, clear)   # no baseline: best wins
+        w, why = tuning.pick_winner([base, mk(4, {"x": 1}, [50.0])]); self.assertIs(w, base)
+        self.assertEqual(tuning.pick_winner([]), (None, "no scored candidate"))
 
     def test_nan_scores_rank_last(self):
         a = tuning.ConfigResult(index=1, overrides={}, config={}, metric="m", values=[float("nan")],

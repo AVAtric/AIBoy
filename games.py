@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from paths import app_command
+
 ROM_DIR = Path("ROMs")
 
 # Super Mario Land has 4 worlds × 3 levels = 12 total levels. PyBoy's
@@ -54,6 +56,12 @@ SML_DEATH_STATES = frozenset({0x01, 0x04})
 #   0xFF99  power-up state machine: 0 small, 1 growing, 2 super,
 #           3 / 4 hit and shrinking back to small
 #   0xFFB5  non-zero while Mario has the superball (pressing B throws one)
+# The level timer starts at 400 units; one unit is 38.8 frames (0.65 s),
+# measured in the emulator, so a full timer is ~258 s or ~3860 env steps
+# at action repeat 4.
+TIMER_START = 400
+DEFAULT_TIME_BUDGET = 250      # timer units an attempt may use before it is truncated
+DEFAULT_STALL_STEPS = 0        # steps without new progress before truncation; 0 = off
 ADDR_POWERUP_STATE = 0xFF99
 ADDR_SUPERBALL = 0xFFB5
 POWER_SMALL, POWER_SUPER, POWER_SUPERBALL = 0, 1, 2
@@ -93,30 +101,33 @@ def _bootstrap_level_state(rom_path: Path, world: int, level: int,
     if (world, level) in SML_BROKEN_LEVELS:
         return False
     state_file.parent.mkdir(parents=True, exist_ok=True)
-    # PyBoy's set_world_level encoding is 1-indexed (memory byte 0x11 = 1-1),
-    # despite what its docstring claims. Pass w, l as-is (1-indexed).
-    code = (
-        "from pyboy import PyBoy;"
-        f"p = PyBoy({str(rom_path.resolve())!r}, window_type='null', "
-        "game_wrapper=True, disable_renderer=True);"
-        f"p.game_wrapper().start_game(world_level=({world},{level}));"
-        # Let the level fully load before saving state so the tile map is
-        # settled — avoids a state that boots into the "level intro" screen.
-        "[p.tick() for _ in range(60)];"
-        f"p.save_state(open({str(state_file.resolve())!r}, 'wb'));"
-        "p.stop(save=False)"
-    )
     import subprocess
-    import sys as _sys
     try:
         subprocess.run(
-            [_sys.executable, "-c", code],
+            app_command("level-state", str(rom_path.resolve()), str(world), str(level),
+                        str(state_file.resolve())),
             timeout=timeout_sec, capture_output=True, check=True,
         )
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
         state_file.unlink(missing_ok=True)
         return False
     return state_file.exists() and state_file.stat().st_size > 1000
+
+
+def level_state_worker(rom_path: str, world: int, level: int, out_file: str) -> None:
+    """Body of the `level-state` sub-command (runs in its own process)."""
+    from pyboy import PyBoy
+    # PyBoy's set_world_level encoding is 1-indexed (memory byte 0x11 = 1-1),
+    # despite what its docstring claims. Pass w, l as-is (1-indexed).
+    p = PyBoy(rom_path, window_type="null", game_wrapper=True, disable_renderer=True)
+    p.game_wrapper().start_game(world_level=(world, level))
+    # Let the level fully load before saving state so the tile map is
+    # settled; avoids a state that boots into the "level intro" screen.
+    for _ in range(60):
+        p.tick()
+    with open(out_file, "wb") as f:
+        p.save_state(f)
+    p.stop(save=False)
 
 
 def ensure_level_states(rom_path: Path, targets=None) -> list[tuple[int, int]]:
@@ -273,19 +284,9 @@ def probe_rom(rom_path: str | Path, timeout_sec: int = 30) -> tuple[str | None, 
     cannot handle can neither hang nor crash the caller."""
     import json
     import subprocess
-    import sys as _sys
-    code = (
-        "import json, sys;"
-        "from pyboy import PyBoy;"
-        f"p = PyBoy({str(Path(rom_path).resolve())!r}, window_type='null', "
-        "game_wrapper=True, disable_renderer=True);"
-        "print(json.dumps({'title': p.cartridge_title(), "
-        "'wrapper': p.game_wrapper() is not None}));"
-        "p.stop(save=False)"
-    )
     try:
-        out = subprocess.run([_sys.executable, "-c", code], timeout=timeout_sec,
-                             capture_output=True, text=True)
+        out = subprocess.run(app_command("probe-rom", str(Path(rom_path).resolve())),
+                             timeout=timeout_sec, capture_output=True, text=True)
     except subprocess.TimeoutExpired:
         return None, False, "PyBoy did not start within the time limit"
     if out.returncode != 0:
@@ -297,3 +298,13 @@ def probe_rom(rom_path: str | Path, timeout_sec: int = 30) -> tuple[str | None, 
     except (IndexError, json.JSONDecodeError):
         return None, False, "unexpected output from PyBoy"
     return str(data.get("title", "")).strip(), bool(data.get("wrapper")), None
+
+
+def probe_rom_worker(rom_path: str) -> None:
+    """Body of the `probe-rom` sub-command: prints one JSON line."""
+    import json
+    from pyboy import PyBoy
+    p = PyBoy(rom_path, window_type="null", game_wrapper=True, disable_renderer=True)
+    print(json.dumps({"title": p.cartridge_title(), "wrapper": p.game_wrapper() is not None}),
+          flush=True)
+    p.stop(save=False)

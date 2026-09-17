@@ -7,4 +7,15 @@ __pycache__/
 
 # Training artifacts (all live under models/<game>/<run>/)
 models/
-training_presets.json
+training_presets*.json
+
+gui_errors.log
+
+assets/orig*
+
+# Release builds (build_release.py)
+build/
+dist/
+release/
+system_profile.json
+*.spec

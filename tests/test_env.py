@@ -85,6 +85,95 @@ class ObservationTests(unittest.TestCase):
         finally:
             pb.stop(save=False)
 
+    @unittest.skipUnless((games.ROM_DIR / "mario.gb").exists(), "needs ROMs/mario.gb")
+    def test_marathon_random_start_is_training_only(self):
+        from pyboy import PyBoy
+        games.prepare_level_states("marathon")
+        pb = PyBoy(str(games.ROM_DIR / "mario.gb"), window_type="null", game_wrapper=True,
+                   disable_renderer=True)
+        try:
+            e = env.MarioEnv(pb, obs_type="tiles", start_level="marathon")
+            for _ in range(3):
+                e.reset()
+                self.assertEqual(e._marathon_idx, 0)
+                self.assertEqual(tuple(e.gw.world), (1, 1))          # eval / play: always 1-1
+            e = env.MarioEnv(pb, obs_type="tiles", start_level="marathon", marathon_random_start=True)
+            e.reset(seed=3)
+            starts = set()
+            for _ in range(12):
+                e.reset()
+                starts.add(e._marathon_idx)
+                self.assertEqual(tuple(e.gw.world), games.SML_ALL_LEVELS[e._marathon_idx])
+            self.assertGreater(len(starts), 1)                       # training: varied starts
+        finally:
+            pb.stop(save=False)
+
+    @unittest.skipUnless((games.ROM_DIR / "mario.gb").exists(), "needs ROMs/mario.gb")
+    def test_time_budget_truncates_and_stall_rule_is_off_by_default(self):
+        from pyboy import PyBoy
+        pb = PyBoy(str(games.ROM_DIR / "mario.gb"), window_type="null", game_wrapper=True,
+                   disable_renderer=True)
+        try:
+            e = env.MarioEnv(pb, obs_type="tiles", start_level="1-1", time_budget=3)
+            self.assertEqual(e.stuck_steps, 0)                     # stall rule off by default
+            e.reset()
+            for step in range(600):                                 # stand still (NOOP)
+                _, _, term, trunc, info = e.step(0)
+                if term or trunc:
+                    break
+            self.assertTrue(trunc and info["time_budget_exceeded"], info)
+            self.assertFalse(info["died"] or info["stalled"])
+            self.assertGreaterEqual(info["time_used"], 3)
+            self.assertLess(step, 600)
+            # stall rule when enabled
+            e2 = env.MarioEnv(pb, obs_type="tiles", start_level="1-1", time_budget=0, stuck_steps=20)
+            e2.reset()
+            for step in range(200):
+                _, _, term, trunc, info = e2.step(0)
+                if term or trunc:
+                    break
+            self.assertTrue(trunc and info["stalled"], info)
+        finally:
+            pb.stop(save=False)
+
+    @unittest.skipUnless((games.ROM_DIR / "mario.gb").exists(), "needs ROMs/mario.gb")
+    def test_marathon_demo_continues_after_death(self):
+        from pyboy import PyBoy
+        games.prepare_level_states("marathon")
+        pb = PyBoy(str(games.ROM_DIR / "mario.gb"), window_type="null", game_wrapper=True,
+                   disable_renderer=True)
+        try:
+            for demo in (False, True):
+                e = env.MarioEnv(pb, obs_type="tiles", start_level="marathon",
+                                 marathon_continue_on_death=demo, time_budget=0)
+                e.reset()
+                ended, skipped = False, None
+                for _ in range(1500):                          # run right into the first enemy
+                    _, _, term, trunc, info = e.step(5)
+                    if info.get("marathon_skipped_to"):
+                        skipped = info["marathon_skipped_to"]
+                        break
+                    if term or trunc:
+                        ended = True
+                        break
+                if demo:
+                    self.assertEqual(skipped, (1, 2), info)     # death -> demo continues in 1-2
+                    self.assertEqual(tuple(e.gw.world), (1, 2))
+                else:
+                    self.assertTrue(ended and info["died"], info)   # strict: death ends the run
+            # demo: an exhausted time budget also moves on (stand still with a tiny budget)
+            e = env.MarioEnv(pb, obs_type="tiles", start_level="marathon",
+                             marathon_continue_on_death=True, time_budget=3)
+            e.reset()
+            for _ in range(600):
+                _, _, term, trunc, info = e.step(0)
+                if info.get("marathon_skipped_to") or term or trunc:
+                    break
+            self.assertEqual(info.get("marathon_skipped_to"), (1, 2), info)
+            self.assertTrue(info["time_budget_exceeded"])
+        finally:
+            pb.stop(save=False)
+
     def test_invalid_obs_type_rejected(self):
         class FakePyBoy:
             def game_wrapper(self):

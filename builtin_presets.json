@@ -16,7 +16,12 @@
     "checkpoint_freq": 4000,
     "eval_freq": 4000,
     "n_eval_episodes": 1,
-    "device": "cpu"
+    "device": "cpu",
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+    "time_budget": 250,
+    "stall_steps": 0
   },
   "Mario \u2014 Campaign, recommended (~15 min)": {
     "game": "mario",
@@ -35,7 +40,12 @@
     "checkpoint_freq": 100000,
     "eval_freq": 25000,
     "n_eval_episodes": 3,
-    "device": "cpu"
+    "device": "cpu",
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+    "time_budget": 250,
+    "stall_steps": 0
   },
   "Mario \u2014 Campaign, extended (~1 h)": {
     "game": "mario",
@@ -54,7 +64,12 @@
     "checkpoint_freq": 250000,
     "eval_freq": 100000,
     "n_eval_episodes": 3,
-    "device": "cpu"
+    "device": "cpu",
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+    "time_budget": 250,
+    "stall_steps": 0
   },
   "Mario \u2014 Campaign, overnight (~8 h)": {
     "game": "mario",
@@ -73,7 +88,12 @@
     "checkpoint_freq": 500000,
     "eval_freq": 250000,
     "n_eval_episodes": 3,
-    "device": "cpu"
+    "device": "cpu",
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+    "time_budget": 250,
+    "stall_steps": 0
   },
   "Mario \u2014 Random levels (~1 h)": {
     "game": "mario",
@@ -92,7 +112,12 @@
     "checkpoint_freq": 250000,
     "eval_freq": 100000,
     "n_eval_episodes": 3,
-    "device": "cpu"
+    "device": "cpu",
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+    "time_budget": 250,
+    "stall_steps": 0
   },
   "Mario \u2014 Random levels, overnight (~8 h)": {
     "game": "mario",
@@ -111,7 +136,12 @@
     "checkpoint_freq": 500000,
     "eval_freq": 250000,
     "n_eval_episodes": 3,
-    "device": "cpu"
+    "device": "cpu",
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+    "time_budget": 250,
+    "stall_steps": 0
   },
   "Mario \u2014 No return, cycle levels (~1 h)": {
     "game": "mario",
@@ -130,7 +160,12 @@
     "checkpoint_freq": 250000,
     "eval_freq": 100000,
     "n_eval_episodes": 3,
-    "device": "cpu"
+    "device": "cpu",
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+    "time_budget": 250,
+    "stall_steps": 0
   },
   "Mario \u2014 No return, overnight (~8 h)": {
     "game": "mario",
@@ -149,7 +184,12 @@
     "checkpoint_freq": 500000,
     "eval_freq": 250000,
     "n_eval_episodes": 3,
-    "device": "cpu"
+    "device": "cpu",
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+    "time_budget": 250,
+    "stall_steps": 0
   },
   "Mario \u2014 Marathon, all levels (~1 h)": {
     "game": "mario",
@@ -168,7 +208,12 @@
     "checkpoint_freq": 250000,
     "eval_freq": 100000,
     "n_eval_episodes": 3,
-    "device": "cpu"
+    "device": "cpu",
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+    "time_budget": 250,
+    "stall_steps": 0
   },
   "Mario \u2014 Marathon, overnight (~8 h)": {
     "game": "mario",
@@ -187,7 +232,12 @@
     "checkpoint_freq": 500000,
     "eval_freq": 250000,
     "n_eval_episodes": 3,
-    "device": "cpu"
+    "device": "cpu",
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+    "time_budget": 250,
+    "stall_steps": 0
   },
   "Mario \u2014 Practice level 3-2 (~30 min)": {
     "game": "mario",
@@ -206,7 +256,12 @@
     "checkpoint_freq": 100000,
     "eval_freq": 50000,
     "n_eval_episodes": 3,
-    "device": "cpu"
+    "device": "cpu",
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+    "time_budget": 250,
+    "stall_steps": 0
   },
   "Mario \u2014 Pixels CNN (~2 h for 500k)": {
     "game": "mario",
@@ -225,6 +280,11 @@
     "checkpoint_freq": 25000,
     "eval_freq": 10000,
     "n_eval_episodes": 3,
-    "device": "cpu"
+    "device": "cpu",
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+    "time_budget": 250,
+    "stall_steps": 0
   }
 }

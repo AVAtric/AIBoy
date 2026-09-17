@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from tkinter import ttk
 
 from games import OBS_TYPES, level_choices
-from presets import PRESET_DEFAULTS
+from presets import DEFAULT_CONFIG
 from runs import cpu_count
 
 MONO = ("Menlo", 10)
@@ -105,9 +105,33 @@ FIELDS: tuple[FieldSpec, ...] = (
     FieldSpec("checkpoint_freq", "Checkpoint every", "int", "run", 100, 10_000_000, 1000),
     FieldSpec("eval_freq", "Eval every", "int", "run", 100, 10_000_000, 1000),
     FieldSpec("n_eval_episodes", "Eval episodes", "int", "run", 1, 100),
+    FieldSpec("time_budget", "Time budget /400", "int", "run", 0, 400, 10),
+    FieldSpec("stall_steps", "Stall limit (0=off)", "int", "run", 0, 5000, 50),
 )
 GROUP_TITLES = {"basic": "Basic", "ppo": "PPO", "run": "Input & cadence"}
 FIELD_BY_KEY = {f.key: f for f in FIELDS}
+
+
+class WidgetLock:
+    """Disable a set of inputs while a run is active and restore each one to
+    the state it had before: an editable Combobox comes back editable, a
+    read-only one read-only. (Guessing "readonly" for every Combobox used to
+    make the Train tab's run-name box untypeable after the first run.)"""
+
+    def __init__(self):
+        self._saved: dict[tk.Widget, str] = {}
+
+    def apply(self, widgets, disabled: bool) -> None:
+        for w in widgets:
+            try:
+                if disabled:
+                    if w not in self._saved:
+                        self._saved[w] = str(w.cget("state"))
+                    w.config(state="disabled")
+                elif w in self._saved:          # never locked: already enabled
+                    w.config(state=self._saved.pop(w))
+            except tk.TclError:
+                pass
 
 
 def setup_styles(root: tk.Misc) -> None:
@@ -129,6 +153,7 @@ class ConfigForm(ttk.Frame):
         self.vars: dict[str, tk.Variable] = {}
         self.widgets: list[tk.Widget] = []
         self._on_change = on_change
+        self._lock = WidgetLock()
         groups: dict[str, ttk.LabelFrame] = {}
         for col, (key, title) in enumerate(GROUP_TITLES.items()):
             self.columnconfigure(col, weight=1)
@@ -152,12 +177,12 @@ class ConfigForm(ttk.Frame):
 
     @staticmethod
     def _make_var(spec: FieldSpec) -> tk.Variable:
-        default = PRESET_DEFAULTS.get(spec.key)
+        default = DEFAULT_CONFIG[spec.key]
         if spec.kind == "int":
-            return tk.IntVar(value=int(default) if default is not None else int(spec.lo))
+            return tk.IntVar(value=int(default))
         if spec.kind == "float":
-            return tk.DoubleVar(value=float(default) if default is not None else float(spec.lo))
-        return tk.StringVar(value=spec.choices[0] if spec.choices else "")
+            return tk.DoubleVar(value=float(default))
+        return tk.StringVar(value=str(default))
 
     @staticmethod
     def _make_widget(frame: tk.Misc, spec: FieldSpec, var: tk.Variable) -> tk.Widget:
@@ -170,12 +195,9 @@ class ConfigForm(ttk.Frame):
                            textvariable=var, width=10)
 
     def set_config(self, cfg: dict) -> None:
-        """Fill the form; fields missing from `cfg` fall back to PRESET_DEFAULTS."""
+        """Fill the form; fields missing from `cfg` fall back to DEFAULT_CONFIG."""
         for key, var in self.vars.items():
-            if key in cfg:
-                var.set(cfg[key])
-            elif key in PRESET_DEFAULTS:
-                var.set(PRESET_DEFAULTS[key])
+            var.set(cfg.get(key, DEFAULT_CONFIG[key]))
 
     def get_config(self) -> dict:
         """Form values as a preset dict (without `game`). Raises ValueError
@@ -199,15 +221,7 @@ class ConfigForm(ttk.Frame):
         return cfg
 
     def set_enabled(self, enabled: bool) -> None:
-        for w in self.widgets:
-            if not enabled:
-                state = "disabled"
-            else:
-                state = "readonly" if isinstance(w, ttk.Combobox) else "normal"
-            try:
-                w.config(state=state)
-            except tk.TclError:
-                pass
+        self._lock.apply(self.widgets, disabled=not enabled)
 
 
 def make_table(parent: tk.Misc, columns: list[tuple[str, str, int, str, bool]],

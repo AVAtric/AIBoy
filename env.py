@@ -14,7 +14,8 @@ from stable_baselines3.common.vec_env import VecEnv, VecFrameStack, VecTranspose
 # Light, emulator-free facts live in games.py; re-exported here so existing
 # `from env import ...` call sites keep working.
 from games import (  # noqa: F401
-    ADDR_GAME_STATE, ADDR_POWERUP_STATE, ADDR_SUPERBALL, GAMES, LEVEL_MODES, LEVEL_STATES_DIR,
+    ADDR_GAME_STATE, ADDR_POWERUP_STATE, ADDR_SUPERBALL, DEFAULT_STALL_STEPS, DEFAULT_TIME_BUDGET,
+    GAMES, LEVEL_MODES, LEVEL_STATES_DIR, TIMER_START,
     MULTI_LEVEL_MODES, OBS_TYPES, POWER_NAMES, POWER_SMALL, POWER_SUPER, POWER_SUPERBALL,
     ROM_DIR, ROM_SUFFIXES, SML_ALL_LEVELS, SML_BROKEN_LEVELS, SML_CLEAR_STATES,
     SML_DEATH_STATES, SUPPORTED_GAMES, GameSpec, RomInfo, _level_state_path,
@@ -163,7 +164,8 @@ class MarioEnv(gym.Env):
         self,
         pyboy: PyBoy,
         frame_skip: int = 4,
-        stuck_steps: int = 200,
+        stuck_steps: int = DEFAULT_STALL_STEPS,
+        time_budget: int = DEFAULT_TIME_BUDGET,
         progress_weight: float = 3.0,
         coin_weight: float = 5.0,
         score_weight: float = 0.05,
@@ -174,6 +176,8 @@ class MarioEnv(gym.Env):
         tick_callback=None,
         jump_hold_bonus: int = 6,
         start_level=None,
+        marathon_random_start: bool = False,
+        marathon_continue_on_death: bool = False,
     ):
         super().__init__()
         if obs_type not in OBS_TYPES:
@@ -181,7 +185,14 @@ class MarioEnv(gym.Env):
         self.pyboy = pyboy
         self.gw = pyboy.game_wrapper()
         self.frame_skip = frame_skip
+        # Two ways an attempt can be cut short without a death:
+        #   time_budget  timer units (of TIMER_START) an attempt may use;
+        #                0 = the whole in-game timer
+        #   stuck_steps  steps without a new furthest x before truncation;
+        #                0 = off (default). Only the time budget then limits
+        #                an attempt, so Mario can use his time.
         self.stuck_steps = stuck_steps
+        self.time_budget = time_budget
         self.progress_weight = progress_weight
         self.coin_weight = coin_weight
         self.score_weight = score_weight
@@ -225,9 +236,22 @@ class MarioEnv(gym.Env):
         # a world change (level clear), consumed by the next `reset()`.
         self._sequential_idx = 0
         self._sequential_advance_pending = False
-        # Marathon mode: count of level clears within the current episode.
-        # When it hits len(SML_ALL_LEVELS) the episode ends with a big bonus.
+        # Marathon mode: index into SML_ALL_LEVELS of the level being played
+        # and the number of clears so far in this episode. The episode ends
+        # with a big bonus after the last usable level.
+        # `marathon_random_start` (training only): each episode starts at a
+        # random level and runs forward from there. Without it every
+        # episode would start at 1-1 and end at the first death, so later
+        # levels would almost never be seen; with it every level gets
+        # training signal while the agent still learns the transitions.
+        # Evaluation and playback start at 1-1.
+        self._marathon_idx = 0
         self._marathon_clears = 0
+        self.marathon_random_start = marathon_random_start
+        # Playback only: after a death, continue with the next level instead
+        # of ending the episode, so a demo shows every level of the game.
+        # Training and evaluation keep the strict rule (death ends the run).
+        self.marathon_continue_on_death = marathon_continue_on_death
         # Event bookkeeping for the instant clear / death detection (see
         # ADDR_GAME_STATE). A clear or death is credited once, the step the
         # game-state byte flips; the later world-flip / life-counter-drop
@@ -317,12 +341,12 @@ class MarioEnv(gym.Env):
                 self._sequential_advance_pending = False
             target = SML_ALL_LEVELS[self._sequential_idx]
         elif self.start_level == "marathon":
-            # Marathon: start with a natural game boot at 1-1 (like campaign
-            # mode). The game handles level-to-level transitions itself; we
-            # just count clears and intervene on game_over. Reset the clear
-            # counter for the new episode.
+            # Marathon: one life through the levels. Training may start at a
+            # random level (see marathon_random_start); eval / play at 1-1.
             self._marathon_clears = 0
-            target = None  # natural start, no state load
+            self._marathon_idx = (self._level_rng.randrange(len(SML_ALL_LEVELS))
+                                  if self.marathon_random_start else 0)
+            target = SML_ALL_LEVELS[self._marathon_idx]
         elif isinstance(self.start_level, tuple):
             target = self.start_level
 
@@ -361,6 +385,13 @@ class MarioEnv(gym.Env):
             self._started = True
         else:
             self.gw.reset_game()
+        self._sync_trackers()
+        return self._obs(), {}
+
+    def _sync_trackers(self) -> None:
+        """Start a fresh attempt from the emulator's current readings: reward
+        deltas, the furthest-x tracker, the stall counter and the one-shot
+        clear / death credits all reset."""
         self._last_x = self.gw.level_progress
         self._max_x = self._last_x
         self._last_lives = self.gw.lives_left
@@ -370,7 +401,6 @@ class MarioEnv(gym.Env):
         self._stuck = 0
         self._clear_credited = False
         self._death_credited = False
-        return self._obs(), {}
 
     def step(self, action: int):
         for evt in self.ACTIONS[action]:
@@ -451,107 +481,108 @@ class MarioEnv(gym.Env):
         if self.start_level == "sequential" and level_cleared:
             self._sequential_advance_pending = True
 
-        # Marathon mode: single-attempt speedrun through every usable level.
-        # ANY death ends the episode. On level clear we do NOT wait for
-        # the in-game level-end cutscene (walk-off + bonus countdown, ~70
-        # env-steps that burn training samples for zero learning signal).
-        # `level_cleared` fires the step the goal is touched, and we
-        # force-load the next level's save-state right there.
-        if self.start_level == "marathon" and level_cleared:
-            self._marathon_clears += 1
-            if self._marathon_clears >= len(SML_ALL_LEVELS):
-                # Cleared every usable level in one run → marathon win.
-                reward += self.completion_bonus * 3.0
-                self._last_x = x
-                self._last_lives = lives
-                self._last_world = world
-                self._last_score = score
-                self._last_coins = coins
-                self._max_x = x
-                self._stuck = 0
-                return self._obs(), float(reward), True, False, {
-                    "x": x, "max_x": x, "lives": lives,
-                    "world": world, "coins": coins, "score": score,
-                    "stuck": 0, "game_over": is_game_over,
-                    "game_state": game_state, "died": died, "level_cleared": True,
-                    "marathon_done": True,
-                    "marathon_clears": self._marathon_clears,
-                }
-            # Not the final clear — jump straight to the next usable level.
-            # `_reload_level_state` handles load_state + memory refresh +
-            # resets all per-level trackers, so we return immediately with
-            # the accumulated clear reward and skip the rest of step().
-            next_target = SML_ALL_LEVELS[self._marathon_clears]
-            if self._reload_level_state(next_target):
-                return self._obs(), float(reward), False, False, {
-                    "x": self._last_x, "max_x": self._max_x,
-                    "lives": self._last_lives, "world": self._last_world,
-                    "coins": self._last_coins, "score": self._last_score,
-                    "stuck": self._stuck, "game_over": False,
-                    "game_state": 0, "died": False, "level_cleared": True,
-                    "marathon_clears": self._marathon_clears,
-                    "marathon_skipped_to": next_target,
-                }
-            # No cached save-state for `next_target` — we can't cleanly
-            # skip the cutscene. Terminate the marathon episode explicitly
-            # rather than soft-locking Mario in the level-end sequence.
-            # Callers should have run `ensure_level_states()` upfront so
-            # this is essentially "misconfigured env" territory.
-            return self._obs(), float(reward), True, False, {
-                "x": x, "max_x": self._max_x, "lives": lives,
-                "world": world, "coins": coins, "score": score,
-                "stuck": self._stuck, "game_over": is_game_over,
-                "game_state": game_state, "died": died, "level_cleared": True,
-                "marathon_clears": self._marathon_clears,
-                "marathon_missing_state": next_target,
-            }
-
-        # Termination logic depends on mode
-        if self._campaign_mode:
-            # Play through: death and level clear are transitions within the
-            # same episode. Only game over ends it — and a death on the
-            # last life IS game over, so end right there instead of sitting
-            # through the death animation + game-over screen (~50 steps).
-            # (`death_now`, not `died`: on the fallback path `lives` has
-            # already dropped, so 0 there means "now on the last life".)
-            terminated = is_game_over or (death_now and lives == 0)
-            # Reset per-attempt trackers when the new attempt actually
-            # begins: respawn (life counter drops) or next level loaded
-            # (world flips). Not at the instant-detection step — Mario is
-            # still standing at the death spot / goal for a few steps.
-            if lives_dropped or world_changed:
-                self._max_x = x
-                self._stuck = 0
-        elif self.start_level == "marathon":
-            # Marathon: any death ends the run. Level clears are handled
-            # above (either fall through and continue, or terminate with a
-            # bonus if it was the last usable level).
-            terminated = died
-        else:
-            # Fixed / random / sequential: any death or level clear ends the episode.
-            terminated = died or level_cleared
-
-        if x > self._max_x:
+        # Progress tracking for the stall rule. A new attempt (respawn or
+        # next level in campaign mode) starts the count afresh.
+        if self._campaign_mode and (lives_dropped or world_changed):
+            self._max_x = x
+            self._stuck = 0
+        elif x > self._max_x:
             self._max_x = x
             self._stuck = 0
         elif not (died or level_cleared):
             self._stuck += 1
 
-        truncated = self._stuck >= self.stuck_steps or is_game_over
+        # Attempt limits. Time budget: checked only while actually playing
+        # (game_state 0), so the level-end countdown, which drains the timer
+        # into score, cannot trigger it. Every attempt starts with the timer
+        # at TIMER_START (level start, respawn and marathon level loads all
+        # reset it). Stall: steps without a new furthest x (off by default).
+        time_used = max(0, TIMER_START - int(self.gw.time_left))
+        in_play = game_state == 0 and not (died or level_cleared)
+        over_budget = in_play and self.time_budget > 0 and time_used >= self.time_budget
+        stalled = in_play and self.stuck_steps > 0 and self._stuck >= self.stuck_steps
 
-        info = {
-            "x": x, "max_x": self._max_x, "lives": lives,
-            "world": world, "coins": coins, "score": score,
-            "stuck": self._stuck, "game_over": is_game_over,
-            "game_state": game_state, "died": died, "level_cleared": level_cleared,
-            "power": POWER_NAMES[self.power_state()],
-        }
+        def info(**extra) -> dict:
+            base = {
+                "x": x, "max_x": self._max_x, "lives": lives,
+                "world": world, "coins": coins, "score": score,
+                "stuck": self._stuck, "game_over": is_game_over,
+                "game_state": game_state, "died": died, "level_cleared": level_cleared,
+                "power": POWER_NAMES[self.power_state()],
+                "time_used": time_used, "time_budget_exceeded": over_budget, "stalled": stalled,
+            }
+            base.update(extra)
+            return base
+
+        def loaded_level_info(**extra) -> dict:
+            """Info after `_reload_level_state`: trackers describe the new level."""
+            return info(x=self._last_x, max_x=self._max_x, lives=self._last_lives,
+                        world=self._last_world, coins=self._last_coins, score=self._last_score,
+                        stuck=0, game_over=False, game_state=0, time_used=0, **extra)
+
+        # Marathon mode: single-attempt speedrun through every usable level.
+        # On a clear we do NOT wait for the in-game level-end cutscene (~70
+        # env-steps of no learning signal): `level_cleared` fires the step
+        # the goal is touched and the next level's save-state is loaded.
+        if self.start_level == "marathon" and level_cleared:
+            self._marathon_clears += 1
+            self._marathon_idx += 1
+            if self._marathon_idx >= len(SML_ALL_LEVELS):
+                # Cleared every usable level in one run: marathon win.
+                reward += self.completion_bonus * 3.0
+                self._remember(x, lives, world, score, coins)
+                return self._obs(), float(reward), True, False, info(
+                    marathon_done=True, marathon_clears=self._marathon_clears)
+            next_target = SML_ALL_LEVELS[self._marathon_idx]
+            if self._reload_level_state(next_target):
+                return self._obs(), float(reward), False, False, loaded_level_info(
+                    marathon_clears=self._marathon_clears, marathon_skipped_to=next_target)
+            # No cached save-state for `next_target`: end the episode rather
+            # than soft-locking in the level-end sequence. `prepare_level_states`
+            # should have been called upfront, so this is a misconfiguration.
+            self._remember(x, lives, world, score, coins)
+            return self._obs(), float(reward), True, False, info(
+                marathon_clears=self._marathon_clears, marathon_missing_state=next_target)
+
+        # Termination by mode.
+        if self._campaign_mode:
+            # Death and level clear are transitions within the same episode;
+            # only game over ends it, and a death on the last life IS game
+            # over, so end right there instead of sitting through the
+            # game-over screen. (`death_now`, not `died`: on the fallback path
+            # `lives` has already dropped, so 0 there means "now on the last life".)
+            terminated = is_game_over or (death_now and lives == 0)
+        elif self.start_level == "marathon":
+            # Any death ends the run. Demo playback instead moves on to the
+            # next level after a death, an exhausted time budget or a stall,
+            # so a demo shows every level; training and evaluation never set
+            # that flag.
+            terminated = died
+            if self.marathon_continue_on_death and (died or over_budget or stalled):
+                self._marathon_idx += 1
+                if self._marathon_idx < len(SML_ALL_LEVELS) and \
+                        self._reload_level_state(SML_ALL_LEVELS[self._marathon_idx]):
+                    return self._obs(), float(reward), False, False, loaded_level_info(
+                        marathon_skipped_to=SML_ALL_LEVELS[self._marathon_idx])
+                terminated = True                       # nothing left to show
+        else:
+            # Fixed / random / sequential: any death or level clear ends the episode.
+            terminated = died or level_cleared
+
+        # A truncation is only reported when the episode did not already end
+        # for a real reason; SB3 bootstraps the value of truncated states.
+        truncated = not terminated and (stalled or over_budget or is_game_over)
+        result = info()
+        self._remember(x, lives, world, score, coins)
+        return self._obs(), float(reward), terminated, truncated, result
+
+    def _remember(self, x, lives, world, score, coins) -> None:
+        """Store this step's readings for the next step's deltas."""
         self._last_x = x
         self._last_lives = lives
         self._last_world = world
         self._last_score = score
         self._last_coins = coins
-        return self._obs(), float(reward), terminated, truncated, info
 
     def _reload_level_state(self, target: tuple[int, int]) -> bool:
         """Mid-episode reload of a specific level's save-state. Used by
@@ -571,16 +602,7 @@ class MarioEnv(gym.Env):
         # Refresh memory-mapped state after load
         for _ in range(4):
             self.pyboy.tick()
-        # Reset per-level trackers
-        self._last_x = self.gw.level_progress
-        self._max_x = self._last_x
-        self._last_lives = self.gw.lives_left
-        self._last_world = tuple(self.gw.world)
-        self._last_score = self.gw.score
-        self._last_coins = self.gw.coins
-        self._stuck = 0
-        self._clear_credited = False
-        self._death_credited = False
+        self._sync_trackers()
         return True
 
     def close(self):
@@ -615,8 +637,14 @@ def make_pyboy_env(
     emulation_speed: int | None = None,
     obs_type: str = "pixels",
     start_level=None,
+    training: bool = False,
+    time_budget: int = DEFAULT_TIME_BUDGET,
+    stall_steps: int = DEFAULT_STALL_STEPS,
+    marathon_continue_on_death: bool = False,
 ) -> gym.Env:
-    """Build a PyBoy gym env.
+    """Build a PyBoy gym env. `training=True` enables training-only behaviour
+    (marathon episodes start at a random level); `marathon_continue_on_death`
+    is for demos (see MarioEnv).
     - 'mario' → MarioEnv (hold-button actions + shaped reward, pixels or tiles)
     - other games → PyBoy's default openai_gym + ActionRepeat (pixels only)
     """
@@ -649,7 +677,9 @@ def make_pyboy_env(
 
     if game == "mario":
         env: gym.Env = MarioEnv(pyboy, frame_skip=action_repeat, obs_type=obs_type,
-                                 start_level=start_level)
+                                 start_level=start_level, marathon_random_start=training,
+                                 time_budget=time_budget, stuck_steps=stall_steps,
+                                 marathon_continue_on_death=marathon_continue_on_death)
     else:
         if start_level is not None and start_level != "default":
             pyboy.stop(save=False)
@@ -679,6 +709,9 @@ def env_factory(
     action_repeat: int = 4,
     obs_type: str = "pixels",
     start_level=None,
+    training: bool = False,
+    time_budget: int = DEFAULT_TIME_BUDGET,
+    stall_steps: int = DEFAULT_STALL_STEPS,
 ) -> gym.Env:
     """Picklable factory for SubprocVecEnv workers."""
     env = make_pyboy_env(
@@ -688,5 +721,8 @@ def env_factory(
         seed=seed,
         obs_type=obs_type,
         start_level=start_level,
+        training=training,
+        time_budget=time_budget,
+        stall_steps=stall_steps,
     )
     return Monitor(env)

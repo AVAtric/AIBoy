@@ -8,7 +8,8 @@ using the GUI's `_pump` protocol:
 
     ("log", text)                 training-log line
     ("play_status", text)         screen-panel status line
-    ("play_stat", key, value)     screen-panel live-episode stats
+    ("play_stat", key, value)     one screen-panel live-episode stat
+    ("play_stats", {key: value})  the per-step stats, one event per step
     ("play_done", summary)        playback finished; summary = list of
                                   {"reward", "steps"} per completed episode
     ("play_error", traceback)
@@ -35,11 +36,110 @@ from pathlib import Path
 
 import numpy as np
 
-from games import GAMES, ROM_DIR, prepare_level_states
+from games import DEFAULT_STALL_STEPS, DEFAULT_TIME_BUDGET, GAMES, ROM_DIR, prepare_level_states
+from paths import BUNDLE_DIR
 
 GB_FPS = 60.0
 PREVIEW_STEP_SLEEP = 0.02   # cap the preview at ~50 env-steps/s so training keeps the CPU
 RESYNC_AFTER = 0.25         # if pacing falls this far behind, drop the backlog instead of racing
+
+
+ASSET_DIR = BUNDLE_DIR / "assets"
+
+
+def intro_asset(name: str, assets: Path = ASSET_DIR) -> Path:
+    """Path of a boot-video asset. The repo ships `assets/<name>` (the "AIboy"
+    clip made by tools/make_intro.py); a file named `orig_<name>` next to it is
+    not distributed with the repo (see .gitignore) but is preferred when
+    someone has put one there."""
+    orig = assets / f"orig_{name}"
+    return orig if orig.exists() else assets / name
+
+
+INTRO_FRAMES = intro_asset("gb_intro.npz")
+INTRO_SOUND = intro_asset("gb_intro.wav")
+
+
+def play_sound(path: Path):
+    """Start playing a WAV without blocking; returns something with .poll()/
+    .terminate() or None if no player is available. Uses what the OS ships:
+    afplay (macOS), winsound (Windows), paplay / aplay / ffplay (Linux)."""
+    import shutil
+    import subprocess
+    import sys as _sys
+    path = Path(path)
+    if not path.exists():
+        return None
+    if _sys.platform == "darwin" and shutil.which("afplay"):
+        cmd = ["afplay", str(path)]
+    elif _sys.platform.startswith("win"):
+        try:
+            import winsound
+            winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC)
+        except Exception:
+            return None
+
+        class _Done:                       # winsound plays in-process; nothing to manage
+            def poll(self): return 0
+            def terminate(self): winsound.PlaySound(None, 0)
+        return _Done()
+    else:
+        for player, extra in (("paplay", []), ("aplay", ["-q"]), ("ffplay", ["-nodisp", "-autoexit", "-v", "quiet"])):
+            if shutil.which(player):
+                cmd = [player, *extra, str(path)]
+                break
+        else:
+            return None
+    try:
+        return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+
+
+class IntroVideo:
+    """The start-up boot video: frames from assets/gb_intro.npz (or a local
+    assets/orig_gb_intro.npz, see `intro_asset`) shown on the canvas in step
+    with the wall clock while the WAV plays. `idle_frame()` is the last frame
+    with the logo visible, used as the "No video" screen."""
+
+    def __init__(self, frames_path: Path = INTRO_FRAMES, sound_path: Path = INTRO_SOUND):
+        data = np.load(frames_path)
+        self.frames: np.ndarray = data["frames"]
+        self.fps = float(data["fps"])
+        self.idle_index = int(data["idle_index"])
+        self.sound_path = sound_path
+
+    @classmethod
+    def available(cls, frames_path: Path = INTRO_FRAMES) -> bool:
+        return Path(frames_path).exists()
+
+    def idle_frame(self) -> np.ndarray:
+        return self.frames[self.idle_index]
+
+    def play(self, frames: LatestFrame, stop: threading.Event, on_done) -> threading.Thread:
+        """Push frames at `fps` until the end or `stop`; then call `on_done()`
+        from this thread (the GUI hands it to the Tk thread via its queue)."""
+        def _run():
+            sound = play_sound(self.sound_path)
+            t0 = time.perf_counter()
+            for i, frame in enumerate(self.frames):
+                if stop.is_set():
+                    break
+                due = t0 + i / self.fps
+                delay = due - time.perf_counter()
+                if delay > 0:
+                    time.sleep(delay)
+                frames.set(frame)
+            if stop.is_set() and sound is not None:
+                try:
+                    sound.terminate()
+                except Exception:
+                    pass
+            on_done()
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        return t
 
 
 class LatestFrame:
@@ -66,6 +166,28 @@ SPEED_CHOICES = [("0.5×", 0.5), ("1× (real time)", 1.0), ("2×", 2.0),
                  ("4×", 4.0), ("Unlimited", 0.0)]
 
 
+def episode_end_reason(info, steps: int, max_steps: int) -> str:
+    """Human-readable reason an episode ended, from the env's last info dict."""
+    i0 = info[0] if info and isinstance(info[0], dict) else {}
+    w = i0.get("world")
+    where = f" in {w[0]}-{w[1]}" if w else ""
+    if i0.get("marathon_done"):
+        return "completed every level"
+    if i0.get("died"):
+        return f"died{where}"
+    if i0.get("game_over"):
+        return f"game over{where}"
+    if i0.get("level_cleared"):
+        return f"cleared{where}"
+    if max_steps and steps >= max_steps:
+        return f"step cap reached{where}"
+    if i0.get("time_budget_exceeded"):
+        return f"time budget used up{where}"
+    if i0.get("stalled"):
+        return f"no progress for {i0.get('stuck', 0)} steps{where}"
+    return f"ended{where}"
+
+
 class _Session:
     """One emulator + wrapped vec-env for a given observation setup.
 
@@ -74,7 +196,9 @@ class _Session:
     """
 
     def __init__(self, game: str, obs_type: str, action_repeat: int, frame_stack: int,
-                 start_level, frames: LatestFrame, tick_period: float = 0.0):
+                 start_level, frames: LatestFrame, tick_period: float = 0.0,
+                 time_budget: int = DEFAULT_TIME_BUDGET, stall_steps: int = DEFAULT_STALL_STEPS,
+                 marathon_demo: bool = False):
         # Heavy imports (PyBoy, SB3 / torch) happen here, on the playback
         # thread, so the GUI window opens without loading them.
         from pyboy import PyBoy
@@ -98,7 +222,9 @@ class _Session:
 
         if game == "mario":
             base = MarioEnv(self.pyboy, frame_skip=action_repeat, obs_type=obs_type,
-                            tick_callback=self.on_tick, start_level=start_level)
+                            tick_callback=self.on_tick, start_level=start_level,
+                            time_budget=time_budget, stuck_steps=stall_steps,
+                            marathon_continue_on_death=marathon_demo)
         else:
             if self.pyboy.game_wrapper() is None:
                 self.pyboy.stop(save=False)
@@ -137,6 +263,10 @@ class _Session:
             self.vec.close()   # closes MarioEnv -> pyboy.stop()
         except Exception:
             pass
+        try:
+            self.pyboy.stop(save=False)   # the generic wrapper's env does not stop it
+        except Exception:
+            pass
 
 
 class EmbeddedPlayer:
@@ -148,11 +278,15 @@ class EmbeddedPlayer:
 
     def play(self, *, model_path: Path, game: str, obs_type: str, action_repeat: int,
              frame_stack: int, start_level, episodes: int, max_steps: int,
-             deterministic: bool, speed_mult: float, stop: threading.Event) -> threading.Thread:
+             deterministic: bool, speed_mult: float, stop: threading.Event,
+             time_budget: int = DEFAULT_TIME_BUDGET,
+             stall_steps: int = DEFAULT_STALL_STEPS,
+             marathon_demo: bool = False) -> threading.Thread:
         t = threading.Thread(
             target=self._play_loop, daemon=True,
             args=(model_path, game, obs_type, action_repeat, frame_stack, start_level,
-                  episodes, max_steps, deterministic, speed_mult, stop))
+                  episodes, max_steps, deterministic, speed_mult, stop, time_budget, stall_steps,
+                  marathon_demo))
         t.start()
         return t
 
@@ -176,23 +310,24 @@ class EmbeddedPlayer:
         act_id = int(np.asarray(action).flat[0])
         names = MarioEnv.ACTION_NAMES
         action_name = names[act_id] if game == "mario" and act_id < len(names) else str(act_id)
-        self._emit("play_stat", "action", action_name)
-        self._emit("play_stat", "reward", f"{ep_reward:.1f}")
-        self._emit("play_stat", "steps", str(ep_steps))
+        stats = {"action": action_name, "reward": f"{ep_reward:.1f}", "steps": str(ep_steps)}
         i0 = info[0] if info and isinstance(info[0], dict) else {}
         if "x" in i0:
-            self._emit("play_stat", "x", f"{i0['x']} (max {i0.get('max_x', '?')})")
+            stats["x"] = f"{i0['x']} (max {i0.get('max_x', '?')})"
         if "world" in i0:
             w = i0["world"]
-            self._emit("play_stat", "world", f"{w[0]}-{w[1]}")
+            stats["world"] = f"{w[0]}-{w[1]}"
         for key in ("lives", "coins", "power"):
             if key in i0:
-                self._emit("play_stat", key, str(i0[key]))
+                stats[key] = str(i0[key])
+        self._emit("play_stats", stats)
 
     # ---------- play ----------
 
     def _play_loop(self, model_path, game, obs_type, action_repeat, frame_stack, start_level,
-                   episodes, max_steps, deterministic, speed_mult, stop) -> None:
+                   episodes, max_steps, deterministic, speed_mult, stop,
+                   time_budget=DEFAULT_TIME_BUDGET, stall_steps=DEFAULT_STALL_STEPS,
+                   marathon_demo=False) -> None:
         from stable_baselines3 import PPO
         session = None
         summary: list[dict] = []
@@ -203,7 +338,7 @@ class EmbeddedPlayer:
                 prepare_level_states(start_level)
             tick_period = (1.0 / GB_FPS) / speed_mult if speed_mult > 0 else 0.0
             session = _Session(game, obs_type, action_repeat, frame_stack, start_level,
-                               self.frames, tick_period)
+                               self.frames, tick_period, time_budget, stall_steps, marathon_demo)
             self._emit("play_status", f"loaded {model_path.name}")
             model = PPO.load(str(model_path), env=session.vec, device="cpu")
 
@@ -213,20 +348,38 @@ class EmbeddedPlayer:
                 obs = session.vec.reset()
                 session.push_frame()
                 session.start_pacing()
-                total, steps, done = 0.0, 0, [False]
+                total, steps, done, skips, clears = 0.0, 0, [False], 0, 0
                 self._emit("play_stat", "episode", f"{ep + 1}/{episodes}")
                 while not done[0] and not stop.is_set():
                     action, _ = model.predict(obs, deterministic=deterministic)
                     obs, reward, done, info = session.vec.step(action)
                     total += float(reward[0])
                     steps += 1
+                    i0 = info[0] if info and isinstance(info[0], dict) else {}
+                    if i0.get("marathon_skipped_to"):
+                        w = i0["marathon_skipped_to"]
+                        if i0.get("level_cleared"):
+                            clears += 1
+                            self._emit("play_status", f"level cleared — continuing in {w[0]}-{w[1]} "
+                                                      f"({clears} cleared so far)")
+                        else:
+                            skips += 1
+                            why = ("died" if i0.get("died") else
+                                   "time budget used up" if i0.get("time_budget_exceeded")
+                                   else "stalled")
+                            self._emit("play_status", f"{why} — demo continues in {w[0]}-{w[1]} "
+                                                      f"({skips} skipped so far)")
                     self._report_step(game, action, info, total, steps)
                     if max_steps and steps >= max_steps:
                         break
                 if stop.is_set():
                     break
-                summary.append({"reward": total, "steps": steps})
-                self._emit("play_status", f"Episode {ep + 1} done: reward={total:.1f} steps={steps}")
+                reason = episode_end_reason(info, steps, max_steps)
+                if clears or skips:
+                    reason += f" — {clears} level(s) cleared, {skips} skipped"
+                summary.append({"reward": total, "steps": steps, "end": reason})
+                self._emit("play_status",
+                           f"Episode {ep + 1}: reward {total:.0f}, {steps} steps, {reason}")
             self._emit("play_done", summary)
         except Exception:
             self._emit("play_error", traceback.format_exc())
