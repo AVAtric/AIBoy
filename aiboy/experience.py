@@ -14,13 +14,26 @@ computed twice from that file's point of view:
   * time estimates use the throughput this computer actually achieved
     (`fps`) instead of a guess.
 
-Two identities matter. The *outcome signature* is everything that decides a
-trial's result (OUTCOME_FIELDS + the environment version): two records with
-the same signature are repeats of the same experiment. The *task* is the
-subset that defines what is being learned and for how long (TASK_FIELDS):
-scores are only compared within a task, because a marathon reward and a
-campaign reward, or a 50k-step trial and a 500k-step trial, mean different
-things.
+Three identities matter. The *outcome signature* is everything that decides
+a trial's result (OUTCOME_FIELDS + the environment version): two records
+with the same signature are repeats of the same experiment. The *task* is
+the subset that defines what is being learned and for how long
+(TASK_FIELDS): scores are only compared within a task, because a marathon
+reward and a campaign reward, or a 50k-step trial and a 500k-step trial,
+mean different things. Two tasks are *related* when they agree on
+RELATED_FIELDS (same game, same eyes, same action timing): their
+hyperparameters mean the same thing even though the goal differs, so what
+worked for the campaign is a sensible first thing to try for the marathon
+(`related_knowledge`). Knowledge is only ever *borrowed* across related
+tasks as a starting point for a search, never applied blindly.
+
+AIboy also acts on what it knows. `improvements` compares every preset's
+own hyperparameters with the best known ones of its task under the same
+winner rule the sweeps use; the app applies a clear win to the preset
+(built-ins get a resettable override) and appends an "improvement" record
+so the change is visible and traceable on the Experience tab. Presets that
+share a task (the campaign presets of different lengths) all profit from
+the same tests.
 
 The file is append-only JSON lines: cheap to write from a subprocess, robust
 to a crash mid-write (a torn last line is skipped), and easy to inspect.
@@ -54,10 +67,20 @@ OUTCOME_FIELDS = (
 TASK_FIELDS = ("game", "obs_type", "start_level", "action_repeat", "frame_stack", "time_budget",
                "stall_steps", "timesteps")
 HYPER_FIELDS = tuple(k for k in OUTCOME_FIELDS if k not in TASK_FIELDS and k != "seed")
+# Hyperparameters an improvement may change in a preset: the learning
+# settings, not the number of emulators (a machine setting, never a win).
+IMPROVABLE_FIELDS = tuple(k for k in HYPER_FIELDS if k != "n_envs")
+# Fields two tasks must share for their hyperparameters to be comparable in
+# kind: the game, how the agent sees it (obs_type decides the network) and
+# the action timing. Campaign and marathon presets are related; a tiles and
+# a pixels preset are not.
+RELATED_FIELDS = ("game", "obs_type", "action_repeat", "frame_stack")
 
 COMPLETE_SHARE = 0.9        # a run that reached this share of its target counts as finished
-SOURCES = ("cli", "train", "tune", "wizard")
+SOURCES = ("cli", "train", "tune", "wizard", "aiboy")
 KIND_TRIAL, KIND_RUN = "trial", "run"
+KIND_IMPROVEMENT = "improvement"     # a preset AIboy changed, with why (no evals)
+SOURCE_AIBOY = "aiboy"
 
 
 def _canon(value):
@@ -97,6 +120,7 @@ class Record:
     env_version: str = ENV_VERSION
     created_at: float = field(default_factory=time.time)
     id: str = ""
+    note: str = ""                   # improvement records: what changed and why
 
     def __post_init__(self):
         self.config = normalize(self.config)
@@ -135,8 +159,8 @@ class Record:
 
     def usable(self) -> bool:
         """Good enough to stand in for a new trial with the same signature."""
-        return self.complete and not self.resumed and bool(self.evals) \
-            and self.env_version == ENV_VERSION
+        return self.kind != KIND_IMPROVEMENT and self.complete and not self.resumed \
+            and bool(self.evals) and self.env_version == ENV_VERSION
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -262,7 +286,7 @@ class Experience:
         """The newest record a run of this name produced after `since`,
         complete or not (a sweep reads its trial's result this way)."""
         for r in reversed(self.records):
-            if r.run_name == run_name and r.created_at >= since:
+            if r.kind != KIND_IMPROVEMENT and r.run_name == run_name and r.created_at >= since:
                 return r
         return None
 
@@ -295,35 +319,137 @@ class Experience:
         want = task_of(cfg)
         return [r for r in self.records if r.kind == KIND_TRIAL and r.usable() and r.task == want]
 
+    def comparable_trials(self, cfg: dict) -> list[Record]:
+        """The trials a conclusion about the task of `cfg` rests on: those of
+        the same length if there are any, else the longest ones of the task
+        (short trials rank learning speed; the longer, the closer to the
+        real run). Every record returned has the same `timesteps`."""
+        trials = self.trials_of_task(cfg)
+        if trials:
+            return trials
+        longer = self.trials_of_task(cfg, any_length=True)
+        if not longer:
+            return []
+        length = int(longer[0].config["timesteps"])
+        return [r for r in longer if int(r.config["timesteps"]) == length]
+
+    @staticmethod
+    def _groups(trials: list[Record], metric: str) -> dict[str, "Group"]:
+        """Trials grouped by hyperparameters (seeds of one setting together),
+        with the mean and spread of their scores; unscored ones are dropped."""
+        by_key: dict[str, list[Record]] = {}
+        for r in trials:
+            by_key.setdefault(signature_of(r.config, HYPER_FIELDS), []).append(r)
+        out: dict[str, Group] = {}
+        for key, group in by_key.items():
+            scores = [s for s in (r.score(metric) for r in group) if not math.isnan(s)]
+            if scores:
+                out[key] = Group(records=group, score=statistics.fmean(scores),
+                                 spread=statistics.pstdev(scores) if len(scores) > 1 else 0.0)
+        return out
+
     def best_for_task(self, cfg: dict, metric: str = tuning.METRIC_LATE) -> "Knowledge | None":
         """The best known hyperparameters for the task of `cfg`, averaged over
-        seeds. Prefers trials of the same length; falls back to the longest
-        trials of the task at another length."""
-        trials = self.trials_of_task(cfg)
-        if not trials:
-            longer = self.trials_of_task(cfg, any_length=True)
-            if not longer:
-                return None
-            length = int(longer[0].config["timesteps"])
-            trials = [r for r in longer if int(r.config["timesteps"]) == length]
-        groups: dict[str, list[Record]] = {}
-        hyper = tuple(k for k in OUTCOME_FIELDS if k != "seed")
-        for r in trials:
-            groups.setdefault(signature_of(r.config, hyper), []).append(r)
-        best_key, best_score, best_group = None, -math.inf, []
-        for key, group in groups.items():
-            scores = [s for s in (r.score(metric) for r in group) if not math.isnan(s)]
-            if not scores:
-                continue
-            mean = statistics.fmean(scores)
-            if mean > best_score:
-                best_key, best_score, best_group = key, mean, group
-        if best_key is None:
+        seeds (see `comparable_trials` for which trials count)."""
+        trials = self.comparable_trials(cfg)
+        groups = self._groups(trials, metric)
+        if not groups:
             return None
-        return Knowledge(config=dict(best_group[-1].config), score=best_score,
-                         n_seeds=len(best_group), n_trials=len(trials),
-                         trial_steps=int(best_group[-1].config["timesteps"]),
-                         when=max(r.created_at for r in best_group))
+        best = max(groups.values(), key=lambda g: g.score)
+        return Knowledge(config=dict(best.records[-1].config), score=best.score,
+                         n_seeds=len(best.records), n_trials=len(trials),
+                         trial_steps=int(best.records[-1].config["timesteps"]),
+                         when=max(r.created_at for r in best.records))
+
+    def related_knowledge(self, cfg: dict, metric: str = tuning.METRIC_LATE) -> "Knowledge | None":
+        """What AIboy knows about the task most like `cfg`'s: same game, eyes
+        and action timing (RELATED_FIELDS) but another goal or attempt
+        limit. The related task with the most trials is used; its best
+        settings are a starting point for a search, marked `borrowed_from`.
+        None if nothing related is known or the task itself is known."""
+        if self.best_for_task(cfg, metric) is not None:
+            return None
+        want = signature_of(cfg, RELATED_FIELDS)
+        own = signature_of(cfg, tuple(k for k in TASK_FIELDS if k != "timesteps"))
+        by_task: dict[str, list[Record]] = {}
+        for r in self.records:
+            if r.kind != KIND_TRIAL or not r.usable():
+                continue
+            if signature_of(r.config, RELATED_FIELDS) != want:
+                continue
+            task = signature_of(r.config, tuple(k for k in TASK_FIELDS if k != "timesteps"))
+            if task != own:
+                by_task.setdefault(task, []).append(r)
+        if not by_task:
+            return None
+        records = max(by_task.values(), key=len)
+        know = self.best_for_task(records[-1].config, metric)
+        if know is not None:
+            know.borrowed_from = tuning.mode_label(records[-1].config)
+        return know
+
+    def knowledge_for(self, cfg: dict, metric: str = tuning.METRIC_LATE) -> "Knowledge | None":
+        """The task's own best known settings, else borrowed ones (see
+        `related_knowledge`), else None."""
+        return self.best_for_task(cfg, metric) or self.related_knowledge(cfg, metric)
+
+    # ---------- improving presets ----------
+
+    def improvement_for(self, name: str, cfg: dict,
+                        metric: str = tuning.METRIC_LATE) -> "Improvement | None":
+        """Whether the preset's own hyperparameters are clearly beaten by
+        settings AIboy has tested for the same task.
+
+        The preset's own settings must have been tested too (a sweep's
+        "base preset" candidate): AIboy only replaces what it has measured.
+        A challenger wins under the sweeps' rule (`tuning.MIN_WIN_MARGIN`):
+        it must lead by more than either seed spread and by at least that
+        share of the preset's score. Only IMPROVABLE_FIELDS can change."""
+        cfg = normalize(cfg)
+        trials = self.comparable_trials(cfg)
+        groups = self._groups(trials, metric)
+        if not groups:
+            return None
+        steps = int(trials[0].config["timesteps"])
+        own = groups.get(signature_of(tuning.trial_config(cfg, {}, steps), HYPER_FIELDS))
+        if own is None:
+            return None
+        best = max(groups.values(), key=lambda g: g.score)
+        margin = max(best.spread, own.spread, tuning.MIN_WIN_MARGIN * abs(own.score))
+        if best is own or best.score - own.score <= margin:
+            return None
+        overrides = tuning.config_diff(best.records[-1].config, cfg, IMPROVABLE_FIELDS)
+        if not overrides:
+            return None
+        return Improvement(preset=name, overrides=overrides, config={**cfg, **overrides},
+                           score=best.score, baseline_score=own.score,
+                           n_trials=len(trials), trial_steps=steps)
+
+    def improvements(self, all_presets: dict[str, dict],
+                     metric: str = tuning.METRIC_LATE) -> list["Improvement"]:
+        """Every preset that AIboy can improve right now (see `improvement_for`)."""
+        out = []
+        for name, cfg in all_presets.items():
+            imp = self.improvement_for(name, cfg, metric)
+            if imp is not None:
+                out.append(imp)
+        return out
+
+    def record_improvement(self, imp: "Improvement", previous: dict) -> Record:
+        """Remember that a preset was changed: the new settings, the old
+        values and the evidence, as an "improvement" record."""
+        before = {k: previous.get(k) for k in imp.overrides}
+        note = (f"{tuning.compact_overrides(imp.overrides)} (was {tuning.compact_overrides(before)}): "
+                f"{imp.evidence()}")
+        record = Record(kind=KIND_IMPROVEMENT, config=imp.config, evals=[], duration=None,
+                        complete=True, source=SOURCE_AIBOY, run_name=imp.preset, note=note)
+        self.add(record)
+        return record
+
+    def improvement_history(self, preset_name: str) -> list[Record]:
+        """The improvements applied to a preset, oldest first."""
+        return [r for r in self.records
+                if r.kind == KIND_IMPROVEMENT and r.run_name == preset_name]
 
     def fps(self, cfg: dict, kinds=(KIND_TRIAL, KIND_RUN)) -> float | None:
         """Median env-steps/sec this computer achieved on runs with the same
@@ -345,13 +471,14 @@ class Experience:
         recs = self.for_game(game)
         return {"trials": sum(1 for r in recs if r.kind == KIND_TRIAL),
                 "runs": sum(1 for r in recs if r.kind == KIND_RUN),
+                "improvements": sum(1 for r in recs if r.kind == KIND_IMPROVEMENT),
                 "incomplete": sum(1 for r in recs if not r.complete),
                 "compute_hours": sum(r.duration or 0.0 for r in recs) / 3600.0}
 
     def effects(self, cfg: dict, metric: str = tuning.METRIC_LATE) -> dict[str, list[tuple]]:
         """For the task of `cfg`: per hyperparameter, the mean score of every
         value tried, best first: {param: [(value, mean_score, n), …]}."""
-        trials = self.trials_of_task(cfg) or self.trials_of_task(cfg, any_length=True)
+        trials = self.comparable_trials(cfg)
         out: dict[str, list[tuple]] = {}
         for key in HYPER_FIELDS:
             by_value: dict[float, list[float]] = {}
@@ -407,6 +534,7 @@ class Experience:
         known settings. Returns (candidate overrides, plain explanation)."""
         grid = tuning.expand_grid(tuning.SWEEP_TEMPLATES[tuning.DEFAULT_TEMPLATE])
         known = [c for c in grid if self.known_seeds(base, c, trial_steps, n_seeds) >= n_seeds]
+        task = tuning.trial_config(base, {}, trial_steps)
         if len(known) < (len(grid) + 1) // 2:
             if known:
                 why = (f"{len(known)} of the {len(grid)} standard variations are already known and "
@@ -414,8 +542,19 @@ class Experience:
             else:
                 why = ("Nothing is known about this goal yet, so AIboy starts with the standard "
                        "search: curiosity × learning speed, the two that matter most.")
+            # What worked for a related goal (same eyes and timing, another
+            # level mode) is the first thing worth trying here.
+            related = self.related_knowledge(task, metric)
+            if related is not None:
+                borrowed = tuning.config_diff(related.config, tuning.full_config(base, {}),
+                                              HYPER_FIELDS)
+                if borrowed and borrowed not in grid \
+                        and self.known_seeds(base, borrowed, trial_steps, n_seeds) < n_seeds:
+                    why += (f" It also tries what worked best for the {related.borrowed_from}: "
+                            f"{tuning.plain_overrides(borrowed)}.")
+                    return [borrowed, *grid], why
             return grid, why
-        best = self.best_for_task(tuning.trial_config(base, {}, trial_steps), metric)
+        best = self.best_for_task(task, metric)
         candidates = self.suggest(base, trial_steps, n_seeds, n, metric, best)
         if best is not None:
             incumbent = tuning.config_diff(best.config, tuning.full_config(base, {}), HYPER_FIELDS)
@@ -439,13 +578,43 @@ class Experience:
 
 @dataclass
 class Knowledge:
-    """What AIboy knows about the best settings for one task."""
+    """What AIboy knows about the best settings for one task. `borrowed_from`
+    names the related task (its level mode) the knowledge comes from when the
+    task itself is untested (see `Experience.related_knowledge`)."""
     config: dict
     score: float
     n_seeds: int
     n_trials: int
     trial_steps: int
     when: float
+    borrowed_from: str | None = None
+
+
+@dataclass
+class Group:
+    """The seeds of one hyperparameter setting within a task."""
+    records: list
+    score: float
+    spread: float
+
+
+@dataclass
+class Improvement:
+    """A preset whose own settings are clearly beaten by tested ones."""
+    preset: str
+    overrides: dict          # the hyperparameters that change
+    config: dict             # the improved preset
+    score: float             # mean score of the winning settings
+    baseline_score: float    # mean score of the preset's own settings
+    n_trials: int            # tests of the task the decision rests on
+    trial_steps: int
+
+    def evidence(self) -> str:
+        return (f"score {self.score:.0f} vs {self.baseline_score:.0f} in {self.n_trials} tests "
+                f"of {tuning.format_steps(self.trial_steps)} steps")
+
+    def summary(self) -> str:
+        return f"{tuning.compact_overrides(self.overrides)} — {self.evidence()}"
 
 
 # ---------- neighbourhood of a configuration ----------

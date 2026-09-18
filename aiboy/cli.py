@@ -40,11 +40,11 @@ from aiboy.runs import (KEEP_CHECKPOINTS, cpu_count, latest_checkpoint, prune_ch
 # ------------------------- vec-env plumbing -------------------------
 
 def build_vec_env(game, n_envs, seed, action_repeat, frame_stack, obs_type, start_level=None,
-                  training=False, time_budget=DEFAULT_TIME_BUDGET, stall_steps=DEFAULT_STALL_STEPS):
+                  time_budget=DEFAULT_TIME_BUDGET, stall_steps=DEFAULT_STALL_STEPS):
     from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
     from aiboy.env import env_factory, wrap_vec_env
     fns = [partial(env_factory, game, seed + i, "null", action_repeat, obs_type, start_level,
-                   training, time_budget, stall_steps)
+                   time_budget, stall_steps)
            for i in range(n_envs)]
     vec = SubprocVecEnv(fns, start_method="spawn") if n_envs > 1 else DummyVecEnv(fns)
     return wrap_vec_env(vec, obs_type, frame_stack)
@@ -179,13 +179,13 @@ def cmd_train(args: argparse.Namespace) -> None:
     start_level = _start_level(args)
     env = build_vec_env(args.game, args.n_envs, args.seed,
                         args.action_repeat, args.frame_stack, args.obs_type,
-                        start_level=start_level, training=True,
+                        start_level=start_level,
                         time_budget=args.time_budget, stall_steps=args.stall_steps)
     print(f"[train] attempt limits: time budget {args.time_budget or 'full timer'} of 400 units, "
           f"stall limit {args.stall_steps or 'off'}")
     if start_level == "marathon":
-        print("[train] marathon: training episodes start at a random level and run forward; "
-              "evaluation and playback start at 1-1")
+        print("[train] marathon: every episode is one life from 1-1 through all levels; "
+              "a death starts the next episode at 1-1 again")
     eval_start = _eval_start_level(start_level)
     eval_env = build_vec_env(args.game, 1, args.seed + 10_000,
                              args.action_repeat, args.frame_stack, args.obs_type,
@@ -210,8 +210,7 @@ def cmd_train(args: argparse.Namespace) -> None:
 
     resumed_from = latest_checkpoint(paths["checkpoints"]) if args.resume else None
     if args.resume and resumed_from is None:
-        print(f"[train] --resume requested but no checkpoint found in "
-              f"{paths['checkpoints']}; starting fresh.")
+        print(f"[train] --resume: no checkpoint in {paths['checkpoints']} yet; starting fresh.")
     if resumed_from is not None:
         print(f"[train] resuming from {resumed_from}")
         print("[train] WARNING: --resume loads the saved model's hyperparameters. "
@@ -379,7 +378,9 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--seed", type=int, default=0)
     t.add_argument("--device", default="cpu",
                    help="cpu (recommended for tile obs), cuda, mps, or auto")
-    t.add_argument("--resume", action="store_true", help="Resume from newest checkpoint")
+    t.add_argument("--resume", action="store_true",
+                   help="Continue the run from its newest checkpoint if one exists "
+                        "(a run without checkpoints starts fresh)")
     t.add_argument("--run-name", default=None, help="Sub-dir name (defaults to 'default')")
     t.add_argument("--checkpoint-freq", type=int, default=25_000)
     t.add_argument("--keep-checkpoints", type=int, default=KEEP_CHECKPOINTS,

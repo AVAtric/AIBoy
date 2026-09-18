@@ -10,11 +10,13 @@ language:
 Wizard:  1 Set up  →  2 Save  →  3 Train  →  4 Watch
 ```
 
-**AIboy remembers.** Every short test and every training run it finishes is
-written to its experience file. The next search skips settings it already
-knows, explores untested ones around the best it has found, and estimates
-time from the speed this computer really reached. The more you use it, the
-less it repeats and the better its starting point.
+**AIboy remembers, and acts on it.** Every short test and every training
+run it finishes is written to its experience file. The next search skips
+settings it already knows, explores untested ones around the best it has
+found, borrows from a related goal when a goal is new, and estimates time
+from the speed this computer really reached. When tests show that a preset
+would clearly do better with other settings, AIboy changes the preset. The
+more you use it, the less it repeats and the better every preset gets.
 
 The window has two halves: **workflow tabs on the left, the Game Boy screen
 on the right**. Whatever produces something to watch (a finished model, the
@@ -158,16 +160,41 @@ From those records AIboy answers four questions:
   known) settings are always among the candidates, at no cost, so the
   winner is the best of old and new. Repeated wizard runs therefore climb:
   each one starts from the best of all previous ones.
+- **What do the presets have in common?** Two goals are *related* when
+  they share the game, the observation type and the action timing (a
+  campaign and a marathon preset are; a tiles and a pixels preset are not,
+  because the network differs). Their learning settings mean the same
+  thing, so for a goal AIboy has never tested it *borrows*: the wizard says
+  what worked best for the related goal, the first search tries those
+  settings before the standard ones, and **Suggest from experience**
+  explores around them. Borrowed knowledge is only ever a starting point;
+  nothing is applied to a goal that has not been tested itself.
+- **Which presets can be improved?** After every search and every training
+  run AIboy compares each preset's own learning settings with the best
+  settings it has tested for that preset's goal, under the same winner rule
+  the sweeps use (the preset's own settings must have been tested, the
+  challenger must lead by more than the seed spread and by at least 5 %).
+  A clear win is applied to the preset: a built-in gets a resettable
+  override (**Reset to default** on the Presets tab restores the shipped
+  values), a user preset is updated in place, and an *improved* record with
+  the old values, the new ones and the evidence is added to the experience
+  and shown on the Experience tab and in the preset's note. Presets that
+  share a goal at different lengths (the three campaign presets) profit
+  from the same tests. Only PPO settings change, never what the agent sees
+  or how long it trains. The switch *Let AIboy improve presets by itself*
+  on the Experience tab turns this off (**Improve presets now** applies it
+  on demand); the choice is kept in `settings.json`.
 - **How fast is this computer?** The median steps per second of the last
   runs with the same game, observation type and number of emulators
   replaces the built-in Apple-Silicon guess in every time estimate
   ("measured speed" is shown next to estimates that use it).
 
 The **Experience** tab shows every record for the selected game (newest
-first, unfinished ones greyed, real training runs highlighted), a summary
-line (tests, runs, hours of compute remembered) and, for the selected
-row's task, what AIboy concluded: the best known settings and, per knob,
-the mean score of every value tried. **Load into Train tab** and **Save as
+first, unfinished ones greyed, real training runs highlighted, preset
+improvements in amber), a summary line (tests, runs, improvements, hours of
+compute remembered) and, for the selected row's task, what AIboy concluded:
+the best known settings and, per knob, the mean score of every value
+tried. **Load into Train tab** and **Save as
 preset…** reuse a row's settings; **Forget selected…** and **Forget all…**
 delete records (models, presets and run folders are never touched).
 
@@ -190,9 +217,8 @@ never reused or compared.
 3. In the morning the wizard is on **Watch** and the agent is playing. If
    you restart the app instead, pick the run in the model list under the
    screen (its settings are applied from `run.json`) and click **▶ Play**.
-   With the **marathon demo** on (default), a death, an exhausted time
-   budget or a stall moves the demo on to the next level, so it plays
-   through the whole game; the status line reports each skip.
+   A marathon is played the way it was trained: one life from 1-1; the
+   status line reports every level it clears and where the run ended.
 
 ### Choosing a game
 
@@ -283,19 +309,24 @@ selected row.
 
 ### Train tab
 
-Pick a **preset** or edit the fields directly (**Basic** and **Advanced**),
-type a **run name** in the *Run* section (blank = `default`; pick an existing
-run from the dropdown to resume it), **Start training**. The trainer runs as
+Pick a **preset** or edit the fields directly (**Basic**, **PPO** and
+**Input & cadence**), type a **run name** in the *Run* section (blank =
+`default`; pick an existing run from the dropdown to continue it), **Start
+training**. The trainer runs as
 a subprocess so the window stays responsive; its `ep_rew_mean`,
 `ep_len_mean`, `fps`, `time_elapsed` and progress bar update live and the
 raw log scrolls on the right. The status bar at the bottom of the window
 always shows what is running.
 
-- **Resume from newest checkpoint** continues the selected run. The saved
-  model's architecture, `n_steps` and `batch_size` are kept, and so are the
+- **Resume from newest checkpoint if one exists** (ticked by default)
+  continues the named run when it already has a checkpoint and simply
+  starts a new run otherwise, so re-using a run name never overwrites a
+  trained model by accident; untick it to train the name from scratch and
+  replace its models. When a run is continued, the saved model's
+  architecture, `n_steps` and `batch_size` are kept, and so are the
   observation settings recorded in the run's `run.json`; `ent_coef`,
   `learning_rate` and `n_epochs` are taken from the fields. The hint under
-  the run name shows the target folder and whether it already exists.
+  the run name says which of the three will happen.
 - A **modified** marker appears under the preset selector as soon as a
   field differs from the selected preset.
 - **Show live preview** loads each new `best_model.zip` as it is saved and
@@ -365,10 +396,8 @@ of every run, plus episodes and speed (`0.5×` … `4×`, `Unlimited`), and
 time is real time even though a jump holds the button for 10 frames and a
 walk step for 4. Selecting a model applies the observation settings
 recorded in its `run.json`; **Advanced…** opens max steps, stochastic
-actions, the **marathon demo** switch (after a death, an exhausted time
-budget or a stall the demo continues with the next level so it shows the
-whole game; off gives the strict one-life marathon) and the observation
-setup for models from older runs without that file.
+actions and the observation setup for models from older runs without that
+file.
 
 ### Presets tab
 
@@ -414,7 +443,7 @@ ends (with `--source cli` unless told otherwise).
 | `--action-repeat`   | 4       | Frames each action is held                                   |
 | `--frame-stack`     | 4       | Consecutive observations stacked as input                    |
 | `--device`          | cpu     | `cpu` (recommended for tiles), `cuda`, `mps`, `auto`         |
-| `--resume`          | off     | Continue from newest `models/mario/<run>/checkpoints/*.zip`  |
+| `--resume`          | off     | Continue from the newest `models/mario/<run>/checkpoints/*.zip` if there is one |
 | `--run-name`        | default | Sub-directory under `models/mario/`                          |
 | `--source`          | cli     | `cli` / `train` / `tune` / `wizard`: who started the run (experience record) |
 | `--checkpoint-freq` | 25000   | Env steps between checkpoints                                |
@@ -512,21 +541,18 @@ Levels other than 1-1 start from cached PyBoy save-states in
 2-3 and 4-3 cannot be booted through PyBoy's wrapper (upstream bug) and are
 skipped by every mode.
 
-**A marathon is one continuous run, not one run per level.** The episode
-starts in a level; the moment Mario touches the goal the next level's
+**A marathon is one continuous run from 1-1, not one run per level.** Every
+episode starts in 1-1; the moment Mario touches the goal the next level's
 save-state is loaded (the level-end cutscene is skipped) and play continues
-in the same episode. The episode ends at the first death, when the
-attempt's time budget is used up, or after the last usable level (with a
-large bonus). There are no extra lives in a marathon.
-
-**Marathon training starts at a random level.** If every training episode
-started at 1-1 the agent would reach level 5 only after clearing 1–4
-flawlessly, and later levels would get almost no training signal. Training
-episodes therefore start at a random level and run forward from there (the
-level is part of the observation, so the policy knows where it is);
-evaluation and playback always start at 1-1 and run the real marathon.
-Completing all ten levels in one life is a long project: the `Marathon,
-all levels (~1 h)` preset is a start, the `overnight` preset is realistic.
+in the same life. The episode ends at the first death, when the attempt's
+time budget is used up, or after the last usable level (with a large
+bonus); the next episode starts at 1-1 again. There are no extra lives and
+no shortcuts: training, evaluation and playback all play exactly this
+marathon, so a training reward, an evaluation score and what you watch on
+the screen mean the same thing. Later levels only get training signal once
+the earlier ones are cleared reliably, so completing all ten levels in one
+life is a long project: the `Marathon, all levels (~1 h)` preset is a
+start, the `overnight` preset is realistic.
 
 Evaluation during training mirrors the mode where that terminates cleanly
 (fixed level, marathon from 1-1) and uses the campaign otherwise (random,
@@ -582,8 +608,9 @@ performance cores.
 ### Files AIboy keeps
 
 ```
-experience.jsonl              everything AIboy has learned (one JSON record per line)
-training_presets.json         your presets and overrides of built-ins
+experience.jsonl              everything AIboy has learned and changed (one JSON record per line)
+training_presets.json         your presets and overrides of built-ins (incl. AIboy's improvements)
+settings.json                 the few app settings (whether AIboy may improve presets)
 models/mario/
 ├── _level_states/            per-level save-states (cache)
 ├── _tune/<prefix>.json       sweep results tables (Tune tab, wizard)
@@ -606,8 +633,8 @@ An experience record looks like this (one line in the file):
  "resumed": false, "env_version": "mario-1", "created_at": 1789700000.0, "id": "3f9c2a1b7d4e"}
 ```
 
-`models/`, `ROMs/`, `training_presets.json` and `experience.jsonl` are
-git-ignored. To move your knowledge to another computer, copy
+`models/`, `ROMs/`, `training_presets.json`, `settings.json` and
+`experience.jsonl` are git-ignored. To move your knowledge to another computer, copy
 `experience.jsonl` next to the app there (speed measurements will be
 re-learned; scores carry over).
 
@@ -660,10 +687,11 @@ aiboy/                  The program
   paths.py              Where the program and its data live (source tree vs frozen release)
   games.py              Game registry, ROM discovery / probe, level facts, ENV_VERSION (no emulator imports)
   env.py                MarioEnv, save-state bootstrap, VecEnv wrapping
-  presets.py            Built-in and user presets
+  presets.py            Built-in and user presets (and AIboy's improvements of them)
+  settings.py           The few app settings (settings.json)
   runs.py               Run directories, model discovery, trainer command line
   tuning.py             Sweep templates, grid / random / list expansion, metrics, results files, estimates
-  experience.py         What AIboy has learned: records, reuse, best-known settings, suggestions, speed
+  experience.py         What AIboy has learned: records, reuse, best-known and borrowed settings, suggestions, preset improvements, speed
   gui/app.py            The window: Train / Tune tabs, screen panel, status bar, event pump
   gui/wizard.py         Wizard tab (Set up → Save → Train → Watch, plain language, "Let AIboy choose")
   gui/presets_tab.py    Presets tab
@@ -684,13 +712,14 @@ python tests/gui/check_games.py
 python tests/gui/check_smoke.py
 python tests/gui/check_e2e.py                    # search -> preset -> train -> watch (~30 s)
 python tests/gui/check_e2e_auto.py               # the same with "run everything by itself"
-python tests/gui/check_marathon.py               # marathon: train via Train tab, play in demo mode
+python tests/gui/check_marathon.py               # marathon: train via Train tab, play one life from 1-1
 python tests/gui/check_intro.py                  # start-up boot video and sound (plays once)
 ```
 
 The unit tests cover the emulator-free modules: sweep expansion (grids and
 candidate lists), the experience file (round trips, signatures, reuse
-rules, best-known settings, neighbours and the auto plan, measured speed),
+rules, best-known and borrowed settings, neighbours and the auto plan,
+preset improvements, measured speed), the settings file,
 scoring from eval histories and the winner rule, run discovery and
 clean-up rules, preset defaults / overrides / rename rules, level parsing,
 ROM discovery and the ROM probe, the power-up observation cell (both

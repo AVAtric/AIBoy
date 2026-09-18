@@ -91,25 +91,18 @@ class ObservationTests(unittest.TestCase):
             pb.stop(save=False)
 
     @unittest.skipUnless((games.ROM_DIR / "mario.gb").exists(), "needs ROMs/mario.gb")
-    def test_marathon_random_start_is_training_only(self):
+    def test_marathon_always_starts_at_1_1(self):
         from pyboy import PyBoy
         games.prepare_level_states("marathon")
         pb = PyBoy(str(games.ROM_DIR / "mario.gb"), window_type="null", game_wrapper=True,
                    disable_renderer=True)
         try:
             e = env.MarioEnv(pb, obs_type="tiles", start_level="marathon")
-            for _ in range(3):
+            e.reset(seed=3)
+            for _ in range(4):
                 e.reset()
                 self.assertEqual(e._marathon_idx, 0)
-                self.assertEqual(tuple(e.gw.world), (1, 1))          # eval / play: always 1-1
-            e = env.MarioEnv(pb, obs_type="tiles", start_level="marathon", marathon_random_start=True)
-            e.reset(seed=3)
-            starts = set()
-            for _ in range(12):
-                e.reset()
-                starts.add(e._marathon_idx)
-                self.assertEqual(tuple(e.gw.world), games.SML_ALL_LEVELS[e._marathon_idx])
-            self.assertGreater(len(starts), 1)                       # training: varied starts
+                self.assertEqual(tuple(e.gw.world), (1, 1))      # training, eval and play alike
         finally:
             pb.stop(save=False)
 
@@ -142,40 +135,34 @@ class ObservationTests(unittest.TestCase):
             pb.stop(save=False)
 
     @unittest.skipUnless((games.ROM_DIR / "mario.gb").exists(), "needs ROMs/mario.gb")
-    def test_marathon_demo_continues_after_death(self):
+    def test_marathon_death_ends_the_run_and_the_next_one_restarts_at_1_1(self):
         from pyboy import PyBoy
         games.prepare_level_states("marathon")
         pb = PyBoy(str(games.ROM_DIR / "mario.gb"), window_type="null", game_wrapper=True,
                    disable_renderer=True)
         try:
-            for demo in (False, True):
-                e = env.MarioEnv(pb, obs_type="tiles", start_level="marathon",
-                                 marathon_continue_on_death=demo, time_budget=0)
-                e.reset()
-                ended, skipped = False, None
-                for _ in range(1500):                          # run right into the first enemy
-                    _, _, term, trunc, info = e.step(5)
-                    if info.get("marathon_skipped_to"):
-                        skipped = info["marathon_skipped_to"]
-                        break
-                    if term or trunc:
-                        ended = True
-                        break
-                if demo:
-                    self.assertEqual(skipped, (1, 2), info)     # death -> demo continues in 1-2
-                    self.assertEqual(tuple(e.gw.world), (1, 2))
-                else:
-                    self.assertTrue(ended and info["died"], info)   # strict: death ends the run
-            # demo: an exhausted time budget also moves on (stand still with a tiny budget)
-            e = env.MarioEnv(pb, obs_type="tiles", start_level="marathon",
-                             marathon_continue_on_death=True, time_budget=3)
+            e = env.MarioEnv(pb, obs_type="tiles", start_level="marathon", time_budget=0)
+            e.reset()
+            term = trunc = False
+            for _ in range(1500):                          # run right into the first enemy
+                _, _, term, trunc, info = e.step(5)
+                self.assertNotIn("marathon_next_level", info)   # no level change without a clear
+                if term or trunc:
+                    break
+            self.assertTrue(term and info["died"], info)       # the death ends the episode
+            e.reset()
+            self.assertEqual(tuple(e.gw.world), (1, 1))         # and the next one starts over
+            self.assertEqual(e._marathon_idx, 0)
+            # an exhausted time budget ends the run the same way (truncation)
+            e = env.MarioEnv(pb, obs_type="tiles", start_level="marathon", time_budget=3)
             e.reset()
             for _ in range(600):
                 _, _, term, trunc, info = e.step(0)
-                if info.get("marathon_skipped_to") or term or trunc:
+                if term or trunc:
                     break
-            self.assertEqual(info.get("marathon_skipped_to"), (1, 2), info)
-            self.assertTrue(info["time_budget_exceeded"])
+            self.assertTrue(trunc and info["time_budget_exceeded"], info)
+            e.reset()
+            self.assertEqual(tuple(e.gw.world), (1, 1))
         finally:
             pb.stop(save=False)
 

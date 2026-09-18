@@ -177,6 +177,69 @@ class ExperienceTests(unittest.TestCase):
         combos2, _ = self.exp.auto_plan(BASE, 100_000, 2)
         self.assertEqual(combos2, grid)
 
+    def test_related_knowledge_is_borrowed_only_while_the_task_is_unknown(self):
+        marathon = {**BASE, "start_level": "marathon"}
+        task = tuning.trial_config(marathon, {}, 100_000)
+        self.assertIsNone(self.exp.knowledge_for(task))
+        self.exp.add(trial({}, 400.0))                              # campaign tests
+        self.exp.add(trial({"ent_coef": 0.03}, 600.0))
+        know = self.exp.knowledge_for(task)
+        self.assertEqual(know.borrowed_from, "campaign")
+        self.assertEqual(know.config["ent_coef"], 0.03)
+        self.assertIsNone(self.exp.best_for_task(task))             # the task itself: still unknown
+        # a pixels preset is not related (another network)
+        self.assertIsNone(self.exp.knowledge_for({**task, "obs_type": "pixels"}))
+        # the first auto plan tries the borrowed settings before the standard grid
+        combos, why = self.exp.auto_plan(marathon, 100_000, 1)
+        grid = tuning.expand_grid(tuning.SWEEP_TEMPLATES[tuning.DEFAULT_TEMPLATE])
+        self.assertEqual(combos[0], {"ent_coef": 0.03})
+        self.assertEqual(combos[1:], grid)
+        self.assertIn("worked best for the campaign", why)
+        # borrowed settings that are part of the grid anyway are not repeated
+        self.exp.add(trial({"ent_coef": 0.03, "learning_rate": 1e-4}, 900.0))
+        combos, _ = self.exp.auto_plan(marathon, 100_000, 1)
+        self.assertEqual(combos, grid)
+        # once the task has its own tests nothing is borrowed
+        cfg = tuning.trial_config(marathon, {}, 100_000, 0)
+        self.exp.add(experience.make_record(cfg, evals_for(50.0), 10.0, completed=True,
+                                            source="wizard", run_name="m-0"))
+        self.assertIsNone(self.exp.knowledge_for(task).borrowed_from)
+
+    def test_improvements_follow_the_winner_rule_and_are_recorded(self):
+        presets_by_name = {"goal": dict(BASE), "long goal": {**BASE, "timesteps": 8_000_000},
+                           "marathon goal": {**BASE, "start_level": "marathon"}}
+        self.assertEqual(self.exp.improvements(presets_by_name), [])
+        self.exp.add(trial({"ent_coef": 0.03}, 600.0))
+        self.assertEqual(self.exp.improvements(presets_by_name), [])   # own settings untested
+        self.exp.add(trial({}, 590.0))
+        self.assertEqual(self.exp.improvements(presets_by_name), [])   # within the 5 % margin
+        self.exp.add(trial({}, 400.0, seed=1))                          # own: mean 495, spread 95
+        self.exp.add(trial({"ent_coef": 0.03}, 620.0, seed=1))          # best: mean 610, spread 10
+        found = self.exp.improvements(presets_by_name)
+        self.assertEqual([i.preset for i in found], ["goal", "long goal"])   # same task, any length
+        imp = found[0]
+        self.assertEqual(imp.overrides, {"ent_coef": 0.03})
+        self.assertEqual(imp.config["ent_coef"], 0.03)
+        self.assertEqual(imp.config["timesteps"], BASE["timesteps"])
+        self.assertEqual((round(imp.score), round(imp.baseline_score), imp.n_trials), (610, 495, 4))
+        self.assertIn("score 610 vs 495", imp.summary())
+        # the spread rule: a wide spread of the challenger blocks the change
+        self.exp.add(trial({"ent_coef": 0.03}, 300.0, seed=2))
+        self.assertEqual(self.exp.improvements(presets_by_name), [])
+        self.exp.forget([self.exp.records[-1].id])
+        # applying it: recorded, visible in the history, and no longer an improvement
+        rec = self.exp.record_improvement(imp, presets_by_name["goal"])
+        self.assertEqual(rec.kind, experience.KIND_IMPROVEMENT)
+        self.assertFalse(rec.usable())
+        self.assertIn("ent 0.03 (was ent 0.01)", rec.note)
+        again = experience.Experience(self.path)
+        self.assertEqual([r.id for r in again.improvement_history("goal")], [rec.id])
+        self.assertEqual(again.summary("mario")["improvements"], 1)
+        self.assertIsNone(again.latest_for_run("goal"))               # never mistaken for a trial
+        improved = {"goal": imp.config}
+        self.assertEqual(again.improvements(improved), [])
+        self.assertEqual(again.best_for_task(tuning.trial_config(BASE, {}, 100_000)).n_trials, 4)
+
     def test_forget_and_clear(self):
         a, b = trial({}, 1.0, seed=0), trial({}, 2.0, seed=1)
         self.exp.add(a); self.exp.add(b)

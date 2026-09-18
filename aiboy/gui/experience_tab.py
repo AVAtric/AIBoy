@@ -1,12 +1,15 @@
-"""Experience tab: everything AIboy has tried, and what it concluded.
+"""Experience tab: everything AIboy has tried, concluded and changed.
 
-Top: every remembered trial and run of the selected game, newest first.
-Bottom: what the records say about the task of the selected row (best known
-settings, and how each knob's values compared), plus the actions: load the
-settings into the Train tab, keep them as a preset, or forget records.
+Top: every remembered trial, run and preset improvement of the selected
+game, newest first. Bottom: what the records say about the task of the
+selected row (best known settings, and how each knob's values compared),
+plus the actions: load the settings into the Train tab, keep them as a
+preset, forget records, and the switch that lets AIboy change presets by
+itself.
 
 The tab only shows the experience file; the learning itself happens in
-experience.py and is used by the wizard and the Tune tab.
+experience.py and is used by the wizard, the Tune tab and the app's preset
+improvements.
 """
 from __future__ import annotations
 
@@ -14,11 +17,12 @@ import time
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
-from aiboy import experience, runs, tuning
+from aiboy import experience, runs, settings, tuning
 from aiboy.gui.widgets import MONO, MONO_BOLD, THEME, make_table
 from aiboy.tuning import mode_label
 
-KIND_LABEL = {experience.KIND_TRIAL: "test", experience.KIND_RUN: "training"}
+KIND_LABEL = {experience.KIND_TRIAL: "test", experience.KIND_RUN: "training",
+              experience.KIND_IMPROVEMENT: "improved"}
 
 
 def when_label(ts: float) -> str:
@@ -26,6 +30,9 @@ def when_label(ts: float) -> str:
 
 
 def row_values(r: experience.Record) -> tuple:
+    if r.kind == experience.KIND_IMPROVEMENT:
+        return (when_label(r.created_at), KIND_LABEL[r.kind], r.source, mode_label(r.config),
+                tuning.compact_config(r.config), "—", "—", "—", "—", r.run_name)
     m = r.metrics()
     late = f"{m.late:.0f}" if m is not None else "—"
     steps = tuning.format_steps(r.steps_done)
@@ -45,6 +52,11 @@ def insight_text(exp: experience.Experience, record: experience.Record | None,
     """Plain summary of what the records say about one task."""
     if record is None:
         return "Select a row to see what AIboy concluded about that goal."
+    if record.kind == experience.KIND_IMPROVEMENT:
+        return (f"Preset '{record.run_name}' changed by AIboy on "
+                f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(record.created_at))}: "
+                f"{record.note}\nA built-in preset can be reset to its shipped values on the "
+                f"Presets tab.")
     cfg = record.config
     task_name = (f"{mode_label(cfg)} · {cfg.get('obs_type')} · "
                  f"{tuning.format_steps(int(cfg.get('timesteps', 0)))}-step tests")
@@ -84,8 +96,10 @@ class ExperienceTab:
                   text="AIboy remembers every short test and every training it finishes: the "
                        "settings, how the score developed and how long it took. Searches skip "
                        "what is already known, the wizard explores around the best known "
-                       "settings, and time estimates use the speed this computer really "
-                       "reached.").grid(row=0, column=0, sticky="w", pady=(0, 6))
+                       "settings (borrowing from a related goal when a goal is new), time "
+                       "estimates use the speed this computer really reached, and presets are "
+                       "updated when tests show clearly better settings for their goal."
+                  ).grid(row=0, column=0, sticky="w", pady=(0, 6))
         self.summary_var = tk.StringVar(value="")
         ttk.Label(parent, textvariable=self.summary_var, font=MONO_BOLD, wraplength=700).grid(
             row=1, column=0, sticky="w", pady=(0, 6))
@@ -123,6 +137,17 @@ class ExperienceTab:
         self.btn_forget.pack(side="right", padx=4)
         ttk.Button(btns, text="Reload", command=self._reload).pack(side="right", padx=4)
 
+        improve = ttk.Frame(parent)
+        improve.grid(row=5, column=0, sticky="ew", pady=(6, 0))
+        self.auto_improve_var = tk.BooleanVar(value=bool(settings.get("auto_improve_presets")))
+        self.auto_improve_check = ttk.Checkbutton(
+            improve, variable=self.auto_improve_var, command=self._on_auto_improve_changed,
+            text="Let AIboy improve presets by itself when tests show clearly better settings")
+        self.auto_improve_check.pack(side="left")
+        self.btn_improve = ttk.Button(improve, text="Improve presets now",
+                                      command=lambda: self.app.improve_presets())
+        self.btn_improve.pack(side="left", padx=(12, 0))
+
     # ---------- data ----------
 
     def _reload(self) -> None:
@@ -140,13 +165,17 @@ class ExperienceTab:
         for r in reversed(exp.for_game(game)):
             self._rows[r.id] = r
             tags = ()
-            if not r.complete:
+            if r.kind == experience.KIND_IMPROVEMENT:
+                tags = ("modified",)
+            elif not r.complete:
                 tags = ("muted",)
             elif r.kind == experience.KIND_RUN:
                 tags = ("user",)
             self.tree.insert("", "end", iid=r.id, values=row_values(r), tags=tags)
         s = exp.summary(game)
         parts = [f"{s['trials']} short test(s)", f"{s['runs']} training run(s)"]
+        if s["improvements"]:
+            parts.append(f"{s['improvements']} preset improvement(s)")
         if s["incomplete"]:
             parts.append(f"{s['incomplete']} unfinished")
         self.summary_var.set(" · ".join(parts) + f" · {s['compute_hours']:.1f} h of compute "
@@ -175,9 +204,13 @@ class ExperienceTab:
         self.btn_save.config(state="normal" if has else "disabled")
         self.btn_forget.config(state="normal" if has and not busy else "disabled")
         self.btn_forget_all.config(state="normal" if self._rows and not busy else "disabled")
+        self.btn_improve.config(state="disabled" if busy else "normal")
 
     def set_inputs_disabled(self, disabled: bool) -> None:
         self._update_buttons()
+
+    def _on_auto_improve_changed(self) -> None:
+        settings.put("auto_improve_presets", bool(self.auto_improve_var.get()))
 
     # ---------- actions ----------
 

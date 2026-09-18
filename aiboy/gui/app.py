@@ -34,7 +34,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from PIL import Image, ImageTk
 
-from aiboy import APP_NAME, presets, runs, tuning
+from aiboy import APP_NAME, presets, runs, settings, tuning
 from aiboy.experience import Experience, Record
 from aiboy.games import OBS_TYPES, RomInfo, discover_roms, level_choices, probe_rom
 from aiboy.gui.experience_tab import ExperienceTab
@@ -298,7 +298,7 @@ class AIboyGUI:
         main.rowconfigure(0, weight=1)
         self.nb = ttk.Notebook(main)
         self.nb.grid(row=0, column=0, sticky="nsew")
-        screen = ttk.LabelFrame(main, text="Game Boy screen", padding=8)
+        screen = ttk.LabelFrame(main, text="Preview", padding=8)
         screen.grid(row=0, column=1, sticky="ns", padx=(10, 0))
 
         self.wizard_tab = ttk.Frame(self.nb, padding=8)
@@ -337,14 +337,44 @@ class AIboyGUI:
                    for c in plan["combos"])
 
     def on_experience_changed(self) -> None:
-        """Re-read the experience file after a trainer finished and tell the
-        tabs that show or use it."""
+        """Re-read the experience file after a trainer finished, act on what
+        it now says (improve presets), and tell the tabs that show or use it."""
         self.experience.reload()
+        if settings.get("auto_improve_presets") and not self.busy():
+            self.improve_presets(quiet=True)
         if self.experience_tab is not None:
             self.experience_tab.refresh()
         if self.wizard is not None:
             self.wizard.on_experience_changed()
         self.tune_update_summary()
+
+    def improve_presets(self, *, quiet: bool = False) -> list:
+        """Change every preset whose own settings AIboy has measured to be
+        clearly beaten (see experience.Experience.improvements). Built-ins
+        get a resettable override; each change is logged, recorded in the
+        experience file and shown in the status bar. Returns the changes."""
+        game_presets = {n: c for n, c in presets.load_all().items()
+                        if c.get("game", DEFAULT_GAME) == self.game}
+        improved = self.experience.improvements(game_presets)
+        for imp in improved:
+            try:
+                presets.apply_improvement(imp.preset, imp.overrides)
+            except (ValueError, OSError) as e:
+                self.append_log(f"[aiboy] could not improve preset '{imp.preset}': {e}\n")
+                continue
+            self.experience.record_improvement(imp, game_presets[imp.preset])
+            self.append_log(f"[aiboy] preset '{imp.preset}' improved: {imp.summary()}\n")
+        if improved:
+            self.refresh_presets()
+            if self.preset_var.get() in {imp.preset for imp in improved} and not self.busy():
+                self.apply_preset()           # the Train tab shows the improved values
+            names = ", ".join(f"'{imp.preset}'" for imp in improved)
+            self.flash(f"AIboy improved {len(improved)} preset(s) from what it learned: {names} "
+                       f"(details on the Experience tab).", seconds=12)
+        elif not quiet:
+            self.flash("No preset can be improved right now: AIboy has found nothing clearly "
+                       "better than the presets' own settings.")
+        return improved
 
     def show_tab(self, tab: ttk.Frame) -> None:
         self.nb.select(tab)
@@ -361,7 +391,12 @@ class AIboyGUI:
 
     def _build_train(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
-        self.resume_var = tk.BooleanVar(value=False)
+        # Resume is "if one exists": with the box ticked a run that already
+        # has checkpoints is continued, a new run simply starts (see
+        # `_resume_from`). Ticked by default so a re-used run name never
+        # overwrites a trained model by accident.
+        self.resume_var = tk.BooleanVar(value=True)
+        self.resume_var.trace_add("write", lambda *_a: self._update_run_hint())
         self.preview_var = tk.BooleanVar(value=False)
 
         # ---- Presets bar ----
@@ -403,7 +438,7 @@ class AIboyGUI:
         self.run_name_combo.bind("<KeyRelease>", lambda e: self._on_run_name_changed())
         self.run_name_combo.bind("<<ComboboxSelected>>", lambda e: self._on_run_name_changed())
         self.resume_check = ttk.Checkbutton(
-            run_row, text="Resume from newest checkpoint", variable=self.resume_var)
+            run_row, text="Resume from newest checkpoint if one exists", variable=self.resume_var)
         self.resume_check.pack(side="left", padx=(18, 0))
         self.run_hint_var = tk.StringVar(value="")
         ttk.Label(controls, textvariable=self.run_hint_var, foreground=THEME.muted, font=MONO,
@@ -549,7 +584,6 @@ class AIboyGUI:
         self.play_frame_stack_var = tk.IntVar(value=4)
         self.play_obs_type_var = tk.StringVar(value="tiles")
         self.play_level_var = tk.StringVar(value="default")
-        self.play_marathon_demo_var = tk.BooleanVar(value=True)
         # Attempt limits follow the model's run.json (see sync_play_options).
         self.play_time_budget = presets.PRESET_DEFAULTS["time_budget"]
         self.play_stall_steps = presets.PRESET_DEFAULTS["stall_steps"]
@@ -596,11 +630,6 @@ class AIboyGUI:
             width=8))
         ttk.Checkbutton(body, text="Stochastic actions (sample from the policy)",
                         variable=self.play_stochastic_var).grid(
-            row=r, column=0, columnspan=2, sticky="w", pady=2)
-        r += 1
-        ttk.Checkbutton(body, text="Marathon demo: after a death continue with the next level "
-                                   "(shows every level; off = strict one-life marathon)",
-                        variable=self.play_marathon_demo_var).grid(
             row=r, column=0, columnspan=2, sticky="w", pady=2)
         r += 1
         ttk.Separator(body).grid(row=r, column=0, columnspan=2, sticky="ew", pady=8)
@@ -850,12 +879,18 @@ class AIboyGUI:
         except (tk.TclError, ValueError):
             messagebox.showwarning("Tune", "Steps / trial and seeds must be whole numbers.")
             return
-        know = self.experience.best_for_task(tuning.trial_config(base, {}, trial_steps))
+        know = self.experience.knowledge_for(tuning.trial_config(base, {}, trial_steps))
         combos = self.experience.suggest(base, trial_steps, n_seeds, 6, tuning.METRIC_LATE, know)
         if not combos:
             self.flash("Nothing left to suggest: every nearby variation is already known.")
             return
-        if know is not None:
+        if know is not None and know.borrowed_from:
+            around = tuning.describe_overrides(
+                tuning.config_diff(know.config, tuning.full_config(base, {}))) or "the preset itself"
+            note = (f"Nothing is known about this task yet; {len(combos)} untested variations "
+                    f"around what worked best for the {know.borrowed_from} ({around}, "
+                    f"{know.n_trials} trials, score {know.score:.0f}).")
+        elif know is not None:
             around = tuning.describe_overrides(
                 tuning.config_diff(know.config, tuning.full_config(base, {}))) or "the preset itself"
             note = (f"{len(combos)} untested variations around the best known settings "
@@ -1279,19 +1314,32 @@ class AIboyGUI:
         self.refresh_models()
         self._update_run_hint()
 
+    def _resume_from(self, run_name: str) -> Path | None:
+        """The checkpoint a start would continue from: the run's newest one
+        if Resume is ticked and the run has any, else None (a fresh start)."""
+        if not self.resume_var.get():
+            return None
+        return runs.latest_checkpoint(runs.run_paths(self.game, run_name)["checkpoints"])
+
     def _update_run_hint(self) -> None:
+        if not hasattr(self, "run_hint_var"):
+            return                                   # variable trace during construction
         name = self.run_name_var.get().strip() or "default"
         if not runs.is_run_name(name):
             self.run_hint_var.set("⚠ run names may not start with '_'")
             return
         paths = runs.run_paths(self.game, name)
-        best = runs.best_model_for_run(self.game, name)
-        if best is not None:
-            n_ckpt = len(list(paths["checkpoints"].glob("*.zip")))
-            self.run_hint_var.set(f"{paths['base']}/ exists ({n_ckpt} checkpoints): tick Resume "
-                                  f"to continue it, or choose a new name")
+        checkpoint = runs.latest_checkpoint(paths["checkpoints"])
+        if checkpoint is None:
+            exists = paths["base"].exists()
+            self.run_hint_var.set(f"{paths['base']}/ " + ("(exists, no checkpoint yet: starts fresh)"
+                                                          if exists else "(new run)"))
+        elif self.resume_var.get():
+            self.run_hint_var.set(f"{paths['base']}/ exists: continues from "
+                                  f"{checkpoint.parent.name}/{checkpoint.name}")
         else:
-            self.run_hint_var.set(f"{paths['base']}/ (new run)")
+            self.run_hint_var.set(f"{paths['base']}/ exists: Resume is off, so training starts "
+                                  f"over and replaces its models — choose a new name to keep them")
 
     def current_config(self) -> dict:
         """Train-tab values as a preset dict. Raises ValueError naming the
@@ -1511,9 +1559,14 @@ class AIboyGUI:
         if self.playing_active():
             self.play_stop.set()
         run_name = self.run_name_var.get().strip() or "default"
-        cmd = runs.build_train_cmd(cfg, run_name, resume=bool(self.resume_var.get()),
+        resume_from = self._resume_from(run_name)
+        cmd = runs.build_train_cmd(cfg, run_name, resume=resume_from is not None,
                                    source="train")
 
+        if resume_from is not None:
+            self.append_log(f"[gui] resuming '{run_name}' from {resume_from}\n")
+        elif self.resume_var.get():
+            self.append_log(f"[gui] '{run_name}' has no checkpoint yet: starting fresh\n")
         self.append_log(f"$ {' '.join(cmd)}\n")
         try:
             self.train_proc = subprocess.Popen(
@@ -1641,7 +1694,6 @@ class AIboyGUI:
             speed_mult=dict(SPEED_CHOICES)[self.play_speed_label_var.get()],
             stop=self.play_stop,
             time_budget=self.play_time_budget, stall_steps=self.play_stall_steps,
-            marathon_demo=bool(self.play_marathon_demo_var.get()),
         )
         return True
 

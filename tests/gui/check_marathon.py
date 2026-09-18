@@ -1,5 +1,6 @@
 """Marathon through the GUI: train a short marathon run from the Train tab,
-then play it on the screen panel and check the episode-end report. ~40 s."""
+then play it on the screen panel (one life from 1-1) and check the
+episode-end report. ~40 s."""
 import sys, time, tkinter as tk
 from _common import say, silence_dialogs, cleanup
 
@@ -28,7 +29,7 @@ def tick():
         state["s"] = "training"
     elif s == "training" and app.stat_vars["status"].get() not in ("running", "stopping…", "idle"):
         log = app.log_text.get("1.0", "end")
-        if "marathon: training episodes start at a random level" not in log: fail("trainer did not report marathon mode")
+        if "marathon: every episode is one life from 1-1" not in log: fail("trainer did not report marathon mode")
         cfg = runs.read_run_config("mario", RUN)
         if not cfg or cfg["start_level"] != "marathon": fail("run.json missing marathon")
         say("trained; " + app.stat_vars["status"].get())

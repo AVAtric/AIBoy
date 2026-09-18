@@ -9,6 +9,7 @@ __pycache__/
 models/
 training_presets*.json
 experience*.jsonl
+settings.json
 
 gui_errors.log
 

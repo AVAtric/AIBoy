@@ -85,258 +85,67 @@ DEFAULT_CONFIG: dict = {
 #   - "sequential"   → cycles through all 10 usable levels. The cursor
 #                       advances ONLY on a real clear; death retries the
 #                       same level with fresh lives.
-#   - "marathon"     → single-attempt speedrun through every usable level
-#                       in one episode. Level-end cutscene is skipped by
+#   - "marathon"     → one life from 1-1 through every usable level in one
+#                       episode. Level-end cutscene is skipped by
 #                       force-loading the next level's state the instant
-#                       Mario clears. ANY death ends the episode.
+#                       Mario clears. ANY death ends the episode; the next
+#                       one starts at 1-1 again.
 #   - "1-1", "2-1"…  → FIXED level. Same level every episode; death or
 #                       clear terminates and next episode replays the same
 #                       state. Best for drilling one hard level.
+def _mario(start_level: str, timesteps: int, *, checkpoint_freq: int, eval_freq: int,
+           ent_coef: float = 0.01, n_envs: int = 10, n_steps: int = 512, batch_size: int = 256,
+           n_eval_episodes: int = 3, obs_type: str = "tiles") -> dict:
+    """A shipped Mario preset: the common PPO settings plus what differs."""
+    return {
+        "game": "mario", "obs_type": obs_type, "start_level": start_level,
+        "timesteps": timesteps, "n_envs": n_envs, "ent_coef": ent_coef,
+        "learning_rate": 2.5e-4, "n_steps": n_steps, "batch_size": batch_size, "n_epochs": 4,
+        "action_repeat": 4, "frame_stack": 4, "seed": 0,
+        "checkpoint_freq": checkpoint_freq, "eval_freq": eval_freq,
+        "n_eval_episodes": n_eval_episodes, "device": "cpu",
+    }
+
+
 _HARDCODED_BUILTINS: dict[str, dict] = {
     # ---- Campaign (play through the game respecting lives) ----
-    "Mario — Quick smoke test (30 s)": {
-        "game": "mario",
-        "obs_type": "tiles",
-        "start_level": "default",
-        "timesteps": 4_000,
-        "n_envs": 2,
-        "ent_coef": 0.01,
-        "learning_rate": 2.5e-4,
-        "n_steps": 128,
-        "batch_size": 128,
-        "n_epochs": 4,
-        "action_repeat": 4,
-        "frame_stack": 4,
-        "seed": 0,
-        "checkpoint_freq": 4_000,
-        "eval_freq": 4_000,
-        "n_eval_episodes": 1,
-        "device": "cpu",
-    },
-    "Mario — Campaign, recommended (~15 min)": {
-        "game": "mario",
-        "obs_type": "tiles",
-        "start_level": "default",
-        "timesteps": 2_000_000,
-        "n_envs": 10,
-        "ent_coef": 0.01,
-        "learning_rate": 2.5e-4,
-        "n_steps": 512,
-        "batch_size": 256,
-        "n_epochs": 4,
-        "action_repeat": 4,
-        "frame_stack": 4,
-        "seed": 0,
-        "checkpoint_freq": 100_000,
-        "eval_freq": 25_000,
-        "n_eval_episodes": 3,
-        "device": "cpu",
-    },
-    "Mario — Campaign, extended (~1 h)": {
-        "game": "mario",
-        "obs_type": "tiles",
-        "start_level": "default",
-        "timesteps": 8_000_000,
-        "n_envs": 10,
-        "ent_coef": 0.01,
-        "learning_rate": 2.5e-4,
-        "n_steps": 512,
-        "batch_size": 256,
-        "n_epochs": 4,
-        "action_repeat": 4,
-        "frame_stack": 4,
-        "seed": 0,
-        "checkpoint_freq": 250_000,
-        "eval_freq": 100_000,
-        "n_eval_episodes": 3,
-        "device": "cpu",
-    },
-    "Mario — Campaign, overnight (~8 h)": {
-        "game": "mario",
-        "obs_type": "tiles",
-        "start_level": "default",
-        "timesteps": 60_000_000,
-        "n_envs": 10,
-        "ent_coef": 0.01,
-        "learning_rate": 2.5e-4,
-        "n_steps": 512,
-        "batch_size": 256,
-        "n_epochs": 4,
-        "action_repeat": 4,
-        "frame_stack": 4,
-        "seed": 0,
-        "checkpoint_freq": 500_000,
-        "eval_freq": 250_000,
-        "n_eval_episodes": 3,
-        "device": "cpu",
-    },
-    # ---- Random-level training (generalises across 10 usable levels) ----
-    "Mario — Random levels (~1 h)": {
-        # Each episode's level is picked fresh from the 10 usable levels.
-        # Slightly higher entropy (0.02) helps because the state
-        # distribution is wider than campaign-mode.
-        "game": "mario",
-        "obs_type": "tiles",
-        "start_level": "random",
-        "timesteps": 10_000_000,
-        "n_envs": 10,
-        "ent_coef": 0.02,
-        "learning_rate": 2.5e-4,
-        "n_steps": 512,
-        "batch_size": 256,
-        "n_epochs": 4,
-        "action_repeat": 4,
-        "frame_stack": 4,
-        "seed": 0,
-        "checkpoint_freq": 250_000,
-        "eval_freq": 100_000,
-        "n_eval_episodes": 3,
-        "device": "cpu",
-    },
-    "Mario — Random levels, overnight (~8 h)": {
-        "game": "mario",
-        "obs_type": "tiles",
-        "start_level": "random",
-        "timesteps": 60_000_000,
-        "n_envs": 10,
-        "ent_coef": 0.02,
-        "learning_rate": 2.5e-4,
-        "n_steps": 512,
-        "batch_size": 256,
-        "n_epochs": 4,
-        "action_repeat": 4,
-        "frame_stack": 4,
-        "seed": 0,
-        "checkpoint_freq": 500_000,
-        "eval_freq": 250_000,
-        "n_eval_episodes": 3,
-        "device": "cpu",
-    },
+    "Mario — Quick smoke test (30 s)": _mario(
+        "default", 4_000, checkpoint_freq=4_000, eval_freq=4_000, n_envs=2, n_steps=128,
+        batch_size=128, n_eval_episodes=1),
+    "Mario — Campaign, recommended (~15 min)": _mario(
+        "default", 2_000_000, checkpoint_freq=100_000, eval_freq=25_000),
+    "Mario — Campaign, extended (~1 h)": _mario(
+        "default", 8_000_000, checkpoint_freq=250_000, eval_freq=100_000),
+    "Mario — Campaign, overnight (~8 h)": _mario(
+        "default", 60_000_000, checkpoint_freq=500_000, eval_freq=250_000),
+    # ---- Random-level training (generalises across 10 usable levels).
+    #      Slightly higher entropy (0.02) helps in every multi-level mode
+    #      because the state distribution is wider than the campaign's. ----
+    "Mario — Random levels (~1 h)": _mario(
+        "random", 10_000_000, checkpoint_freq=250_000, eval_freq=100_000, ent_coef=0.02),
+    "Mario — Random levels, overnight (~8 h)": _mario(
+        "random", 60_000_000, checkpoint_freq=500_000, eval_freq=250_000, ent_coef=0.02),
     # ---- Sequential: cycle through all 10 usable levels. Death retries
-    #      the same level; a clear advances to the next. Best for training
-    #      an agent that has to reliably beat every level, not just the
-    #      easy ones the current best-model happens to be good at. ----
-    "Mario — No return, cycle levels (~1 h)": {
-        "game": "mario",
-        "obs_type": "tiles",
-        "start_level": "sequential",
-        "timesteps": 10_000_000,
-        "n_envs": 10,
-        "ent_coef": 0.02,
-        "learning_rate": 2.5e-4,
-        "n_steps": 512,
-        "batch_size": 256,
-        "n_epochs": 4,
-        "action_repeat": 4,
-        "frame_stack": 4,
-        "seed": 0,
-        "checkpoint_freq": 250_000,
-        "eval_freq": 100_000,
-        "n_eval_episodes": 3,
-        "device": "cpu",
-    },
-    "Mario — No return, overnight (~8 h)": {
-        "game": "mario",
-        "obs_type": "tiles",
-        "start_level": "sequential",
-        "timesteps": 60_000_000,
-        "n_envs": 10,
-        "ent_coef": 0.02,
-        "learning_rate": 2.5e-4,
-        "n_steps": 512,
-        "batch_size": 256,
-        "n_epochs": 4,
-        "action_repeat": 4,
-        "frame_stack": 4,
-        "seed": 0,
-        "checkpoint_freq": 500_000,
-        "eval_freq": 250_000,
-        "n_eval_episodes": 3,
-        "device": "cpu",
-    },
-    # ---- Marathon: one episode = single-attempt speedrun through ALL 10
-    #      usable levels. On level clear the in-game cutscene is skipped by
-    #      force-loading the next level's state (instant). ANY death ends
-    #      the episode. Big bonus if Mario clears the final level. ----
-    "Mario — Marathon, all levels (~1 h)": {
-        "game": "mario",
-        "obs_type": "tiles",
-        "start_level": "marathon",
-        "timesteps": 10_000_000,
-        "n_envs": 10,
-        "ent_coef": 0.02,
-        "learning_rate": 2.5e-4,
-        "n_steps": 512,
-        "batch_size": 256,
-        "n_epochs": 4,
-        "action_repeat": 4,
-        "frame_stack": 4,
-        "seed": 0,
-        "checkpoint_freq": 250_000,
-        "eval_freq": 100_000,
-        "n_eval_episodes": 3,
-        "device": "cpu",
-    },
-    "Mario — Marathon, overnight (~8 h)": {
-        "game": "mario",
-        "obs_type": "tiles",
-        "start_level": "marathon",
-        "timesteps": 60_000_000,
-        "n_envs": 10,
-        "ent_coef": 0.02,
-        "learning_rate": 2.5e-4,
-        "n_steps": 512,
-        "batch_size": 256,
-        "n_epochs": 4,
-        "action_repeat": 4,
-        "frame_stack": 4,
-        "seed": 0,
-        "checkpoint_freq": 500_000,
-        "eval_freq": 250_000,
-        "n_eval_episodes": 3,
-        "device": "cpu",
-    },
+    #      the same level; a clear advances to the next. ----
+    "Mario — No return, cycle levels (~1 h)": _mario(
+        "sequential", 10_000_000, checkpoint_freq=250_000, eval_freq=100_000, ent_coef=0.02),
+    "Mario — No return, overnight (~8 h)": _mario(
+        "sequential", 60_000_000, checkpoint_freq=500_000, eval_freq=250_000, ent_coef=0.02),
+    # ---- Marathon: one life from 1-1 through all 10 usable levels; the
+    #      level-end cutscene is skipped by loading the next level's state.
+    #      Any death ends the episode and the next one starts at 1-1. ----
+    "Mario — Marathon, all levels (~1 h)": _mario(
+        "marathon", 10_000_000, checkpoint_freq=250_000, eval_freq=100_000, ent_coef=0.02),
+    "Mario — Marathon, overnight (~8 h)": _mario(
+        "marathon", 60_000_000, checkpoint_freq=500_000, eval_freq=250_000, ent_coef=0.02),
     # ---- Single-level drilling (example: 3-2, a tricky one). Copy this
     #      and change start_level to focus on any specific level. ----
-    "Mario — Practice level 3-2 (~30 min)": {
-        "game": "mario",
-        "obs_type": "tiles",
-        "start_level": "3-2",
-        "timesteps": 4_000_000,
-        "n_envs": 10,
-        "ent_coef": 0.02,
-        "learning_rate": 2.5e-4,
-        "n_steps": 512,
-        "batch_size": 256,
-        "n_epochs": 4,
-        "action_repeat": 4,
-        "frame_stack": 4,
-        "seed": 0,
-        "checkpoint_freq": 100_000,
-        "eval_freq": 50_000,
-        "n_eval_episodes": 3,
-        "device": "cpu",
-    },
+    "Mario — Practice level 3-2 (~30 min)": _mario(
+        "3-2", 4_000_000, checkpoint_freq=100_000, eval_freq=50_000, ent_coef=0.02),
     # ---- Pixel-based (slower but more info; use if tile obs plateaus) ----
-    "Mario — Pixels CNN (~2 h for 500k)": {
-        "game": "mario",
-        "obs_type": "pixels",
-        "start_level": "default",
-        "timesteps": 500_000,
-        "n_envs": 4,
-        "ent_coef": 0.02,
-        "learning_rate": 2.5e-4,
-        "n_steps": 256,
-        "batch_size": 256,
-        "n_epochs": 4,
-        "action_repeat": 4,
-        "frame_stack": 4,
-        "seed": 0,
-        "checkpoint_freq": 25_000,
-        "eval_freq": 10_000,
-        "n_eval_episodes": 3,
-        "device": "cpu",
-    },
+    "Mario — Pixels CNN (~2 h for 500k)": _mario(
+        "default", 500_000, checkpoint_freq=25_000, eval_freq=10_000, ent_coef=0.02,
+        obs_type="pixels", n_envs=4, n_steps=256),
 }
 
 RECOMMENDED_PRESET = "Mario — Campaign, recommended (~15 min)"
@@ -437,6 +246,19 @@ def upsert(name: str, config: dict) -> None:
     user = load_user()
     user[name] = normalize(config)
     save_user(user)
+
+
+def apply_improvement(name: str, overrides: dict) -> dict:
+    """Change a preset's hyperparameters to values AIboy found better (see
+    experience.Experience.improvements). A built-in gets a user override,
+    so 'Reset to default' still brings the shipped values back. Returns the
+    new configuration."""
+    current = load_all().get(name)
+    if current is None:
+        raise ValueError(f"No preset named '{name}'.")
+    cfg = {**current, **overrides}
+    upsert(name, cfg)
+    return normalize(cfg)
 
 
 def is_overridden(name: str) -> bool:

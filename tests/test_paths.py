@@ -34,5 +34,25 @@ class PathTests(unittest.TestCase):
             self.assertLessEqual(cfg["n_envs"], paths.recommended_n_envs())
 
 
+
+
+class SettingsTests(unittest.TestCase):
+    def test_settings_roundtrip_and_defaults(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from aiboy import settings
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "settings.json"
+            self.assertTrue(settings.get("auto_improve_presets", path))
+            settings.put("auto_improve_presets", False, path)
+            self.assertFalse(settings.get("auto_improve_presets", path))
+            self.assertEqual(settings.load(path)["auto_improve_presets"], False)
+            path.write_text("{ not json")
+            self.assertEqual(settings.load(path), settings.DEFAULTS)
+            path.write_text(json.dumps([1]))
+            self.assertEqual(settings.load(path), settings.DEFAULTS)
+
+
 if __name__ == "__main__":
     unittest.main()

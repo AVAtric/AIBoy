@@ -157,6 +157,11 @@ def setup_styles(root: tk.Misc) -> None:
     style = ttk.Style(root)
     style.configure(TABLE_STYLE, font=MONO, rowheight=22)
     style.configure(f"{TABLE_STYLE}.Heading", font=("Helvetica", 11))
+    # The aqua theme wraps a notebook's pane in 18/8/18/17 px of empty
+    # margin, so the tab box ended 17 px above the Game Boy panel next to it
+    # and was narrower than its column. Without the margin both boxes share
+    # the same top and bottom edge (other themes have no such margin).
+    style.configure("TNotebook", padding=0)
 
 
 class ConfigForm(ttk.Frame):

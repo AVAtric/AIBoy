@@ -94,6 +94,10 @@ def describe_knowledge(know, base: dict) -> str:
     tuned = tuning.config_diff(know.config, tuning.full_config(base, {}))
     what = tuning.plain_overrides(tuned)
     tests = f"{know.n_trials} short test{'s' if know.n_trials != 1 else ''}"
+    if know.borrowed_from:
+        return (f"AIboy has not tried this goal yet, but for the {know.borrowed_from} its best "
+                f"settings were {what} (score {know.score:.0f}, from {tests}); the first search "
+                f"tries those too.")
     return (f"Best known settings so far: {what} (score {know.score:.0f}, from {tests} of "
             f"{tuning.format_steps(know.trial_steps)} steps).")
 
@@ -577,7 +581,7 @@ class WizardTab:
             self.known_note.config(text="")
             return
         base = self._presets.get(self.goal_var.get(), {})
-        know = self.app.experience.best_for_task(task)
+        know = self.app.experience.knowledge_for(task)
         self.known_note.config(text=describe_knowledge(know, base))
 
     def _on_effort_changed(self) -> None:
@@ -943,7 +947,7 @@ class WizardTab:
         else:
             app.preset_var.set("")
         app.run_name_var.set(run_name)
-        app.resume_var.set(False)
+        app.resume_var.set(True)         # the run name is new, so this is a fresh start
         app.preview_var.set(bool(self.preview_var.get()))
         if not app.start_training():
             return

@@ -13,6 +13,7 @@ Three kinds of preset:
 """
 from __future__ import annotations
 
+import time
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
@@ -166,7 +167,13 @@ class PresetsTab:
             kind = presets.kind(name)
             self.title_var.set(name)
             self.kind_var.set(f"({kind})")
-            self.note_var.set(KIND_NOTE[kind])
+            note = KIND_NOTE[kind]
+            history = self.app.experience.improvement_history(name)
+            if history:
+                last = history[-1]
+                note += (f" AIboy improved it on "
+                         f"{time.strftime('%Y-%m-%d', time.localtime(last.created_at))}: {last.note}")
+            self.note_var.set(note)
             self.form.set_config(cfg)
             self.form.set_enabled(True)
         self._loading = False

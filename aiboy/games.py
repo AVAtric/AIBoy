@@ -19,7 +19,9 @@ ROM_DIR = Path("ROMs")
 # cells, the level modes): scores recorded under an older version stay in
 # the experience file for reading but are never reused or compared, because
 # they would measure a different game.
-ENV_VERSION = "mario-1"
+#   mario-1  first version
+#   mario-2  marathon training episodes start at 1-1 (were: a random level)
+ENV_VERSION = "mario-2"
 
 # Super Mario Land has 4 worlds × 3 levels = 12 total levels. PyBoy's
 # `set_world_level(w, l)` docstring is wrong — it says args are 0-indexed
