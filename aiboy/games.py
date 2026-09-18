@@ -10,9 +10,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from paths import app_command
+from aiboy.paths import app_command
 
 ROM_DIR = Path("ROMs")
+
+# Version of the learning task itself: reward shaping, observation layout,
+# level logic. Bump it whenever one of those changes (MarioEnv, the HUD
+# cells, the level modes): scores recorded under an older version stay in
+# the experience file for reading but are never reused or compared, because
+# they would measure a different game.
+ENV_VERSION = "mario-1"
 
 # Super Mario Land has 4 worlds × 3 levels = 12 total levels. PyBoy's
 # `set_world_level(w, l)` docstring is wrong — it says args are 0-indexed

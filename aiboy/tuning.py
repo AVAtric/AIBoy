@@ -1,8 +1,14 @@
-"""Hyperparameter-search helpers behind the GUI's Tune tab.
+"""Hyperparameter-search helpers behind the Tune tab and the wizard.
 
-Deliberately Tk-free so the sweep logic (templates, grid/random expansion,
-metric extraction, result persistence, time estimates) is unit-testable
-and reusable from scripts.
+Deliberately Tk-free so the sweep logic (templates, grid / random / explicit
+expansion, metric extraction, result persistence, time estimates) is
+unit-testable and reusable from scripts. What AIboy remembers about past
+trials lives in experience.py, which builds on this module (never the other
+way round).
+
+A sweep is either a grid, `{"param": [values, ...]}`, or an explicit list of
+candidates, `[{"param": value, ...}, ...]` (what the experience-based
+suggestions produce). Both expand to a list of override dicts.
 """
 from __future__ import annotations
 
@@ -17,7 +23,8 @@ from pathlib import Path
 
 import numpy as np
 
-from presets import PRESET_DEFAULTS, PRESET_FIELDS
+from aiboy.paths import cpu_count
+from aiboy.presets import DEFAULT_CONFIG, PRESET_DEFAULTS, PRESET_FIELDS
 
 # Fields a sweep may vary. `timesteps` is fixed per trial, `seed` is handled
 # by "seeds per config", and the checkpoint/eval cadence is derived from the
@@ -144,6 +151,45 @@ PLAIN_KEYS: dict[str, str] = {
 }
 BASELINE_PLAIN = "the goal's own settings"
 
+SHORT_KEYS = {"learning_rate": "lr", "ent_coef": "ent", "n_steps": "steps", "batch_size": "batch",
+              "n_epochs": "epochs", "gamma": "gamma", "gae_lambda": "gae", "clip_range": "clip",
+              "n_envs": "envs", "action_repeat": "repeat", "frame_stack": "stack",
+              "obs_type": "obs", "start_level": "level", "device": "device",
+              "time_budget": "budget", "stall_steps": "stall", "seed": "seed"}
+# The knobs shown when a whole configuration is summarised in one cell.
+KEY_PARAMS = ("learning_rate", "ent_coef", "n_steps", "batch_size", "n_epochs", "gamma")
+
+
+def format_value(value) -> str:
+    return f"{value:g}" if isinstance(value, float) else str(value)
+
+
+def compact_overrides(overrides: dict) -> str:
+    """'ent 0.03 · lr 0.0003' — readable summary of tuned values."""
+    return " · ".join(f"{SHORT_KEYS.get(k, k)} {format_value(v)}" for k, v in overrides.items())
+
+
+def compact_config(cfg: dict, keys=KEY_PARAMS) -> str:
+    """The key knobs of a configuration: 'lr 0.00025 · ent 0.01 · steps 512 · …'."""
+    return compact_overrides({k: cfg[k] for k in keys if k in cfg})
+
+
+def config_diff(cfg: dict, base: dict, keys=None) -> dict:
+    """The tunable fields on which `cfg` differs from `base` (a field missing
+    from either side counts as its default)."""
+    keys = TUNABLE_FIELDS if keys is None else keys
+    out = {}
+    for k in keys:
+        if k in cfg and not _same_value(cfg[k], base.get(k, DEFAULT_CONFIG.get(k))):
+            out[k] = cfg[k]
+    return out
+
+
+def _same_value(a, b) -> bool:
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return abs(float(a) - float(b)) <= 1e-12
+    return str(a) == str(b)
+
 
 def plain_overrides(overrides: dict) -> str:
     """'curiosity 0.03 · learning speed 0.0003' for a set of tuned values;
@@ -199,12 +245,27 @@ def explain_winner(results) -> tuple["ConfigResult | None", str]:
 
 # ------------------------- sweep expansion -------------------------
 
-def validate_sweep(text: str) -> tuple[dict[str, list], str | None]:
-    """Parse sweep JSON. Returns (sweep, None) or ({}, error_message)."""
+Sweep = "dict[str, list] | list[dict]"
+
+
+def validate_sweep(text: str) -> tuple["dict[str, list] | list[dict]", str | None]:
+    """Parse sweep JSON: a grid `{"param": [values]}` or an explicit list of
+    candidates `[{"param": value}, ...]`. Returns (sweep, None) or
+    ({}, error_message)."""
     try:
         sweep = json.loads(text)
     except json.JSONDecodeError as e:
         return {}, f"not valid JSON: {e.msg} (line {e.lineno})"
+    if isinstance(sweep, list):
+        if not sweep or not all(isinstance(c, dict) for c in sweep):
+            return {}, "a candidate list must be a non-empty JSON list of objects: [{\"param\": value}]"
+        for cand in sweep:
+            for k in cand:
+                if k not in TUNABLE_FIELDS:
+                    return {}, f"'{k}' is not tunable (allowed: {', '.join(sorted(TUNABLE_FIELDS))})"
+        if len({json.dumps(c, sort_keys=True) for c in sweep}) != len(sweep):
+            return {}, "the candidate list has duplicates"
+        return sweep, None
     if not isinstance(sweep, dict) or not sweep:
         return {}, "sweep must be a non-empty JSON object: {\"param\": [values]}"
     for k, v in sweep.items():
@@ -217,19 +278,25 @@ def validate_sweep(text: str) -> tuple[dict[str, list], str | None]:
     return sweep, None
 
 
-def n_grid_configs(sweep: dict[str, list]) -> int:
+def n_grid_configs(sweep) -> int:
+    if isinstance(sweep, list):
+        return len(sweep)
     n = 1
     for v in sweep.values():
         n *= len(v)
     return n
 
 
-def expand_grid(sweep: dict[str, list]) -> list[dict]:
+def expand_grid(sweep) -> list[dict]:
+    """Every candidate of a sweep: the grid's cartesian product, or the
+    explicit list as it is."""
+    if isinstance(sweep, list):
+        return [dict(c) for c in sweep]
     keys = list(sweep)
     return [dict(zip(keys, combo)) for combo in itertools.product(*(sweep[k] for k in keys))]
 
 
-def sweep_seed(sweep: dict[str, list]) -> int:
+def sweep_seed(sweep) -> int:
     """Deterministic seed derived from the sweep itself.
 
     Random sampling MUST be reproducible: trials are named by their index,
@@ -242,7 +309,7 @@ def sweep_seed(sweep: dict[str, list]) -> int:
     return zlib.crc32(canonical.encode("utf-8"))
 
 
-def sample_random(sweep: dict[str, list], n: int, seed: int | None = None) -> list[dict]:
+def sample_random(sweep, n: int, seed: int | None = None) -> list[dict]:
     """`n` distinct configs from the grid (the whole grid if it has <= n).
 
     With `seed=None` the sample is seeded from the sweep (see `sweep_seed`)
@@ -278,12 +345,18 @@ def suggested_trial_steps(goal_timesteps: int) -> int:
     return int(round(steps / 50_000) * 50_000)
 
 
+MIN_WIN_MARGIN = 0.05     # a winner must lead by at least this share of the baseline score
+
+
 def pick_winner(results) -> tuple["ConfigResult | None", str]:
     """The candidate to train with, and why.
 
     The best-scoring candidate wins only if it beats the baseline (overrides
-    == {}) by more than the larger of the two seed spreads; otherwise the
-    baseline is kept. Without a baseline the best candidate wins.
+    == {}) by more than the larger of the two seed spreads, and by at least
+    `MIN_WIN_MARGIN` of the baseline's score (single-seed searches have no
+    spread to speak of, and PPO scores wobble by a few percent between
+    otherwise identical runs); otherwise the baseline is kept. Without a
+    baseline the best candidate wins.
     """
     best = best_result(results)
     if best is None:
@@ -292,7 +365,7 @@ def pick_winner(results) -> tuple["ConfigResult | None", str]:
     if baseline is None or best is baseline:
         return best, ("the base preset scored best; no candidate beat it" if best is baseline
                       else "best candidate")
-    margin = max(best.spread, baseline.spread)
+    margin = max(best.spread, baseline.spread, MIN_WIN_MARGIN * abs(baseline.score))
     if best.score - baseline.score > margin:
         return best, (f"beats the base preset by {best.score - baseline.score:.0f} "
                       f"(spread {margin:.0f})")
@@ -302,17 +375,24 @@ def pick_winner(results) -> tuple["ConfigResult | None", str]:
 
 # ------------------------- timing -------------------------
 
-def estimate_fps(cfg: dict) -> float:
-    """Rough env-steps/sec for a config on Apple-Silicon-class CPUs."""
+def estimate_fps(cfg: dict, measured: float | None = None) -> float:
+    """Env-steps/sec for a config: what this computer measured on earlier
+    trials and runs with the same setup (see experience.Experience.fps),
+    else a rough guess for Apple-Silicon-class CPUs."""
+    if measured is not None and measured > 0:
+        return float(measured)
     n_envs = max(1, int(cfg.get("n_envs", 10)))
     if cfg.get("obs_type", "tiles") == "pixels":
         return min(80.0, 15.0 * n_envs)
     return min(3300.0, 350.0 * n_envs)
 
 
-def estimate_seconds(n_trials: int, trial_steps: int, cfg: dict) -> float:
-    # ~8 s per trial for process start-up, env boot and the final eval.
-    return n_trials * (trial_steps / estimate_fps(cfg) + 8.0)
+TRIAL_OVERHEAD = 8.0    # seconds per trial for process start-up, env boot and the final eval
+
+
+def estimate_seconds(n_trials: int, trial_steps: int, cfg: dict,
+                     measured_fps: float | None = None) -> float:
+    return n_trials * (trial_steps / estimate_fps(cfg, measured_fps) + TRIAL_OVERHEAD)
 
 
 def format_duration(seconds: float) -> str:
@@ -480,100 +560,53 @@ class TrialMetrics:
                 METRIC_MEAN: self.mean, METRIC_PER_MINUTE: self.per_minute}[metric]
 
 
-def read_trial_metrics(eval_file: Path, duration: float | None = None) -> TrialMetrics | None:
-    """Summarise SB3's evaluations.npz. None if missing/unreadable."""
-    if not eval_file.exists():
+def evals_from_npz(eval_file: Path) -> list[list[float]] | None:
+    """SB3's evaluations.npz as `[[timesteps, mean reward, mean episode length], …]`,
+    one entry per evaluation. None if the file is missing or unreadable. This
+    is the form the experience file stores, so scores can be recomputed for
+    any metric long after the run folder is gone."""
+    if not Path(eval_file).exists():
         return None
     try:
         data = np.load(eval_file)
-        means = data["results"].mean(axis=1)
-        lens = data["ep_lengths"].mean(axis=1)
+        steps, results, lengths = data["timesteps"], data["results"], data["ep_lengths"]
+        return [[int(t), float(np.mean(r)), float(np.mean(l))]
+                for t, r, l in zip(steps, results, lengths)]
+    except Exception:
+        return None
+
+
+def metrics_from_evals(evals, duration: float | None = None) -> TrialMetrics | None:
+    """Summarise an eval history (see `evals_from_npz`). None if empty."""
+    if not evals:
+        return None
+    try:
+        means = np.array([e[1] for e in evals], dtype=float)
+        lens = np.array([e[2] for e in evals], dtype=float)
         best_i = int(np.argmax(means))
         n_late = min(len(means), max(2, (len(means) + 2) // 3))   # last third, at least 2 evals
         return TrialMetrics(
             best=float(means[best_i]), final=float(means[-1]), mean=float(means.mean()),
-            ep_len=float(lens[best_i]), timesteps=int(data["timesteps"][-1]),
+            ep_len=float(lens[best_i]), timesteps=int(evals[-1][0]),
             n_evals=int(len(means)), duration=duration, late=float(means[-n_late:].mean()),
         )
-    except Exception:
+    except (IndexError, TypeError, ValueError):
         return None
+
+
+def read_trial_metrics(eval_file: Path, duration: float | None = None) -> TrialMetrics | None:
+    """Summarise SB3's evaluations.npz. None if missing/unreadable."""
+    return metrics_from_evals(evals_from_npz(eval_file), duration)
+
+
+def record_metrics(record: dict) -> TrialMetrics | None:
+    """Metrics of an experience record (a dict as stored in experience.jsonl)."""
+    return metrics_from_evals(record.get("evals") or [], record.get("duration"))
 
 
 def trial_run_name(prefix: str, config_idx: int, seed_idx: int, n_seeds: int) -> str:
     name = f"{prefix}-{config_idx:03d}"
     return f"{name}-s{seed_idx}" if n_seeds > 1 else name
-
-
-MANIFEST_NAME = "trial.json"
-
-
-def write_trial_manifest(run_dir: Path, config: dict, trial_steps: int) -> None:
-    """Record which config a trial directory was trained with, so a later
-    sweep only reuses it when the config still matches."""
-    run_dir.mkdir(parents=True, exist_ok=True)
-    payload = {"config": config, "trial_steps": trial_steps, "created_at": time.time()}
-    (run_dir / MANIFEST_NAME).write_text(json.dumps(payload, indent=2, sort_keys=True))
-
-
-def finish_trial_manifest(run_dir: Path, duration: float) -> None:
-    """Record how long the trial took, so a reused trial keeps its measured
-    compute time for the reward-per-minute metric."""
-    data = read_trial_manifest(run_dir) or {}
-    data["duration"] = float(duration)
-    data["finished_at"] = time.time()
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / MANIFEST_NAME).write_text(json.dumps(data, indent=2, sort_keys=True))
-
-
-def trial_duration(run_dir: Path, config: dict, trial_steps: int) -> float:
-    """Measured wall-clock seconds from the manifest; for trials that predate
-    duration recording, the throughput estimate for this config."""
-    manifest = read_trial_manifest(run_dir)
-    if manifest and isinstance(manifest.get("duration"), (int, float)) and manifest["duration"] > 0:
-        return float(manifest["duration"])
-    return estimate_seconds(1, trial_steps, config)
-
-
-def read_trial_manifest(run_dir: Path) -> dict | None:
-    path = run_dir / MANIFEST_NAME
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    return data if isinstance(data, dict) else None
-
-
-def _same_config(a: dict, b: dict) -> bool:
-    keys = set(a) | set(b)
-    for k in keys:
-        va, vb = a.get(k), b.get(k)
-        if isinstance(va, (int, float)) and isinstance(vb, (int, float)):
-            if abs(float(va) - float(vb)) > 1e-12:
-                return False
-        elif str(va) != str(vb):
-            return False
-    return True
-
-
-def trial_is_complete(run_dir: Path, trial_steps: int, config: dict | None = None) -> bool:
-    """True if a previous run of this trial reached (about) its target.
-
-    When `config` is given and the run has a manifest, the manifest's config
-    must match too; a run with a different config is never reused even if
-    it carries the same name. Runs without a manifest (older sweeps) are
-    accepted on step count alone.
-    """
-    m = read_trial_metrics(run_dir / "logs" / "evaluations.npz")
-    if m is None or m.timesteps < 0.9 * trial_steps:
-        return False
-    if config is None:
-        return True
-    manifest = read_trial_manifest(run_dir)
-    if manifest is None:
-        return True
-    return _same_config(manifest.get("config", {}), config)
 
 
 @dataclass
@@ -582,13 +615,33 @@ class ConfigResult:
     overrides: dict
     config: dict                    # full config (without seed)
     metric: str
-    values: list[float] = field(default_factory=list)   # one per seed
+    values: list[float] = field(default_factory=list)   # one per seed, under `metric`
     ep_lens: list[float] = field(default_factory=list)
     runs: list[str] = field(default_factory=list)
     timesteps: int = 0
     duration: float = 0.0
-    reused: int = 0                 # seeds skipped because results already existed
+    reused: int = 0                 # seeds whose result AIboy already knew (not retrained)
     pruned: bool = False            # run folders deleted to save space (scores kept)
+    records: list[dict] = field(default_factory=list)   # experience records, one per scored seed
+
+    def add_record(self, record: dict) -> None:
+        """Take a trial's experience record and score it under `metric`."""
+        self.records.append(record)
+        m = record_metrics(record)
+        if m is not None:
+            self.values.append(m.by_name(self.metric))
+            self.ep_lens.append(m.ep_len)
+            self.timesteps = m.timesteps
+
+    def rescore(self, metric: str) -> None:
+        """Recompute the scores under another metric from the stored eval
+        histories, so switching metrics needs no run folder on disk."""
+        self.metric, self.values, self.ep_lens = metric, [], []
+        for record in self.records:
+            m = record_metrics(record)
+            if m is not None:
+                self.values.append(m.by_name(metric))
+                self.ep_lens.append(m.ep_len)
 
     @property
     def score(self) -> float:
@@ -634,6 +687,17 @@ def load_results(path: Path) -> tuple[dict, list[ConfigResult]]:
 def full_config(base: dict, overrides: dict) -> dict:
     """Base preset + defaults for optional fields + sweep overrides."""
     return {**PRESET_DEFAULTS, **base, **overrides}
+
+
+def trial_config(base: dict, overrides: dict, trial_steps: int, seed_offset: int = 0) -> dict:
+    """The complete configuration one trial is trained with: the base preset
+    with the sweep's overrides, the trial length, and the seed of this
+    repetition. This is what the experience file is keyed on."""
+    cfg = {**DEFAULT_CONFIG, **full_config(base, overrides)}
+    cfg["timesteps"] = int(trial_steps)
+    cfg["seed"] = int(base.get("seed", 0)) + seed_offset
+    cfg["n_envs"] = min(int(cfg["n_envs"]), cpu_count())     # what the trainer will actually run
+    return cfg
 
 
 def prune_trial_runs(results, keep: int, game: str, delete_run) -> list[str]:

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 
-from paths import BUNDLE_DIR, DATA_DIR, recommended_n_envs
+from aiboy.paths import BUNDLE_DIR, DATA_DIR, recommended_n_envs
 
 BUILTINS_FILE = BUNDLE_DIR / "builtin_presets.json"     # shipped with the program
 PRESETS_FILE = DATA_DIR / "training_presets.json"       # the user's own, next to the program

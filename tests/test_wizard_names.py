@@ -1,6 +1,6 @@
 import unittest
 
-import wizard
+from aiboy.gui import wizard
 
 
 class WizardNameTests(unittest.TestCase):

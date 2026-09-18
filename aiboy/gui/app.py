@@ -1,15 +1,19 @@
-"""Tkinter GUI for gameboyEnv.
+"""The AIboy window.
 
 Tabs, in workflow order:
-  Wizard   guided Tune -> Preset -> Train -> Watch flow (see wizard.py)
-  Tune     hyperparameter sweeps over short training trials
-  Train    a single headless training run (subprocess) with live stats
-  Play     watch any saved model inside an embedded Game Boy canvas
-  Presets  browse / edit / organise presets (see presets_tab.py)
+  Wizard      guided Search -> Save -> Train -> Watch flow (see wizard.py)
+  Train       a single headless training run (subprocess) with live stats
+  Tune        hyperparameter sweeps over short training trials
+  Presets     browse / edit / organise presets (see presets_tab.py)
+  Experience  everything AIboy has tried so far (see experience_tab.py)
+plus the Game Boy screen on the right, which plays any saved model.
 
-Training and tuning run `main.py train` as subprocesses so the window
-stays responsive; playback runs on a background thread (player.py).
-All cross-thread traffic goes through two queues drained by `_pump()`.
+Training and tuning run `main.py train` as subprocesses so the window stays
+responsive; playback runs on a background thread (player.py). All
+cross-thread traffic goes through two queues drained by `_pump()`. Every
+finished trainer process appends to the experience file, which the app
+re-reads to reuse known results, refresh its estimates and fill the
+Experience tab.
 """
 from __future__ import annotations
 
@@ -31,15 +35,15 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 import numpy as np
 from PIL import Image, ImageTk
 
-import presets
-import runs
-import tuning
-from games import OBS_TYPES, RomInfo, discover_roms, level_choices, probe_rom
-from paths import DATA_DIR, FROZEN
-from player import (CANVAS_H, CANVAS_W, GAME_H, GAME_W, SPEED_CHOICES, EmbeddedPlayer, IntroVideo,
-                    LatestFrame)
-from presets_tab import PresetsTab
-from widgets import MONO, MONO_BOLD, THEME, ConfigForm, WidgetLock, make_table, setup_styles
+from aiboy import APP_NAME, presets, runs, tuning
+from aiboy.experience import Experience
+from aiboy.games import OBS_TYPES, RomInfo, discover_roms, level_choices, probe_rom
+from aiboy.gui.experience_tab import ExperienceTab
+from aiboy.gui.player import (CANVAS_H, CANVAS_W, GAME_H, GAME_W, SPEED_CHOICES, EmbeddedPlayer,
+                              IntroVideo, LatestFrame)
+from aiboy.gui.presets_tab import PresetsTab
+from aiboy.paths import DATA_DIR, FROZEN
+from aiboy.gui.widgets import MONO, MONO_BOLD, THEME, ConfigForm, WidgetLock, make_table, setup_styles
 
 PROJECT_DIR = DATA_DIR      # ROMs/, models/, presets and the error log live here
 DEFAULT_GAME = "mario"
@@ -56,7 +60,7 @@ FLASH_SECONDS = 6           # transient status-bar messages
 
 
 IDLE_SCREEN_TEXT = "No video"
-INTRO_DISABLED = os.environ.get("GAMEBOY_NO_INTRO") == "1"      # tests: silent, no video
+INTRO_DISABLED = os.environ.get("AIBOY_NO_INTRO") == "1"      # tests: silent, no video
 
 
 def idle_screen(intro: IntroVideo | None = None) -> Image.Image:
@@ -74,7 +78,7 @@ def idle_screen(intro: IntroVideo | None = None) -> Image.Image:
     draw = ImageDraw.Draw(img)
     dark = (15, 56, 15)
     draw.rectangle([8, 8, GAME_W - 9, GAME_H - 9], outline=dark, width=2)
-    for i, line in enumerate(("GAME BOY  AI", IDLE_SCREEN_TEXT)):
+    for i, line in enumerate((APP_NAME, IDLE_SCREEN_TEXT)):
         w = draw.textlength(line)
         draw.text(((GAME_W - w) / 2, 56 + i * 20), line, fill=dark)
     return img.resize((CANVAS_W, CANVAS_H), Image.NEAREST)
@@ -103,10 +107,10 @@ def kill_if_alive(proc: subprocess.Popen | None) -> None:
             pass
 
 
-class GameBoyAIGUI:
+class AIboyGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
-        root.title("Game Boy AI — Super Mario Land")
+        root.title(f"{APP_NAME} — Super Mario Land")
         root.geometry("1300x900")
         root.minsize(1240, 820)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -126,7 +130,6 @@ class GameBoyAIGUI:
         self.tune_stop = threading.Event()
         self.tune_thread: threading.Thread | None = None
         self.tune_proc: subprocess.Popen | None = None
-        self._last_trial_seconds = 0.0
         self.tb_proc: subprocess.Popen | None = None
         self._train_target_steps = 1
         self._train_rollout_size = 1
@@ -151,8 +154,10 @@ class GameBoyAIGUI:
             except Exception as e:          # a broken asset must not stop the app
                 sys.stderr.write(f"intro video not loaded: {e}\n")
         self.roms: dict[str, RomInfo] = {}
+        self.experience = Experience()          # what earlier trials and runs taught AIboy
         self.wizard = None
         self.presets_tab = None
+        self.experience_tab = None
         self._input_lock = WidgetLock()
 
         self._build_ui()
@@ -259,7 +264,7 @@ class GameBoyAIGUI:
     # ---------- UI ----------
 
     def _build_ui(self) -> None:
-        from wizard import WizardTab
+        from aiboy.gui.wizard import WizardTab
 
         setup_styles(self.root)
 
@@ -301,17 +306,46 @@ class GameBoyAIGUI:
         self.train_tab = ttk.Frame(self.nb, padding=8)
         self.tune_tab = ttk.Frame(self.nb, padding=8)
         self.presets_frame = ttk.Frame(self.nb, padding=8)
+        self.experience_frame = ttk.Frame(self.nb, padding=8)
         self.nb.add(self.wizard_tab, text="Wizard")
         self.nb.add(self.train_tab, text="Train")
         self.nb.add(self.tune_tab, text="Tune")
         self.nb.add(self.presets_frame, text="Presets")
+        self.nb.add(self.experience_frame, text="Experience")
         # Train and Tune define the variables the wizard mirrors; build them first.
         self._build_train(self.train_tab)
         self._build_tune(self.tune_tab)
         self._build_screen(screen)
         self.wizard = WizardTab(self, self.wizard_tab)
         self.presets_tab = PresetsTab(self, self.presets_frame)
+        self.experience_tab = ExperienceTab(self, self.experience_frame)
         self.nb.select(self.wizard_tab)
+
+    # ---------- experience ----------
+
+    def fps_for(self, cfg: dict | None) -> float | None:
+        """Env-steps/sec this computer measured on earlier runs with the same
+        setup (game, observation type, emulators); None until it has any."""
+        if not cfg:
+            return None
+        return self.experience.fps(cfg)
+
+    def known_trials(self, plan: dict) -> int:
+        """How many of a sweep plan's trials AIboy already has a result for."""
+        if not plan or not plan.get("skip_done", True):
+            return 0
+        return sum(self.experience.known_seeds(plan["base"], c, plan["trial_steps"], plan["n_seeds"])
+                   for c in plan["combos"])
+
+    def on_experience_changed(self) -> None:
+        """Re-read the experience file after a trainer finished and tell the
+        tabs that show or use it."""
+        self.experience.reload()
+        if self.experience_tab is not None:
+            self.experience_tab.refresh()
+        if self.wizard is not None:
+            self.wizard.on_experience_changed()
+        self.tune_update_summary()
 
     def show_tab(self, tab: ttk.Frame) -> None:
         self.nb.select(tab)
@@ -646,8 +680,8 @@ class GameBoyAIGUI:
                   foreground=THEME.muted).grid(row=3, column=2, columnspan=2, sticky="w", padx=12)
         self.tune_skip_done_var = tk.BooleanVar(value=True)
         skip_cb = ttk.Checkbutton(
-            cfg_frame, variable=self.tune_skip_done_var,
-            text="Reuse finished trials with the same prefix and config (resumes a sweep)")
+            cfg_frame, variable=self.tune_skip_done_var, command=self.tune_update_summary,
+            text="Reuse results AIboy already knows for the same settings (also resumes a sweep)")
         skip_cb.grid(row=5, column=0, columnspan=4, sticky="w", pady=(4, 0))
         self._tune_config_widgets.append(skip_cb)
         self.tune_baseline_var = tk.BooleanVar(value=True)
@@ -664,24 +698,27 @@ class GameBoyAIGUI:
         ttk.Label(sweep_frame, text="Template:").grid(row=0, column=0, sticky="w")
         self.tune_template_var = tk.StringVar(value=tuning.DEFAULT_TEMPLATE)
         tmpl_combo = ttk.Combobox(sweep_frame, textvariable=self.tune_template_var,
-                                  values=list(tuning.SWEEP_TEMPLATES), state="readonly")
+                                  values=list(tuning.SWEEP_TEMPLATES), state="readonly", width=30)
         tmpl_combo.grid(row=0, column=1, sticky="ew", padx=6)
         tmpl_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_tune_template())
         self.btn_tune_template = ttk.Button(sweep_frame, text="Reset to template",
                                             command=self.apply_tune_template)
         self.btn_tune_template.grid(row=0, column=2)
-        self._tune_config_widgets.extend([tmpl_combo, self.btn_tune_template])
+        self.btn_tune_suggest = ttk.Button(sweep_frame, text="Suggest from experience",
+                                           command=self.tune_suggest)
+        self.btn_tune_suggest.grid(row=0, column=3, padx=(4, 0))
+        self._tune_config_widgets.extend([tmpl_combo, self.btn_tune_template, self.btn_tune_suggest])
         self.tune_template_note = ttk.Label(sweep_frame, text="", foreground=THEME.muted,
                                             wraplength=620)
-        self.tune_template_note.grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 4))
+        self.tune_template_note.grid(row=1, column=0, columnspan=4, sticky="w", pady=(2, 4))
 
         self.tune_sweep_text = tk.Text(sweep_frame, height=5, wrap="word", font=MONO, undo=True)
-        self.tune_sweep_text.grid(row=2, column=0, columnspan=3, sticky="ew")
+        self.tune_sweep_text.grid(row=2, column=0, columnspan=4, sticky="ew")
         self.tune_sweep_text.bind("<<Modified>>", self._on_sweep_modified)
         self._tune_config_widgets.append(self.tune_sweep_text)
 
         search_row = ttk.Frame(sweep_frame)
-        search_row.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        search_row.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(4, 0))
         self.tune_search_type_var = tk.StringVar(value="grid")
         rb_grid = ttk.Radiobutton(search_row, text="Grid (all combinations)",
                                   variable=self.tune_search_type_var, value="grid",
@@ -700,7 +737,7 @@ class GameBoyAIGUI:
         self.tune_summary_var = tk.StringVar(value="")
         self.tune_summary_label = ttk.Label(sweep_frame, textvariable=self.tune_summary_var,
                                             font=MONO, wraplength=640)
-        self.tune_summary_label.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self.tune_summary_label.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
         self._tune_config_widgets.extend([rb_grid, rb_random, n_random_spin])
 
         ctrl = ttk.Frame(parent)
@@ -757,22 +794,19 @@ class GameBoyAIGUI:
         self._rescore_results(metric)
 
     def _rescore_results(self, metric: str) -> None:
-        """Recompute every finished config's score from its trial files.
-        Configs whose run folders were pruned keep their current values."""
+        """Recompute every config's score under `metric` from the eval
+        histories stored with the results (no run folder needed). Results
+        loaded from an old file without histories keep their numbers."""
+        stale = 0
         for res in self._tune_results.values():
-            if res.pruned:
-                continue
-            values, ep_lens = [], []
-            for run_name in res.runs:
-                run_dir = runs.run_paths(self.game, run_name)["base"]
-                m = tuning.read_trial_metrics(
-                    run_dir / "logs" / "evaluations.npz",
-                    duration=tuning.trial_duration(run_dir, res.config, res.timesteps or 1))
-                if m is not None:
-                    values.append(m.by_name(metric))
-                    ep_lens.append(m.ep_len)
-            res.metric, res.values, res.ep_lens = metric, values, ep_lens
+            if res.records:
+                res.rescore(metric)
+            else:
+                stale += 1
         self.render_tune_results()
+        if stale:
+            self.tune_live_var.set(f"{stale} result(s) come from an older file and keep their "
+                                   f"original metric")
         if self.wizard is not None:
             self.wizard.on_tune_result()
 
@@ -783,11 +817,46 @@ class GameBoyAIGUI:
         sweep = tuning.SWEEP_TEMPLATES.get(name)
         if sweep is None:
             return
-        self.tune_sweep_text.delete("1.0", "end")
-        self.tune_sweep_text.insert("1.0", json.dumps(sweep, indent=2))
+        self.set_sweep(sweep, tuning.TEMPLATE_NOTES.get(name, ""))
+
+    def set_sweep(self, sweep, note: str) -> None:
+        """Put a grid or a candidate list into the sweep editor."""
+        text = json.dumps(sweep, indent=2) if isinstance(sweep, dict) else json.dumps(sweep)
+        if self.tune_sweep_text.get("1.0", "end").strip() != text:
+            self.tune_sweep_text.delete("1.0", "end")
+            self.tune_sweep_text.insert("1.0", text)
         self.tune_sweep_text.edit_modified(False)
-        self.tune_template_note.config(text=tuning.TEMPLATE_NOTES.get(name, ""))
+        self.tune_template_note.config(text=note)
         self.tune_update_summary()
+
+    def tune_suggest(self) -> None:
+        """Fill the sweep with untested variations around the best known
+        settings of the base preset (or around the preset itself)."""
+        plan, err = self.tune_plan()
+        base = self._all_presets.get(self.tune_preset_var.get())
+        if base is None:
+            messagebox.showwarning("Tune", "Pick a base preset first.")
+            return
+        try:
+            trial_steps = int(self.tune_trial_steps_var.get())
+            n_seeds = max(1, int(self.tune_seeds_var.get()))
+        except (tk.TclError, ValueError):
+            messagebox.showwarning("Tune", "Steps / trial and seeds must be whole numbers.")
+            return
+        know = self.experience.best_for_task(tuning.trial_config(base, {}, trial_steps))
+        combos = self.experience.suggest(base, trial_steps, n_seeds, 6, tuning.METRIC_LATE, know)
+        if not combos:
+            self.flash("Nothing left to suggest: every nearby variation is already known.")
+            return
+        if know is not None:
+            around = tuning.describe_overrides(
+                tuning.config_diff(know.config, tuning.full_config(base, {}))) or "the preset itself"
+            note = (f"{len(combos)} untested variations around the best known settings "
+                    f"({around}, {know.n_trials} trials remembered, score {know.score:.0f}).")
+        else:
+            note = (f"No earlier trials of this task: {len(combos)} untested variations around "
+                    f"the preset's own settings.")
+        self.set_sweep(combos, note)
 
     def _on_sweep_modified(self, _event=None) -> None:
         if self.tune_sweep_text.edit_modified():
@@ -839,20 +908,24 @@ class GameBoyAIGUI:
         else:
             n_cfg, n_seeds = len(plan["combos"]), plan["n_seeds"]
             n_trials = n_cfg * n_seeds
-            eta = tuning.estimate_seconds(n_trials, plan["trial_steps"], plan["base"])
+            known = self.known_trials(plan)
+            fps = self.fps_for(tuning.trial_config(plan["base"], {}, plan["trial_steps"]))
+            eta = tuning.estimate_seconds(n_trials - known, plan["trial_steps"], plan["base"], fps)
             seeds_txt = f" × {n_seeds} seeds" if n_seeds > 1 else ""
             base_txt = " (incl. base preset)" if self.tune_baseline_var.get() else ""
+            known_txt = f", {known} already known" if known else ""
             self.tune_summary_var.set(
-                f"{n_cfg} configs{base_txt}{seeds_txt} = {n_trials} trials · "
-                f"≈ {tuning.format_duration(eta)}")
+                f"{n_cfg} configs{base_txt}{seeds_txt} = {n_trials} trials{known_txt} · "
+                f"≈ {tuning.format_duration(eta)}" + (" (measured speed)" if fps else ""))
             self.tune_summary_label.config(foreground=THEME.text_soft)
         if self.wizard is not None:
             self.wizard.on_tune_plan_changed()
 
     # ---------- Tuning: execution ----------
 
-    def start_tuning(self) -> bool:
-        """Start the sweep described by the Tune tab. Returns True if it started."""
+    def start_tuning(self, source: str = "tune") -> bool:
+        """Start the sweep described by the Tune tab. Returns True if it
+        started. `source` (tune | wizard) is recorded with every trial."""
         if self.tuning_active():
             messagebox.showwarning("Tune", "Tuning already running.")
             return False
@@ -867,10 +940,12 @@ class GameBoyAIGUI:
         if err:
             messagebox.showerror("Tune", f"Cannot start: {err}")
             return False
+        plan["source"] = source
         n_trials = len(plan["combos"]) * plan["n_seeds"]
-        if n_trials > 40 and not messagebox.askyesno(
-                "Tune", f"This sweep has {n_trials} trials (≈ "
-                        f"{tuning.format_duration(tuning.estimate_seconds(n_trials, plan['trial_steps'], plan['base']))}). "
+        to_train = n_trials - self.known_trials(plan)
+        if to_train > 40 and not messagebox.askyesno(
+                "Tune", f"This sweep trains {to_train} trials (≈ "
+                        f"{tuning.format_duration(tuning.estimate_seconds(to_train, plan['trial_steps'], plan['base'], self.fps_for(plan['base'])))}). "
                         f"Start anyway?"):
             return False
         if self.playing_active():
@@ -936,7 +1011,6 @@ class GameBoyAIGUI:
         rc = self.tune_proc.wait()
         self.tune_proc = None
         eta.trial_finished(time.time())
-        self._last_trial_seconds = eta.durations[-1] if eta.durations else 0.0
         return rc
 
     def _tuning_loop(self, plan: dict) -> None:
@@ -954,6 +1028,7 @@ class GameBoyAIGUI:
         trial_steps, n_seeds = plan["trial_steps"], plan["n_seeds"]
         prefix, metric = plan["prefix"], plan["metric"]
         game = plan["game"]          # resolved on the main thread; no Tk access here
+        source = plan.get("source", "tune")
         eval_freq = max(1000, trial_steps // plan["evals_per_trial"])
         total = len(combos) * n_seeds
         done_trials = 0
@@ -961,19 +1036,24 @@ class GameBoyAIGUI:
         out_path = tuning.results_file(PROJECT_DIR, game, prefix)
         meta = {"game": game, "base_preset": plan["preset_name"], "metric": metric,
                 "trial_steps": trial_steps, "seeds": n_seeds, "search": plan["search"],
-                "sweep": plan["sweep"]}
+                "sweep": plan["sweep"], "source": source}
         cancelled = False
+        exp = self.experience
+        exp.reload()
 
-        # Which planned trials already exist and will be reused (instant)?
-        # Knowing this up front keeps the ETA from counting them as work.
-        def _reusable(i: int, s: int, cfg: dict) -> bool:
-            run_dir = runs.run_paths(game, tuning.trial_run_name(prefix, i, s, n_seeds))["base"]
-            return plan["skip_done"] and tuning.trial_is_complete(run_dir, trial_steps, cfg)
+        # Which planned trials does AIboy already know? Those are scored from
+        # memory (instant), so the ETA must not count them as work.
+        def _known(i: int, s: int) -> "Record | None":
+            if not plan["skip_done"]:
+                return None
+            return exp.find(tuning.trial_config(base, combos[i - 1], trial_steps, s))
 
-        planned = [(i, s, {**tuning.full_config(base, ov), "seed": int(base.get("seed", 0)) + s})
-                   for i, ov in enumerate(combos, start=1) for s in range(n_seeds)]
-        to_train = sum(0 if _reusable(i, s, cfg) else 1 for i, s, cfg in planned)
+        to_train = sum(0 if _known(i, s) else 1
+                       for i in range(1, len(combos) + 1) for s in range(n_seeds))
         eta = tuning.SweepEta(to_train, trial_steps)
+        if total - to_train:
+            self.stats_queue.put(("tune_status", f"{total - to_train} of {total} trials are already "
+                                                 f"known from earlier searches; not training them again"))
 
         for i, overrides in enumerate(combos, start=1):
             cfg = tuning.full_config(base, overrides)
@@ -984,47 +1064,46 @@ class GameBoyAIGUI:
                     cancelled = True
                     break
                 run_name = tuning.trial_run_name(prefix, i, s, n_seeds)
-                run_dir = runs.run_paths(game, run_name)["base"]
-                seed_cfg = {**cfg, "seed": int(cfg.get("seed", 0)) + s}
+                seed_cfg = tuning.trial_config(base, overrides, trial_steps, s)
                 label = f"config {i}/{len(combos)}" + (f" seed {s + 1}/{n_seeds}" if n_seeds > 1 else "")
                 self.stats_queue.put(("tune_progress", done_trials / total, f"{done_trials}/{total}",
                                       eta.between_trials()))
-                if plan["skip_done"] and tuning.trial_is_complete(run_dir, trial_steps, seed_cfg):
+                known = _known(i, s)
+                if known is not None:
                     res.reused += 1
-                    self.stats_queue.put(("tune_status", f"{label}: reusing finished run {run_name}"))
+                    res.add_record(known.to_dict())
+                    self.stats_queue.put(("tune_status", f"{label}: known from "
+                                                         f"{known.source} run '{known.run_name}' "
+                                                         f"({time.strftime('%Y-%m-%d', time.localtime(known.created_at))})"))
                 else:
                     cmd = runs.build_train_cmd(seed_cfg, run_name, timesteps=trial_steps,
-                                               checkpoint_freq=trial_steps, eval_freq=eval_freq)
-                    try:
-                        tuning.write_trial_manifest(run_dir, seed_cfg, trial_steps)
-                    except OSError as e:
-                        self.stats_queue.put(("tune_status", f"{label}: could not write manifest: {e}"))
+                                               checkpoint_freq=trial_steps, eval_freq=eval_freq,
+                                               source=source)
                     self.stats_queue.put(("tune_status", f"{label}: {res.label}  →  {run_name}"))
+                    started = time.time()
                     rc = self._run_trial(cmd, label, trial_steps, done_trials, total, eta)
                     if self.tune_stop.is_set():
                         cancelled = True
                         break
                     if rc not in (0, None):
                         self.stats_queue.put(("tune_status", f"{label}: trainer exited with rc={rc}"))
-                    try:
-                        tuning.finish_trial_manifest(run_dir, self._last_trial_seconds)
-                    except OSError:
-                        pass
                     # Scoring needs only logs/ (eval history, best model).
                     runs.slim_trial_run(game, run_name)
-                m = tuning.read_trial_metrics(
-                    run_dir / "logs" / "evaluations.npz",
-                    duration=tuning.trial_duration(run_dir, seed_cfg, trial_steps))
-                if m is not None:
-                    res.values.append(m.by_name(metric))
-                    res.ep_lens.append(m.ep_len)
-                    res.timesteps = m.timesteps
-                else:
-                    self.stats_queue.put(("tune_status", f"{label}: no evaluations.npz in {run_name}"))
-                res.runs.append(run_name)
+                    exp.reload()
+                    record = exp.latest_for_run(run_name, since=started - 1.0)
+                    if record is None:
+                        self.stats_queue.put(("tune_status", f"{label}: no result was recorded for "
+                                                             f"{run_name} (see the log above)"))
+                    else:
+                        res.add_record(record.to_dict())
+                        if not record.complete:
+                            self.stats_queue.put(("tune_status", f"{label}: {run_name} did not finish; "
+                                                                 f"its partial score is shown but "
+                                                                 f"will not be reused"))
+                    res.runs.append(run_name)
                 done_trials += 1
             res.duration = time.time() - t0
-            if res.runs:
+            if res.records or res.runs:
                 results.append(res)
                 # Keep only the best `keep_best` configs on disk; scores stay.
                 deleted = tuning.prune_trial_runs(results, plan["keep_best"], game, runs.delete_run)
@@ -1054,7 +1133,7 @@ class GameBoyAIGUI:
         for row in self.tune_tree.get_children():
             self.tune_tree.delete(row)
         for rank, r in enumerate(self.tune_results(), start=1):
-            run_txt = ", ".join(r.runs) + (f"  ({r.reused} reused)" if r.reused else "")
+            run_txt = ", ".join(r.runs) + (f"  ({r.reused} known)" if r.reused else "")
             if r.pruned:
                 run_txt += "  (deleted)"
             self.tune_tree.insert(
@@ -1425,7 +1504,8 @@ class GameBoyAIGUI:
         if self.playing_active():
             self.play_stop.set()
         run_name = self.run_name_var.get().strip() or "default"
-        cmd = runs.build_train_cmd(cfg, run_name, resume=bool(self.resume_var.get()))
+        cmd = runs.build_train_cmd(cfg, run_name, resume=bool(self.resume_var.get()),
+                                   source="train")
 
         self.append_log(f"$ {' '.join(cmd)}\n")
         try:
@@ -1685,6 +1765,7 @@ class GameBoyAIGUI:
             self.refresh_run_names()
             if self.wizard is not None:
                 self.wizard.on_tune_done(text, cancelled)
+            self.on_experience_changed()    # the trials were recorded; refresh notes and estimates
 
     def _update_train_progress(self, val: str) -> None:
         try:
@@ -1722,6 +1803,7 @@ class GameBoyAIGUI:
         self.preview_stop.set()
         self.refresh_models()       # new checkpoints may have arrived
         self.refresh_run_names()    # a new run dir may have appeared
+        self.on_experience_changed()    # the trainer recorded the run
         best = runs.best_model_for_run(self.game, self._train_run_name)
         if best is not None and self.select_model(best):
             self.flash(f"Run '{self._train_run_name}' {status} — its best model is selected on "
@@ -1752,6 +1834,8 @@ class GameBoyAIGUI:
             self.wizard.set_inputs_disabled(disabled)
         if self.presets_tab is not None:
             self.presets_tab.set_inputs_disabled(disabled)
+        if self.experience_tab is not None:
+            self.experience_tab.set_inputs_disabled(disabled)
 
     def open_tensorboard(self) -> None:
         """Serve models/<game>/ (every run, incl. tune trials) and open a browser tab."""
@@ -1829,7 +1913,7 @@ def run() -> None:
     os.chdir(PROJECT_DIR)
     root = tk.Tk()
     root.report_callback_exception = _report_callback_exception
-    GameBoyAIGUI(root)
+    AIboyGUI(root)
     root.mainloop()
 
 

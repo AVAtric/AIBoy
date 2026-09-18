@@ -13,9 +13,9 @@ import tkinter as tk
 from dataclasses import dataclass
 from tkinter import ttk
 
-from games import OBS_TYPES, level_choices
-from presets import DEFAULT_CONFIG
-from runs import cpu_count
+from aiboy.games import OBS_TYPES, level_choices
+from aiboy.presets import DEFAULT_CONFIG
+from aiboy.runs import cpu_count
 
 MONO = ("Menlo", 10)
 MONO_BOLD = ("Menlo", 11, "bold")

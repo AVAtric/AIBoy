@@ -1,4 +1,4 @@
-"""PyBoy gym environment factory for Game Boy AI training."""
+"""The Super Mario Land Gymnasium environment AIboy trains in (PyBoy underneath)."""
 from __future__ import annotations
 
 import random as _random_mod
@@ -13,7 +13,7 @@ from stable_baselines3.common.vec_env import VecEnv, VecFrameStack, VecTranspose
 
 # Light, emulator-free facts live in games.py; re-exported here so existing
 # `from env import ...` call sites keep working.
-from games import (  # noqa: F401
+from aiboy.games import (  # noqa: F401
     ADDR_GAME_STATE, ADDR_POWERUP_STATE, ADDR_SUPERBALL, DEFAULT_STALL_STEPS, DEFAULT_TIME_BUDGET,
     GAMES, LEVEL_MODES, LEVEL_STATES_DIR, TIMER_START,
     MULTI_LEVEL_MODES, OBS_TYPES, POWER_NAMES, POWER_SMALL, POWER_SUPER, POWER_SUPERBALL,

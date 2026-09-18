@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import runs
+from aiboy import runs
 
 
 class RunDiscoveryTests(unittest.TestCase):
@@ -83,7 +83,7 @@ class RunDiscoveryTests(unittest.TestCase):
             self.assertEqual(runs.redundant_checkpoints("mario", "missing", root), [])
 
     def test_build_train_cmd_accepts_sparse_normalized_preset(self):
-        import presets
+        from aiboy import presets
         cmd = runs.build_train_cmd(presets.normalize({"game": "mario"}), "r")
         self.assertEqual(cmd[cmd.index("--n-envs") + 1], str(presets.DEFAULT_CONFIG["n_envs"]))
 
@@ -163,6 +163,9 @@ class RunDiscoveryTests(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--stall-steps") + 1], "0")
         self.assertEqual(cmd[cmd.index("--run-name") + 1], "run1")
         self.assertNotIn("--resume", runs.build_train_cmd(cfg, "run1"))
+        self.assertNotIn("--source", cmd)
+        tagged = runs.build_train_cmd(cfg, "run1", source="wizard")
+        self.assertEqual(tagged[tagged.index("--source") + 1], "wizard")
 
 
 if __name__ == "__main__":

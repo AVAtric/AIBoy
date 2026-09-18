@@ -1,7 +1,7 @@
 import unittest
 
-import env
-import games
+from aiboy import env
+from aiboy import games
 
 
 class LevelSpecTests(unittest.TestCase):
@@ -36,20 +36,25 @@ class LevelSpecTests(unittest.TestCase):
         self.assertIs(env.GAMES, games.GAMES)          # env re-exports games.py
 
     def test_light_modules_have_no_heavy_top_level_imports(self):
-        """The GUI must open without loading PyBoy / SB3 / torch."""
+        """The GUI must open without loading PyBoy / SB3 / torch, and the
+        helper sub-commands must start fast: only the trainer and env.py may
+        import the heavy libraries, and only inside functions."""
         import ast
-        heavy = {"torch", "pyboy", "stable_baselines3", "env"}
-        for mod in ("games", "presets", "runs", "tuning", "widgets", "player", "gui",
-                    "wizard", "presets_tab"):
-            tree = ast.parse(open(f"{mod}.py").read())
+        from pathlib import Path
+        heavy = {"torch", "pyboy", "stable_baselines3", "aiboy.env", "env"}
+        light = [Path("aiboy") / f"{m}.py" for m in ("games", "presets", "runs", "tuning",
+                                                     "experience", "cli", "paths")]
+        light += sorted(Path("aiboy/gui").glob("*.py"))
+        for path in light:
+            tree = ast.parse(path.read_text())
             for node in tree.body:                      # module level only
                 names = []
                 if isinstance(node, ast.Import):
-                    names = [a.name.split(".")[0] for a in node.names]
+                    names = [a.name for a in node.names]
                 elif isinstance(node, ast.ImportFrom) and node.module:
-                    names = [node.module.split(".")[0]]
-                bad = heavy & set(names)
-                self.assertFalse(bad, f"{mod}.py imports {bad} at module level")
+                    names = [node.module]
+                bad = {n for n in names if n in heavy or n.split(".")[0] in heavy}
+                self.assertFalse(bad, f"{path} imports {bad} at module level")
 
 
 class ObservationTests(unittest.TestCase):
@@ -184,8 +189,8 @@ class ObservationTests(unittest.TestCase):
 
 class FormFieldTests(unittest.TestCase):
     def test_form_fields_match_preset_fields(self):
-        import widgets
-        import presets
+        from aiboy.gui import widgets
+        from aiboy import presets
         keys = {f.key for f in widgets.FIELDS}
         self.assertEqual(keys, set(presets.PRESET_FIELDS) - {"game"})
         for f in widgets.FIELDS:

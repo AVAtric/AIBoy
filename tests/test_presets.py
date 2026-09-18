@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import presets
+from aiboy import presets
 
 
 class PresetTests(unittest.TestCase):

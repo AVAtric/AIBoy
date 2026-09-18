@@ -2,13 +2,15 @@
 
 Two layouts are supported:
 
-  source tree          everything is next to this file: ROMs/, models/, assets/,
-                       builtin_presets.json, training_presets.json
+  source tree          the project folder holds aiboy/ (the code) next to
+                       ROMs/, models/, assets/, builtin_presets.json,
+                       training_presets.json and experience.jsonl
   frozen release       (built by build_release.py with PyInstaller) the code and
                        the read-only files (assets/, builtin_presets.json,
                        system_profile.json) live inside the bundle; the user's
-                       files (ROMs/, models/, training_presets.json, the error
-                       log) live next to the app so they survive an update.
+                       files (ROMs/, models/, training_presets.json,
+                       experience.jsonl, the error log) live next to the app so
+                       they survive an update.
 
 Every entry point makes DATA_DIR the working directory, so the relative
 `ROMs/` and `models/` paths used throughout keep working in both layouts.
@@ -26,14 +28,18 @@ if FROZEN:
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
     _exe = Path(sys.executable).resolve()
     if _exe.parent.name == "MacOS" and len(_exe.parents) > 3 and _exe.parents[2].suffix == ".app":
-        DATA_DIR = _exe.parents[3]          # the folder that holds GameBoyAI.app
+        DATA_DIR = _exe.parents[3]          # the folder that holds AIboy.app
     else:
         DATA_DIR = _exe.parent              # onedir build on Windows / Linux
 else:
-    BUNDLE_DIR = Path(__file__).resolve().parent
+    BUNDLE_DIR = Path(__file__).resolve().parents[1]     # the project folder (aiboy/ is inside it)
     DATA_DIR = BUNDLE_DIR
 
 PROFILE_FILE = BUNDLE_DIR / "system_profile.json"
+
+# Everything AIboy has learned from its trials and runs (see experience.py).
+# Tests point this at a scratch file so they never touch the real memory.
+EXPERIENCE_FILE = Path(os.environ.get("AIBOY_EXPERIENCE_FILE") or DATA_DIR / "experience.jsonl")
 
 
 def app_command(*args: str) -> list[str]:

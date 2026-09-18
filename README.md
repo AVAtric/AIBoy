@@ -1,32 +1,41 @@
-# gameboyEnv — teach an AI to play Super Mario Land
+# AIboy — teach an AI to play Super Mario Land, and let it learn from every try
 
-Train a reinforcement-learning agent to play **Super Mario Land** on an
-emulated Game Boy, then watch it play. [PyBoy](https://github.com/Baekalfen/PyBoy)
+AIboy trains a reinforcement-learning agent to play **Super Mario Land** on
+an emulated Game Boy, then shows it playing. [PyBoy](https://github.com/Baekalfen/PyBoy)
 is the emulator, [Stable-Baselines3](https://stable-baselines3.readthedocs.io/)
-PPO is the learner, and a Tkinter desktop app wraps the whole workflow:
+PPO is the learner, and a desktop app wraps the whole workflow in plain
+language:
 
 ```
 Wizard:  1 Set up  →  2 Save  →  3 Train  →  4 Watch
 ```
+
+**AIboy remembers.** Every short test and every training run it finishes is
+written to its experience file. The next search skips settings it already
+knows, explores untested ones around the best it has found, and estimates
+time from the speed this computer really reached. The more you use it, the
+less it repeats and the better its starting point.
 
 The window has two halves: **workflow tabs on the left, the Game Boy screen
 on the right**. Whatever produces something to watch (a finished model, the
 live preview of a training run, the wizard's final step) shows on that
 screen without switching tabs.
 
-- **Wizard** — a guided path in plain language: pick what the agent should
-  learn, let the app try a few variations of the settings and keep the
-  best, train, watch. One Start button runs the whole pipeline. No
-  knowledge of PPO needed; the expert vocabulary stays on the other tabs.
+- **Wizard** — pick what the agent should learn, let AIboy look for better
+  settings, train, watch. One Start button runs the whole pipeline. No
+  knowledge of PPO needed.
 - **Train** — one headless training run with the full log, TensorBoard,
-  resume, and an optional live preview; status, progress and ETA are
-  always visible under the screen.
-- **Tune** — hyperparameter sweeps (grid or random, multi-seed) with a
-  best-first results table; any row becomes a preset.
+  resume, and an optional live preview.
+- **Tune** — hyperparameter sweeps (grid, random, or an explicit list of
+  candidates) with a best-first results table; known results are reused.
 - **Presets** — browse, create, edit, rename and delete training presets.
+- **Experience** — everything AIboy has tried, what scored best, and how
+  each setting's values compared.
 - **Screen panel** — plays any saved model at 0.5× to unlimited speed with
   the settings it was trained with, filled in automatically.
 - **CLI** — `train` and `play` sub-commands for scripts and remote machines.
+- **One-command build** — `python build_release.py` packages a standalone
+  app for the computer it runs on (macOS, Windows or Linux).
 
 Only Super Mario Land is supported in this version; see [Roadmap](#roadmap).
 
@@ -35,11 +44,11 @@ Only Super Mario Land is supported in this version; see [Roadmap](#roadmap).
 ## Install
 
 Requirements: Python 3.10+, macOS / Linux / Windows, no GPU needed, a
-display of at least 1366 × 960 for the GUI (the window is 1300 × 900). The
-GUI follows the system appearance (light or dark).
+display of at least 1366 × 960 for the app (the window is 1300 × 900). The
+app follows the system appearance (light or dark).
 
 ```bash
-git clone <this repo> gameboyEnv && cd gameboyEnv
+git clone <this repo> aiboy && cd aiboy
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
@@ -54,6 +63,9 @@ Then start the app:
 python main.py
 ```
 
+Prefer a double-clickable app without Python? See
+[Build your own app](#build-your-own-app).
+
 ## Quick start (the wizard)
 
 The window opens on the **Wizard** tab. It asks three plain questions and
@@ -61,26 +73,35 @@ then does the work:
 
 1. **Set up.**
    - *What should it learn?* A **goal** such as `Mario — Campaign,
-     recommended (~15 min)`. The line under it says in plain words what
-     the agent will do and how long training takes on this computer.
+     recommended (~15 min)`. Under it, one line says in plain words what the
+     agent will do and how long training takes on this computer, and a
+     second line says what AIboy already knows about this goal ("Best known
+     settings so far: curiosity 0.03 · learning speed 0.0003 (score 850,
+     from 12 short tests)", or "AIboy has not tried this goal yet").
    - *Look for better settings first?* **Yes** (recommended) tries a few
-     variations of the goal's settings and keeps the best one. *Vary*
-     picks what to vary, described in plain terms (`Curiosity × learning
-     speed — the two that matter most`); *Effort* is Quick / Normal /
-     Thorough (how many times and how long each variation is trained;
-     Normal trains every variation twice for 5% of the goal's length).
-     **Advanced…** exposes the raw steps and seeds. The goal's own settings
-     always take part, and a variation wins only if it clearly beats them.
-     **No** trains the goal's settings as they are.
+     variations of the goal's settings and keeps the best one. *Vary* picks
+     what to vary. The default, **Let AIboy choose**, uses the experience:
+     the first time it runs the standard search (curiosity × learning
+     speed); variations it already knows are scored from memory instead of
+     trained; once the standard search is exhausted it explores untested
+     changes around the best known settings. The other choices are fixed
+     sets described in plain terms (`Learning speed only`, `How far ahead
+     it plans`, …). *Effort* is Quick / Normal / Thorough (how many times
+     and how long each variation is trained; Normal trains every variation
+     twice for 5 % of the goal's length). **Advanced…** exposes the raw
+     steps and seeds. The goal's own settings always take part, and a
+     variation wins only if it clearly beats them. **No** trains the goal's
+     settings as they are.
    - *Then:* **run everything by itself** (on by default) chains search →
      save → train → watch without further clicks; **show it playing while
      it trains** turns on the live preview.
 
-   The **Plan** line sums it up ("try 6 variations plus the goal's own
-   settings (14 short training runs, about 9 min), then train for about
-   10 min with the winner"). Press **▶ Start**. With the automatic run
-   the next thing to do is come back to a playing agent; otherwise the
-   result appears in the table and **Continue with the best →** moves on.
+   The **Plan** line sums it up: "try 6 variations plus the goal's own
+   settings (14 short training runs, 9 already known, about 3 min), then
+   train for about 10 min with the winner". Press **▶ Start**. With the
+   automatic run the next thing to do is come back to a playing agent;
+   otherwise the result appears in the table and **Continue with the best
+   →** moves on.
 2. **Save.** Review the settings (values found by the search are
    highlighted, fields carry their plain labels). The suggested name is
    the goal plus the tuned values, e.g. `Campaign, recommended · ent 0.03
@@ -98,15 +119,71 @@ then does the work:
 Everything the wizard does is visible on the expert tabs: the sweep on
 **Tune** (with the expert names: the wizard's "curiosity" is `ent_coef`,
 "learning speed" is `learning_rate`, and so on), the log on **Train**, the
-model on the screen panel. Training status, progress, ETA, reward and fps
-are always shown under the Game Boy screen, whatever tab is open.
+model on the screen panel, and every result on **Experience**. Training
+status, progress, ETA, reward and fps are always shown under the Game Boy
+screen, whatever tab is open.
+
+### How AIboy learns
+
+Every `train` process (a wizard search trial, a Tune sweep trial, a Train
+tab run, a CLI run) appends one line to **`experience.jsonl`** when it
+ends: the complete configuration, the evaluation history (steps, mean
+reward and episode length at every evaluation), the wall-clock duration,
+who started it and whether it finished. The file lives next to the user's
+other data (the project folder, or the folder next to the built app), is
+git-ignored, and can be inspected with any text editor.
+
+From those records AIboy answers four questions:
+
+- **Do I already know this?** Two records are the same experiment when
+  every outcome-deciding field matches: game, observation type, level
+  mode, action repeat, frame stack, attempt limits, trial length, number of
+  emulators, all PPO hyperparameters, and the seed. A sweep that plans such
+  a trial takes the stored result instead of training (the results table
+  marks it *known*). This works across sweeps and wizard runs, whatever
+  they were called, and after the run folders were deleted. Interrupted,
+  resumed or unfinished runs are remembered but never reused.
+- **What worked best for this goal?** Trials are compared only within a
+  *task*: same game, observation type, level mode, attempt limits and
+  trial length (a marathon reward and a campaign reward mean different
+  things, and so do 50 k and 500 k-step tests). Seeds of the same settings
+  are averaged.
+- **What should I try next?** *Let AIboy choose* runs the standard search
+  until at least half of it is known, then proposes untested single-step
+  changes around the best known settings: learning rate and curiosity
+  ×/÷ 2, rollout length and batch size ×/÷ 2, epochs, discount, clip and
+  GAE lambda one rung up or down a ladder. Moves that step back onto the
+  goal's own value, and settings already known, are skipped; if the near
+  neighbourhood is exhausted it takes two-step moves. The incumbent (best
+  known) settings are always among the candidates, at no cost, so the
+  winner is the best of old and new. Repeated wizard runs therefore climb:
+  each one starts from the best of all previous ones.
+- **How fast is this computer?** The median steps per second of the last
+  runs with the same game, observation type and number of emulators
+  replaces the built-in Apple-Silicon guess in every time estimate
+  ("measured speed" is shown next to estimates that use it).
+
+The **Experience** tab shows every record for the selected game (newest
+first, unfinished ones greyed, real training runs highlighted), a summary
+line (tests, runs, hours of compute remembered) and, for the selected
+row's task, what AIboy concluded: the best known settings and, per knob,
+the mean score of every value tried. **Load into Train tab** and **Save as
+preset…** reuse a row's settings; **Forget selected…** and **Forget all…**
+delete records (models, presets and run folders are never touched).
+
+Scores are only comparable while the game logic stays the same, so every
+record carries `ENV_VERSION` (`aiboy/games.py`). Changing the reward, the
+observation cells or the level modes means bumping that constant: older
+records are still shown, marked as belonging to an older version, and are
+never reused or compared.
 
 ### Running overnight
 
-1. Goal `Mario — Marathon, overnight (~8 h)`, keep *Yes* and the default
-   variation set, leave **run everything by itself** ticked (and tick the
-   live preview if you want to watch), press **Start**. Expect about 1.5 h
-   of search (6 variations plus the goal's settings × 2 seeds × 1 M steps)
+1. Goal `Mario — Marathon, overnight (~8 h)`, keep *Yes* and *Let AIboy
+   choose*, leave **run everything by itself** ticked (and tick the live
+   preview if you want to watch), press **Start**. Expect about 1.5 h of
+   search the first time (6 variations plus the goal's settings × 2 seeds ×
+   1 M steps; less on later nights, because AIboy skips what it knows)
    followed by the 60 M-step training; the ETA is under the screen.
 2. On a Mac the app prevents idle sleep while training or tuning runs
    (`caffeinate`); the display may still turn off. Do not close the lid.
@@ -132,12 +209,14 @@ and the label next to the selector shows the result:
   or corrupt file, or a `mario.gb` that is not the expected cartridge.
 
 Start buttons are disabled unless the selected game is supported. Runs,
-models and presets are listed per game. **Rescan ROMs** re-reads the folder.
+models, presets and experience are listed per game. **Rescan ROMs**
+re-reads the folder.
 
 ### How long does it take?
 
 Rough numbers on an Apple M1 Max with tile observations and 10 parallel
-emulators (~3 000–3 500 env steps/s):
+emulators (~3 000–3 500 env steps/s); after the first runs the app shows
+estimates measured on your own computer instead:
 
 | Steps          | What you get                                             | Time     |
 |----------------|----------------------------------------------------------|----------|
@@ -152,41 +231,50 @@ bad settings on the campaign; use 500 k+ for random / sequential sweeps.
 
 ---
 
-## The GUI in detail
+## The app in detail
 
 ### Tune tab
 
 Every trial is a `main.py train` subprocess of *Steps / trial* env steps,
-scored from its `evaluations.npz` with the same eval cadence (*Evals /
+scored from its evaluation history with the same eval cadence (*Evals /
 trial*). Trials are named `<prefix>-<config>[-s<seed>]` under `models/mario/`.
 
 - **Base preset** — the config every trial starts from; the sweep only
   overrides the listed fields. **Include the base preset** (default on)
   adds it unchanged as candidate 1, so a sweep can only "win" by beating
   what you already had.
-- **Sweep template** — curated sweeps for Mario with tile observations, each
-  with a one-line rationale. The JSON is editable and validated live:
-  `{"param": [values, …]}` over `learning_rate, ent_coef, n_steps,
+- **Sweep** — a template (curated sweeps for Mario with tile observations,
+  each with a one-line rationale), or hand-edited JSON, validated live.
+  Two forms: a grid `{"param": [values, …]}` and an explicit candidate list
+  `[{"param": value, …}, …]`, over `learning_rate, ent_coef, n_steps,
   batch_size, n_epochs, gamma, gae_lambda, clip_range, n_envs,
-  action_repeat, frame_stack, obs_type, start_level, device`.
-- **Grid or Random** — grid runs every combination; random draws N distinct
-  ones. The random sample is seeded from the sweep text, so re-running the
-  same sweep yields the same candidates (this is what makes resuming safe).
+  action_repeat, frame_stack, obs_type, start_level, device, time_budget,
+  stall_steps`. **Suggest from experience** fills in up to six untested
+  variations around the best known settings of the base preset's task (or
+  around the preset itself when nothing is known yet).
+- **Grid or Random** — grid runs every combination (or every listed
+  candidate); random draws N distinct ones. The random sample is seeded
+  from the sweep text, so re-running the same sweep yields the same
+  candidates.
 - **Seeds / config** — PPO varies a lot between seeds; with 2–3 seeds the
   table shows `mean ± std`.
 - **Metric** — **late eval reward** (average of the last third of the
   evaluations, at least two; the most reliable predictor of a long run and
-  the wizard's choice), best, final or mean evaluation reward, or **reward per
-  compute-minute**: best reward divided by the trial's measured wall-clock
-  minutes, so candidates that learn slightly better but train slower (more
-  epochs, smaller batches, pixel observations) are ranked by what each
-  minute of compute actually bought. Negative rewards count as zero.
-  Switching the metric re-ranks the results already in the table; the time
-  of each trial is recorded in its `trial.json` (trials from before this
-  was recorded use the throughput estimate).
-- **Reuse finished trials** — a trial whose run directory already reached
-  its target *and* whose recorded config (`trial.json`) matches is reused
-  instead of retrained. Stop a sweep and start it again to resume.
+  the wizard's choice), best, final or mean evaluation reward, or **reward
+  per compute-minute**: best reward divided by the trial's measured
+  wall-clock minutes, so candidates that learn slightly better but train
+  slower are ranked by what each minute of compute actually bought.
+  Negative rewards count as zero. Switching the metric re-ranks the results
+  already in the table from their stored eval histories; no run folder is
+  needed.
+- **Reuse results AIboy already knows** — a planned trial whose settings,
+  seed and length match a finished record in the experience file is scored
+  from that record instead of trained. The summary says how many trials
+  are already known and the ETA counts only the rest. Stopping a sweep and
+  starting it again therefore resumes it.
+- **Winner rule** — the best candidate replaces the base preset only if it
+  leads by more than the seed spread of either and by at least 5 % of the
+  base preset's score; otherwise the base preset is kept.
 
 Results stream into the table and are saved to
 `models/mario/_tune/<prefix>.json` after every config (**Load results…**
@@ -213,7 +301,7 @@ always shows what is running.
 - **Show live preview** loads each new `best_model.zip` as it is saved and
   plays it on the screen panel while training continues (costs some fps).
   When a run ends, its best model is selected on the screen panel, ready
-  to play.
+  to play, and the run is added to the experience.
 - **Stop** sends the trainer an interrupt: it saves `checkpoints/final.zip`,
   closes its emulator workers and exits. `logs/best_model.zip` (best
   evaluation reward so far) is always kept.
@@ -235,55 +323,52 @@ Training artefacts are kept small automatically:
   Interrupted runs keep theirs for **Resume**. `best_model.zip` and
   `final.zip` are always kept. **Compact run…** on the Train tab applies
   the same rule to older runs.
-- **Tuning trials** keep only `logs/` (eval history, best model) and
-  `trial.json`; checkpoints and TensorBoard events go as soon as the trial
-  is scored.
+- **Tuning trials** keep only `logs/` (eval history, best model);
+  checkpoints and TensorBoard events go as soon as the trial is scored.
 - The status bar shows the size of `models/` and the number of runs.
 - **Sweeps**: while a sweep runs, only the run folders of the best N
   candidates are kept (Tune tab **Keep best N trial runs**, default 9; the
-  wizard uses 9). Their scores stay in the table and in the results file,
-  marked *(deleted)*.
-- **Wizard**: **Continue with best** and auto-complete delete all search
-  runs and the results file, because the saved preset carries everything
-  the training needs.
+  wizard uses 9). Their scores stay in the table, in the results file and
+  in the experience, marked *(deleted)* in the table.
+- **Wizard**: **Continue with best** and the automatic run delete all
+  search runs and the results file, because the saved preset carries
+  everything the training needs and the experience keeps the scores.
 
 Manual clean-up lives where the data was made: **Delete trial runs…** on
 the Tune tab removes every run of the current prefix plus its results
-file, **Clear previous search data…** on the wizard's first step does the
+file, **Delete old search runs…** on the wizard's first step does the
 same for the wizard's trials, and **Delete run…** on the Train tab removes
 the run named in the run field. Each asks first and shows the size it will
-free; saved presets are never touched. **Open folder** reveals a run in the
-file manager, and **Clear** on the screen panel blanks the emulator view.
+free; saved presets and the experience are never touched by these. **Open
+folder** reveals a run in the file manager, and **Clear** on the screen
+panel blanks the emulator view.
 
 ### Screen panel (right)
 
 When the app starts, the Game Boy screen plays the boot video from
 `assets/` with its sound, and then rests on the video's final logo frame
 with a "No video" line under it until a preview or a playback takes over.
-(The shipped clip shows an "AIboy" logo with a chime of our own; it is
+(The shipped clip shows the AIboy logo with a chime of our own; it is
 generated by `python tools/make_intro.py`. If files named
 `assets/orig_gb_intro.npz` / `.wav` are present they are used instead of
-`assets/gb_intro.*`, but the repo does not contain or provide such files and
-`.gitignore` keeps them out of it. To use a clip of your own put it at
-`assets/gb_intro.mp4` and run `python tools/build_intro.py`, which needs
-ffmpeg, to regenerate the frame and sound files the app actually uses. Set
-`GAMEBOY_NO_INTRO=1` to start silently.) Below the screen: the **live episode** (episode, world, power-up,
-reward, position, lives, steps, coins, action) with a status line that
-says how each episode ended (died in 1-2, time budget used up, step cap,
-completed every level); the **training** block with status, progress bar,
-ETA, reward, episode length, fps and elapsed time, visible from every tab;
-and the controls to **play a model**: the
-model dropdown lists every `best`, `final` and step snapshot of every run,
-plus episodes and speed (`0.5×` … `4×`, `Unlimited`), and **Clear** to blank
-the view. Speed is paced per
-emulator frame, so real time is real time even though a jump holds the
-button for 10 frames and a walk step for 4. Selecting a model
-applies the observation settings recorded in its `run.json`; **Advanced…**
-opens max steps, stochastic actions, the **marathon demo** switch (after a
-death, an exhausted time budget or a stall the demo continues with the next
-level so it shows the whole game; off gives the strict one-life marathon)
-and the observation setup for
-models from older runs without that file.
+`assets/gb_intro.*`; the repo does not contain such files and `.gitignore`
+keeps them out. To use a clip of your own put it at `assets/gb_intro.mp4`
+and run `python tools/build_intro.py`, which needs ffmpeg. Set
+`AIBOY_NO_INTRO=1` to start silently.) Below the screen: the **live
+episode** (episode, world, power-up, reward, position, lives, steps, coins,
+action) with a status line that says how each episode ended; the
+**training** block with status, progress bar, ETA, reward, episode length,
+fps and elapsed time, visible from every tab; and the controls to **play a
+model**: the model dropdown lists every `best`, `final` and step snapshot
+of every run, plus episodes and speed (`0.5×` … `4×`, `Unlimited`), and
+**Clear** to blank the view. Speed is paced per emulator frame, so real
+time is real time even though a jump holds the button for 10 frames and a
+walk step for 4. Selecting a model applies the observation settings
+recorded in its `run.json`; **Advanced…** opens max steps, stochastic
+actions, the **marathon demo** switch (after a death, an exhausted time
+budget or a stall the demo continues with the next level so it shows the
+whole game; off gives the strict one-life marathon) and the observation
+setup for models from older runs without that file.
 
 ### Presets tab
 
@@ -294,8 +379,8 @@ Every preset is editable:
 - **built-in** presets keep their shipped values behind your edits. Saving
   stores your version (the row turns *modified*); **Reset to default**
   brings the shipped values back.
-- **user** presets (created here, on the Train tab or by the wizard) can be
-  edited, renamed and deleted.
+- **user** presets (created here, on the Train tab, on the Experience tab
+  or by the wizard) can be edited, renamed and deleted.
 
 **New…** creates a preset from the selected one, **New from Train tab…**
 from the Train tab's current fields, **Duplicate…** copies. Double-click a
@@ -314,7 +399,8 @@ python main.py gui
 ```
 
 Paths are relative to the project directory regardless of where you run
-the command from.
+the command from. Every `train` is recorded in `experience.jsonl` when it
+ends (with `--source cli` unless told otherwise).
 
 ### `train` flags
 
@@ -330,6 +416,7 @@ the command from.
 | `--device`          | cpu     | `cpu` (recommended for tiles), `cuda`, `mps`, `auto`         |
 | `--resume`          | off     | Continue from newest `models/mario/<run>/checkpoints/*.zip`  |
 | `--run-name`        | default | Sub-directory under `models/mario/`                          |
+| `--source`          | cli     | `cli` / `train` / `tune` / `wizard`: who started the run (experience record) |
 | `--checkpoint-freq` | 25000   | Env steps between checkpoints                                |
 | `--keep-checkpoints`| 5       | Newest step snapshots kept per run (0 = all)                 |
 | `--eval-freq`       | 10000   | Env steps between evaluations                                |
@@ -365,7 +452,7 @@ the model was trained with.
 
 ## How it works
 
-### The Mario environment (`env.py`)
+### The Mario environment (`aiboy/env.py`)
 
 `MarioEnv` wraps PyBoy's Super Mario Land game wrapper as a Gymnasium env.
 
@@ -407,6 +494,9 @@ the model was trained with.
   furthest x) is off by default; set it, e.g. to 200, for the old
   fast-fail behaviour. Both are preset fields and recorded per run.
 
+Any change to the above changes what a score means: bump `ENV_VERSION` in
+`aiboy/games.py` so old experience records are not compared with new ones.
+
 ### Level modes (`--start-level`)
 
 | Mode         | Episode ends on                       | Use it for                              |
@@ -425,9 +515,9 @@ skipped by every mode.
 **A marathon is one continuous run, not one run per level.** The episode
 starts in a level; the moment Mario touches the goal the next level's
 save-state is loaded (the level-end cutscene is skipped) and play continues
-in the same episode. The episode ends at the first death, when the attempt's time budget is
-used up, or after the last usable level (with a large bonus). There are no
-extra lives in a marathon.
+in the same episode. The episode ends at the first death, when the
+attempt's time budget is used up, or after the last usable level (with a
+large bonus). There are no extra lives in a marathon.
 
 **Marathon training starts at a random level.** If every training episode
 started at 1-1 the agent would reach level 5 only after clearing 1–4
@@ -442,14 +532,16 @@ Evaluation during training mirrors the mode where that terminates cleanly
 (fixed level, marathon from 1-1) and uses the campaign otherwise (random,
 sequential) so eval rewards stay comparable and every eval episode ends.
 
-### Training (`main.py`)
+### Training (`aiboy/cli.py`)
 
 PPO from Stable-Baselines3 with `MlpPolicy` (two 256-unit layers) for tiles
 or `CnnPolicy` for pixels, over a `SubprocVecEnv` of `n_envs` emulators
 with `VecFrameStack`. A `CheckpointCallback` writes snapshots and an
 `EvalCallback` keeps the best model. On CPU with tile observations PyTorch
 is limited to one thread, which measurably speeds things up because the
-network is tiny and the emulator workers need the cores.
+network is tiny and the emulator workers need the cores. When the run ends
+(finished, stopped or crashed after the model was built) the trainer
+appends its record to the experience file.
 
 **Apple Silicon:** CPU beats MPS by ~4× for the tile MLP (kernel-launch
 overhead dominates), so `--device cpu` is the default on purpose.
@@ -483,78 +575,104 @@ What the software does about it:
 - **Tile observations** are ~40× cheaper than pixels; use `pixels` only if
   tiles plateau.
 
-On other machines expect roughly `350 × cores` env steps/s for tiles (the
-Tune tab's time estimates use that), less on machines without performance
-cores.
+Until AIboy has measured your computer, expect roughly `350 × cores` env
+steps/s for tiles (the first estimates use that), less on machines without
+performance cores.
 
-### Artefacts
+### Files AIboy keeps
 
 ```
+experience.jsonl              everything AIboy has learned (one JSON record per line)
+training_presets.json         your presets and overrides of built-ins
 models/mario/
 ├── _level_states/            per-level save-states (cache)
-├── _tune/<prefix>.json       sweep results (Tune tab, wizard)
+├── _tune/<prefix>.json       sweep results tables (Tune tab, wizard)
 └── <run-name>/
     ├── checkpoints/ppo_<N>_steps.zip   periodic snapshots (newest 5 kept)
     ├── checkpoints/final.zip           saved when the run ends or is stopped
     ├── logs/best_model.zip             best evaluation reward
     ├── logs/evaluations.npz            eval history
     ├── tensorboard/                    TensorBoard events
-    ├── run.json                        training settings (the screen panel reads it)
-    └── trial.json                      (tune trials only) config of this trial
+    └── run.json                        training settings (the screen panel reads it)
 ```
 
-`models/`, `ROMs/` and `training_presets.json` are git-ignored.
+An experience record looks like this (one line in the file):
 
-## Building a standalone app (release)
+```json
+{"kind": "trial", "config": {"game": "mario", "start_level": "default", "timesteps": 100000,
+ "ent_coef": 0.03, "learning_rate": 0.0003, "seed": 0, "...": "..."},
+ "evals": [[20000, 45.2, 310.0], [40000, 190.7, 520.0], [100000, 850.1, 900.0]],
+ "duration": 41.8, "complete": true, "source": "wizard", "run_name": "wizard-003",
+ "resumed": false, "env_version": "mario-1", "created_at": 1789700000.0, "id": "3f9c2a1b7d4e"}
+```
 
-`build_release.py` packages the program with PyInstaller for the computer
-it runs on, so it can be used without Python:
+`models/`, `ROMs/`, `training_presets.json` and `experience.jsonl` are
+git-ignored. To move your knowledge to another computer, copy
+`experience.jsonl` next to the app there (speed measurements will be
+re-learned; scores carry over).
+
+## Build your own app
+
+`build_release.py` packages AIboy with PyInstaller for the computer it runs
+on, so the result can be used without Python. Anyone can do it; the only
+requirement is the environment from [Install](#install):
 
 ```bash
-pip install pyinstaller
-python build_release.py            # -> release/GameBoyAI/ and release/GameBoyAI-<platform>.zip
+python build_release.py            # -> release/AIboy/ and release/AIboy-<platform>.zip
 python build_release.py --no-roms  # leave the ROMs folder empty (for handing the build on)
+python build_release.py --no-selftest --no-zip
 ```
 
-The script first profiles the machine (cores, performance cores, memory,
-chip) and writes `system_profile.json` into the bundle. The number of
-emulators the release runs in parallel comes from that profile (one per
-core, at most 12, and never more than half the memory can hold), and every
-built-in preset is capped to it, so a build uses the cores it has and no
-more. The release folder holds the app (`GameBoyAI.app` on macOS), a
-`ROMs/` folder (your ROM files are copied in unless `--no-roms`; the app
-never ships a game), an empty `models/` folder and a `README.txt`. The
-user's files (ROMs, models, saved presets, `gui_errors.log`) live next to
-the app, never inside it, so replacing the app keeps them. After building,
-the script runs the built app once (probes a ROM and trains a few hundred
-steps with two emulator processes) to prove that process spawning works
-in the frozen app; `--no-selftest` skips that.
+If PyInstaller is missing, the script installs it (`pip install
+pyinstaller`; also listed in `requirements-build.txt`). It then:
 
-Build on each kind of machine you want to ship to: a build is for one
-platform and CPU type (here macOS on Apple Silicon). On macOS the app is
-ad-hoc signed; on another Mac, right-click → Open the first time.
+1. profiles the machine (cores, performance cores, memory, chip) and writes
+   `system_profile.json` into the bundle. The number of emulators the
+   release runs in parallel comes from that profile (one per core, at most
+   12, and never more than half the memory can hold), and every built-in
+   preset is capped to it;
+2. runs PyInstaller: a windowed `AIboy.app` on macOS (ad-hoc signed;
+   right-click → Open the first time on another Mac), an `AIboy` folder with
+   `AIboy.exe` on Windows, an `AIboy` folder with an `AIboy` binary on
+   Linux;
+3. assembles `release/AIboy/`: the app, a `ROMs/` folder (your ROM files
+   are copied in unless `--no-roms`; the app never ships a game), an empty
+   `models/` folder and a `README.txt`;
+4. runs the built app once (probes a ROM and trains a few hundred steps
+   with two emulator processes) to prove that process spawning works in the
+   frozen app, and removes the traces of that test.
+
+The user's files (ROMs, models, saved presets, `experience.jsonl`,
+`gui_errors.log`) live next to the app, never inside it, so replacing the
+app with a newer build keeps everything, including what AIboy has learned.
+A build is for one platform and CPU type; build on each kind of machine
+you want to ship to.
 
 ## Project layout
 
 ```
-main.py               Entry point: gui | train | play (+ probe-rom / level-state helpers)
-paths.py              Where the program and its data live (source tree vs frozen release)
-build_release.py      Packages a standalone app for this machine (PyInstaller)
-gui.py                Tkinter app: Train / Tune tabs, screen panel, status bar, event pump
-wizard.py             Wizard tab (guided Set up → Save → Train → Watch, plain language)
-presets_tab.py        Presets tab (browse / edit / organise presets)
-widgets.py            Shared Tk pieces: parameter form (ConfigForm), uniform tables
-player.py             Embedded playback / live preview engine (background thread)
-games.py              Game registry, ROM discovery / probe, level facts (no emulator imports)
-env.py                MarioEnv, save-state bootstrap, VecEnv wrapping
-runs.py               Run directories, model discovery, trainer command line
-tuning.py             Sweep templates, grid/random expansion, trial scoring, results files
-presets.py            Built-in and user presets
-builtin_presets.json  Shipped presets (hand-editable)
-assets/               Boot video (mp4 source, generated frames .npz and .wav)
-tools/make_intro.py   Generates the shipped AIboy boot-video assets (npz, wav, mp4)
-tools/build_intro.py  Regenerates the boot-video assets from the mp4 (needs ffmpeg)
-tests/                Unit tests (python -m unittest discover -s tests); tests/gui/ GUI checks
+main.py                 Entry point: python main.py [gui | train | play]
+build_release.py        Packages a standalone app for this machine (PyInstaller)
+builtin_presets.json    Shipped presets (hand-editable)
+assets/                 Boot video (mp4 source, generated frames .npz and .wav)
+aiboy/                  The program
+  cli.py                Command line, the trainer and the player (+ probe-rom / level-state helpers)
+  paths.py              Where the program and its data live (source tree vs frozen release)
+  games.py              Game registry, ROM discovery / probe, level facts, ENV_VERSION (no emulator imports)
+  env.py                MarioEnv, save-state bootstrap, VecEnv wrapping
+  presets.py            Built-in and user presets
+  runs.py               Run directories, model discovery, trainer command line
+  tuning.py             Sweep templates, grid / random / list expansion, metrics, results files, estimates
+  experience.py         What AIboy has learned: records, reuse, best-known settings, suggestions, speed
+  gui/app.py            The window: Train / Tune tabs, screen panel, status bar, event pump
+  gui/wizard.py         Wizard tab (Set up → Save → Train → Watch, plain language, "Let AIboy choose")
+  gui/presets_tab.py    Presets tab
+  gui/experience_tab.py Experience tab
+  gui/widgets.py        Shared Tk pieces: parameter form (ConfigForm), tables, theme
+  gui/player.py         Embedded playback / live preview engine, boot video
+tools/make_intro.py     Generates the shipped AIboy boot-video assets (npz, wav, mp4)
+tools/build_intro.py    Regenerates the boot-video assets from the mp4 (needs ffmpeg)
+tests/                  Unit tests (python -m unittest discover -s tests); tests/gui/ GUI checks
 ```
 
 ## Tests
@@ -565,27 +683,37 @@ python tests/gui/check_layout.py                 # GUI checks: run one at a time
 python tests/gui/check_games.py
 python tests/gui/check_smoke.py
 python tests/gui/check_e2e.py                    # search -> preset -> train -> watch (~30 s)
-python tests/gui/check_e2e_auto.py               # the same through Auto-complete
+python tests/gui/check_e2e_auto.py               # the same with "run everything by itself"
 python tests/gui/check_marathon.py               # marathon: train via Train tab, play in demo mode
 python tests/gui/check_intro.py                  # start-up boot video and sound (plays once)
 ```
 
-The unit tests cover the emulator-free modules: sweep expansion and the
-trial-reuse rules, run discovery, manifests and clean-up rules, preset
-defaults / overrides / rename rules, level parsing, ROM discovery and the
-ROM probe, the power-up observation cell (both skipped without
-`ROMs/mario.gb`), and a guard that no GUI module imports PyBoy or
-Stable-Baselines3 at module level so the window keeps opening instantly.
+The unit tests cover the emulator-free modules: sweep expansion (grids and
+candidate lists), the experience file (round trips, signatures, reuse
+rules, best-known settings, neighbours and the auto plan, measured speed),
+scoring from eval histories and the winner rule, run discovery and
+clean-up rules, preset defaults / overrides / rename rules, level parsing,
+ROM discovery and the ROM probe, the power-up observation cell (both
+skipped without `ROMs/mario.gb`), and a guard that no GUI module imports
+PyBoy or Stable-Baselines3 at module level so the window keeps opening
+instantly.
 
-The GUI checks open the real window, answer their own dialogs, and use a
-separate trial prefix (`e2etest`) so they never touch your runs. Each
-prints an `…_OK` line and removes everything it created.
+The GUI checks open the real window, answer their own dialogs, use a
+separate trial prefix (`e2etest`) and their own experience file (set
+through `AIBOY_EXPERIENCE_FILE`), so they never touch your runs or what
+AIboy has learned. Each prints an `…_OK` line and removes everything it
+created.
 
 ## Troubleshooting
 
 - **`ROM not found: ROMs/mario.gb`** — place your ROM there (see Install).
 - **Game shows red or amber** — only Super Mario Land is supported in this
   version; see Roadmap. Check that `mario.gb` is the original cartridge.
+- **The wizard says every variation is already known** — AIboy has tested
+  everything nearby at this trial length. Raise *Effort* (longer trials
+  are a new task), pick a fixed set under *Vary*, or use **Suggest from
+  experience** on the Tune tab after editing the base preset. **Forget
+  all…** on the Experience tab starts from scratch.
 - **Training plateaus** — raise `ent_coef` to 0.02–0.05, sweep
   `ent_coef × learning_rate` on the Tune tab, or switch to `pixels`.
 - **Slow training** — keep `obs_type=tiles`, `device=cpu`, and `n_envs`
@@ -606,6 +734,7 @@ prints an `…_OK` line and removes everything it created.
   but it is untested in this version and has no level modes or reward
   shaping. Proper support is planned for the next version.
 - Curriculum training across level modes from inside the wizard.
+- Sharing experience between computers automatically.
 
 ## License
 

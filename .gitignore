@@ -8,6 +8,7 @@ __pycache__/
 # Training artifacts (all live under models/<game>/<run>/)
 models/
 training_presets*.json
+experience*.jsonl
 
 gui_errors.log
 

@@ -36,8 +36,8 @@ from pathlib import Path
 
 import numpy as np
 
-from games import DEFAULT_STALL_STEPS, DEFAULT_TIME_BUDGET, GAMES, ROM_DIR, prepare_level_states
-from paths import BUNDLE_DIR
+from aiboy.games import DEFAULT_STALL_STEPS, DEFAULT_TIME_BUDGET, GAMES, ROM_DIR, prepare_level_states
+from aiboy.paths import BUNDLE_DIR
 
 GB_FPS = 60.0
 PREVIEW_STEP_SLEEP = 0.02   # cap the preview at ~50 env-steps/s so training keeps the CPU
@@ -204,7 +204,7 @@ class _Session:
         from pyboy import PyBoy
         from stable_baselines3.common.monitor import Monitor
         from stable_baselines3.common.vec_env import DummyVecEnv
-        from env import MarioEnv, wrap_vec_env
+        from aiboy.env import MarioEnv, wrap_vec_env
 
         spec = GAMES[game]
         rom_path = ROM_DIR / spec.rom_file
@@ -306,7 +306,7 @@ class EmbeddedPlayer:
         self.events.put(item)
 
     def _report_step(self, game: str, action, info, ep_reward: float, ep_steps: int) -> None:
-        from env import MarioEnv
+        from aiboy.env import MarioEnv
         act_id = int(np.asarray(action).flat[0])
         names = MarioEnv.ACTION_NAMES
         action_name = names[act_id] if game == "mario" and act_id < len(names) else str(act_id)

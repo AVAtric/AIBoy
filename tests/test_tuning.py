@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-import tuning
+from aiboy import tuning
 
 
 class SweepTests(unittest.TestCase):
@@ -151,7 +151,7 @@ class ResultTests(unittest.TestCase):
             self.assertEqual(m.by_name("best eval reward"), 60)
             self.assertIsNone(tuning.read_trial_metrics(run / "missing.npz"))
 
-    def test_per_minute_metric_and_duration_manifest(self):
+    def test_per_minute_metric_and_eval_histories(self):
         m = tuning.TrialMetrics(best=600.0, final=1.0, mean=1.0, ep_len=1.0, timesteps=1,
                                 n_evals=1, duration=120.0)
         self.assertAlmostEqual(m.by_name(tuning.METRIC_PER_MINUTE), 300.0)
@@ -162,17 +162,16 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(set(tuning.METRIC_NOTES), set(tuning.METRICS))
         with tempfile.TemporaryDirectory() as d:
             run = Path(d) / "t"
-            cfg = {"n_envs": 10, "obs_type": "tiles"}
-            self.assertAlmostEqual(tuning.trial_duration(run, cfg, 100_000),
-                                   tuning.estimate_seconds(1, 100_000, cfg))   # no manifest: estimate
-            tuning.write_trial_manifest(run, cfg, 100_000)
-            tuning.finish_trial_manifest(run, 42.5)
-            self.assertEqual(tuning.trial_duration(run, cfg, 100_000), 42.5)
-            self.assertEqual(tuning.read_trial_manifest(run)["config"], cfg)   # config kept
-            self._write_evals(run, [95_000], [[600.0]])
-            got = tuning.read_trial_metrics(run / "logs" / "evaluations.npz",
-                                            duration=tuning.trial_duration(run, cfg, 100_000))
+            self._write_evals(run, [50_000, 95_000], [[100.0], [600.0]])
+            evals = tuning.evals_from_npz(run / "logs" / "evaluations.npz")
+            self.assertEqual(evals, [[50_000, 100.0, 100.0], [95_000, 600.0, 100.0]])
+            self.assertIsNone(tuning.evals_from_npz(run / "missing.npz"))
+            got = tuning.metrics_from_evals(evals, duration=42.5)
             self.assertAlmostEqual(got.per_minute, 600.0 / (42.5 / 60))
+            self.assertEqual(got.timesteps, 95_000)
+            self.assertEqual(tuning.read_trial_metrics(run / "logs" / "evaluations.npz").best, 600.0)
+        self.assertIsNone(tuning.metrics_from_evals([]))
+        self.assertIsNone(tuning.record_metrics({"evals": []}))
 
     def test_prune_trial_runs_keeps_best(self):
         mk = lambda i, v, run: tuning.ConfigResult(index=i, overrides={}, config={}, metric="m",
@@ -217,6 +216,10 @@ class ResultTests(unittest.TestCase):
         w, _ = tuning.pick_winner([close, clear]); self.assertIs(w, clear)   # no baseline: best wins
         w, why = tuning.pick_winner([base, mk(4, {"x": 1}, [50.0])]); self.assertIs(w, base)
         self.assertEqual(tuning.pick_winner([]), (None, "no scored candidate"))
+        # single seed: a lead below MIN_WIN_MARGIN of the baseline is noise
+        one = mk(1, {}, [1000.0]); near = mk(2, {"ent_coef": 0.03}, [1040.0]); far = mk(3, {"ent_coef": 0.05}, [1100.0])
+        self.assertIs(tuning.pick_winner([one, near])[0], one)
+        self.assertIs(tuning.pick_winner([one, near, far])[0], far)
 
     def test_nan_scores_rank_last(self):
         a = tuning.ConfigResult(index=1, overrides={}, config={}, metric="m", values=[float("nan")],
@@ -227,17 +230,53 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(a.score_text(), "—")
         self.assertEqual(b.score_text(), "5.0")
 
-    def test_trial_reuse_requires_matching_manifest(self):
-        with tempfile.TemporaryDirectory() as d:
-            run = Path(d) / "tune-001"
-            self._write_evals(run, [9500], [[1.0]])
-            cfg = {"ent_coef": 0.01, "learning_rate": 3e-4}
-            self.assertTrue(tuning.trial_is_complete(run, 10_000))          # no manifest: accept
-            self.assertFalse(tuning.trial_is_complete(run, 20_000))         # too short
-            tuning.write_trial_manifest(run, cfg, 10_000)
-            self.assertTrue(tuning.trial_is_complete(run, 10_000, dict(cfg)))
-            self.assertTrue(tuning.trial_is_complete(run, 10_000, {**cfg, "ent_coef": 0.010}))
-            self.assertFalse(tuning.trial_is_complete(run, 10_000, {**cfg, "ent_coef": 0.05}))
+    def test_config_result_scores_from_records(self):
+        rec = {"evals": [[1000, 10.0, 50.0], [2000, 30.0, 60.0], [3000, 20.0, 70.0]], "duration": 60.0}
+        r = tuning.ConfigResult(index=1, overrides={}, config={}, metric=tuning.METRIC_LATE)
+        r.add_record(rec)
+        self.assertEqual(r.values, [25.0])                       # last third, at least 2 evals
+        self.assertEqual(r.ep_lens, [60.0])                      # ep len at the best eval
+        self.assertEqual(r.timesteps, 3000)
+        r.rescore(tuning.METRIC_BEST)
+        self.assertEqual((r.metric, r.values), (tuning.METRIC_BEST, [30.0]))
+        r.rescore(tuning.METRIC_PER_MINUTE)
+        self.assertEqual(r.values, [30.0])
+        r.add_record({"evals": []})                               # unscored record: ignored
+        self.assertEqual(len(r.records), 2)
+        self.assertEqual(len(r.values), 1)
+
+    def test_trial_config_and_compact_texts(self):
+        base = {"game": "mario", "seed": 5, "ent_coef": 0.01}
+        cfg = tuning.trial_config(base, {"ent_coef": 0.03}, 100_000, seed_offset=1)
+        self.assertEqual((cfg["seed"], cfg["timesteps"], cfg["ent_coef"]), (6, 100_000, 0.03))
+        self.assertEqual(set(cfg), set(tuning.PRESET_FIELDS))
+        self.assertEqual(tuning.compact_overrides({"ent_coef": 0.03, "learning_rate": 3e-4}),
+                         "ent 0.03 · lr 0.0003")
+        self.assertTrue(tuning.compact_config(cfg).startswith("lr 0.00025 · ent 0.03 · steps 512"))
+        self.assertEqual(tuning.config_diff(cfg, tuning.full_config(base, {})), {"ent_coef": 0.03})
+        self.assertEqual(tuning.config_diff({"ent_coef": 0.010}, {"ent_coef": 0.01}), {})
+
+    def test_explicit_candidate_lists(self):
+        text = '[{"ent_coef": 0.02}, {"learning_rate": 0.0005, "n_epochs": 6}]'
+        sweep, err = tuning.validate_sweep(text)
+        self.assertIsNone(err)
+        self.assertEqual(tuning.expand_grid(sweep), [{"ent_coef": 0.02},
+                                                     {"learning_rate": 0.0005, "n_epochs": 6}])
+        self.assertEqual(tuning.n_grid_configs(sweep), 2)
+        self.assertEqual(len(tuning.sample_random(sweep, 1)), 1)
+        self.assertEqual(tuning.sample_random(sweep, 5), tuning.expand_grid(sweep))
+        self.assertIsNotNone(tuning.validate_sweep('[{"timesteps": 1}]')[1])
+        self.assertIsNotNone(tuning.validate_sweep('[]')[1])
+        self.assertIsNotNone(tuning.validate_sweep('[{"ent_coef": 0.02}, {"ent_coef": 0.02}]')[1])
+        self.assertIsNotNone(tuning.validate_sweep('[1]')[1])
+
+    def test_estimates_use_measured_throughput(self):
+        cfg = {"n_envs": 10, "obs_type": "tiles"}
+        self.assertEqual(tuning.estimate_fps(cfg), 3300.0)
+        self.assertEqual(tuning.estimate_fps(cfg, 1234.0), 1234.0)
+        self.assertEqual(tuning.estimate_fps(cfg, 0.0), 3300.0)
+        self.assertAlmostEqual(tuning.estimate_seconds(2, 1000, cfg, 100.0),
+                               2 * (10.0 + tuning.TRIAL_OVERHEAD))
 
     def test_results_roundtrip_and_ranking(self):
         a = tuning.ConfigResult(index=1, overrides={"ent_coef": 0.01}, config={}, metric="m",

@@ -16,8 +16,8 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
-import presets
-from widgets import MONO_BOLD, THEME, ConfigForm, make_table
+from aiboy import presets
+from aiboy.gui.widgets import MONO_BOLD, THEME, ConfigForm, make_table
 
 MODE_LABEL = {"default": "campaign", "random": "random", "sequential": "sequential",
               "marathon": "marathon"}

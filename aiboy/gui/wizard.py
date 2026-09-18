@@ -10,6 +10,12 @@ a plain question, the expert vocabulary lives on the Tune / Train tabs, and
 one Start button runs the whole pipeline (search -> save -> train -> watch)
 when "Run everything by itself" is ticked.
 
+The search learns. Its default, "Let AIboy choose", asks the experience
+file (see experience.py) what has already been tried for this goal: known
+variations are scored without training again, and once the standard search
+is exhausted the wizard explores untested settings around the best known
+ones. So every time the wizard runs, it gets a little further.
+
 The wizard owns no training logic. It fills in the Tune / Train / Play tab
 variables and calls the same `start_*` methods the tabs use, so the expert
 tabs always show the full picture of what the wizard is doing, and the
@@ -23,22 +29,26 @@ import re
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-import presets
-import runs
-import tuning
-from widgets import FIELD_BY_KEY, MONO, MONO_BOLD, THEME, WidgetLock, make_table
+from aiboy import presets
+from aiboy import runs
+from aiboy import tuning
+from aiboy.gui.widgets import FIELD_BY_KEY, MONO, MONO_BOLD, THEME, WidgetLock, make_table
+from aiboy.tuning import SHORT_KEYS, compact_overrides  # noqa: F401  (re-exported for callers)
 
 STEPS = ("Set up", "Save", "Train", "Watch")
 TITLE = ("Helvetica", 15, "bold")
 
 # Run-name prefix of the wizard's tuning trials. Overridable so automated
 # tests never share trial directories with a real wizard session.
-WIZARD_PREFIX = os.environ.get("GAMEBOY_WIZARD_PREFIX", "wizard")
+WIZARD_PREFIX = os.environ.get("AIBOY_WIZARD_PREFIX", "wizard")
 KEEP_BEST_TRIALS = 9            # run folders kept during a search; the rest are deleted
+AUTO_CHOICE = "Let AIboy choose — reuse what it knows, try what it doesn't (recommended)"
+AUTO = "auto"                   # the template name that stands for the experience-based plan
+SUGGESTIONS = 6                 # untested variations per "Let AIboy choose" search
 INTRO = {
     0: "Train your own Super Mario Land player. Choose what it should learn, decide whether "
-       "the app should look for better settings first, and press Start. Every default is "
-       "sensible; nothing here needs AI knowledge.",
+       "AIboy should look for better settings first, and press Start. AIboy remembers every "
+       "setting it has ever tried, so it never tests the same thing twice.",
     1: "These are the settings that will be trained. Give them a name so you can find them "
        "again on the Train tab, or continue without saving.",
     2: "The agent now learns by playing, using every core of this computer. It keeps its best "
@@ -66,29 +76,26 @@ def short_goal(preset_name: str) -> str:
     return name.strip() or preset_name
 
 
-def describe_preset(cfg: dict) -> str:
-    """One plain sentence about a goal: what the agent does and how long it takes."""
+def describe_preset(cfg: dict, fps: float | None = None) -> str:
+    """One plain sentence about a goal: what the agent does and how long it
+    takes (`fps` = the speed this computer measured earlier, if known)."""
     level = str(cfg.get("start_level", "default"))
     mode = MODE_PLAIN.get(level, f"practises level {level} only")
-    eta = tuning.estimate_seconds(1, int(cfg.get("timesteps", 0)), cfg)
+    eta = tuning.estimate_seconds(1, int(cfg.get("timesteps", 0)), cfg, fps)
     return (f"It {mode}. About {tuning.format_duration(eta)} of training "
             f"({tuning.format_steps(int(cfg.get('timesteps', 0)))} steps, "
             f"{cfg.get('n_envs', '?')} games in parallel).")
 
 
-SHORT_KEYS = {"learning_rate": "lr", "ent_coef": "ent", "n_steps": "steps", "batch_size": "batch",
-              "n_epochs": "epochs", "gamma": "gamma", "gae_lambda": "gae", "clip_range": "clip",
-              "n_envs": "envs", "action_repeat": "repeat", "frame_stack": "stack",
-              "obs_type": "obs", "start_level": "level", "device": "device"}
-
-
-def compact_overrides(overrides: dict) -> str:
-    """'ent 0.03 · lr 0.0003' — readable summary of tuned values."""
-    parts = []
-    for key, value in overrides.items():
-        text = f"{value:g}" if isinstance(value, float) else str(value)
-        parts.append(f"{SHORT_KEYS.get(key, key)} {text}")
-    return " · ".join(parts)
+def describe_knowledge(know, base: dict) -> str:
+    """What AIboy already knows about a goal, in one plain sentence."""
+    if know is None:
+        return "AIboy has not tried this goal yet; the first search starts from scratch."
+    tuned = tuning.config_diff(know.config, tuning.full_config(base, {}))
+    what = tuning.plain_overrides(tuned)
+    tests = f"{know.n_trials} short test{'s' if know.n_trials != 1 else ''}"
+    return (f"Best known settings so far: {what} (score {know.score:.0f}, from {tests} of "
+            f"{tuning.format_steps(know.trial_steps)} steps).")
 
 
 def default_preset_name(goal: str, overrides: dict) -> str:
@@ -121,15 +128,23 @@ def unique_run_name(game: str, base: str) -> str:
 
 
 def plain_plan(n_variations: int, n_trials: int, search_seconds: float,
-               train_seconds: float, search: bool) -> str:
+               train_seconds: float, search: bool, known: int = 0) -> str:
     """The wizard's one-line plan, e.g. 'Plan: try 6 variations (12 short
-    training runs, about 12 min), then train the winner for about 15 min.'"""
+    training runs, 5 already known, about 5 min), then train the winner for
+    about 15 min.' `known` = trials whose result is already remembered."""
     train = f"train for about {tuning.format_duration(train_seconds)}"
     if not search:
         return f"Plan: {train} with the goal's own settings."
-    return (f"Plan: try {n_variations} variations plus the goal's own settings ({n_trials} short "
-            f"training runs, about {tuning.format_duration(search_seconds)}), then {train} with "
-            f"the winner. Total about {tuning.format_duration(search_seconds + train_seconds)}.")
+    if known >= n_trials:
+        runs_txt = f"all {n_trials} short training runs already known, nothing to train"
+    elif known:
+        runs_txt = (f"{n_trials} short training runs, {known} already known, "
+                    f"about {tuning.format_duration(search_seconds)}")
+    else:
+        runs_txt = f"{n_trials} short training runs, about {tuning.format_duration(search_seconds)}"
+    return (f"Plan: try {n_variations} variations plus the goal's own settings ({runs_txt}), "
+            f"then {train} with the winner. Total about "
+            f"{tuning.format_duration(search_seconds + train_seconds)}.")
 
 
 class WizardTab:
@@ -146,6 +161,8 @@ class WizardTab:
         self._inputs: list[tk.Widget] = []
         self._input_lock = WidgetLock()
         self._presets: dict[str, dict] = {}
+        self._synced: str | None = None     # what the Tune tab's sweep text currently holds
+        self._auto_why = ""                 # plain explanation of the last "Let AIboy choose" plan
         self._build(parent)
         self.goto(0)
 
@@ -189,7 +206,7 @@ class WizardTab:
 
     def _intro(self, pane: ttk.Frame, step: int, row: int) -> None:
         ttk.Label(pane, text=INTRO[step], wraplength=600, foreground=THEME.text_soft).grid(
-            row=row, column=0, sticky="w", pady=(0, 10))
+            row=row, column=0, sticky="w", pady=(0, 6))
 
     def _register(self, *widgets: tk.Widget) -> None:
         self._inputs.extend(widgets)
@@ -204,7 +221,7 @@ class WizardTab:
         self.rom_hint.grid(row=1, column=0, sticky="w", pady=(0, 6))
         self.rom_hint.grid_remove()                       # shown only while no ROM can run
 
-        goal = ttk.LabelFrame(pane, text="What should it learn?", padding=8)
+        goal = ttk.LabelFrame(pane, text="What should it learn?", padding=6)
         goal.grid(row=2, column=0, sticky="ew")
         goal.columnconfigure(1, weight=1)
         ttk.Label(goal, text="Goal:").grid(row=0, column=0, sticky="w", pady=2)
@@ -214,9 +231,11 @@ class WizardTab:
         self.goal_combo.bind("<<ComboboxSelected>>", lambda e: self._on_goal_changed())
         self.goal_note = ttk.Label(goal, text="", foreground=THEME.muted, wraplength=540)
         self.goal_note.grid(row=1, column=1, sticky="w", padx=6)
+        self.known_note = ttk.Label(goal, text="", foreground=THEME.accent, wraplength=540)
+        self.known_note.grid(row=2, column=1, sticky="w", padx=6)
 
-        search = ttk.LabelFrame(pane, text="Look for better settings first?", padding=8)
-        search.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        search = ttk.LabelFrame(pane, text="Look for better settings first?", padding=6)
+        search.grid(row=3, column=0, sticky="ew", pady=(6, 0))
         search.columnconfigure(1, weight=1)
         self.search_var = tk.StringVar(value="yes")
         rb_yes = ttk.Radiobutton(search, variable=self.search_var, value="yes",
@@ -227,11 +246,11 @@ class WizardTab:
                                 command=self._on_search_choice,
                                 text="No — use the goal's settings as they are")
         rb_no.grid(row=1, column=0, columnspan=2, sticky="w")
-        ttk.Label(search, text="Vary:").grid(row=2, column=0, sticky="w", pady=(8, 2))
-        self.template_var = tk.StringVar(value=tuning.TEMPLATE_PLAIN[tuning.DEFAULT_TEMPLATE])
+        ttk.Label(search, text="Vary:").grid(row=2, column=0, sticky="w", pady=(6, 2))
+        self.template_var = tk.StringVar(value=AUTO_CHOICE)
         self.template_combo = ttk.Combobox(search, textvariable=self.template_var, state="readonly",
-                                           values=list(tuning.TEMPLATE_FROM_PLAIN))
-        self.template_combo.grid(row=2, column=1, sticky="ew", padx=6, pady=(8, 2))
+                                           values=[AUTO_CHOICE, *tuning.TEMPLATE_FROM_PLAIN])
+        self.template_combo.grid(row=2, column=1, sticky="ew", padx=6, pady=(6, 2))
         self.template_combo.bind("<<ComboboxSelected>>", lambda e: self._on_template_changed())
         self.template_note = ttk.Label(search, text="", foreground=THEME.muted, wraplength=540)
         self.template_note.grid(row=3, column=1, sticky="w", padx=6)
@@ -267,7 +286,7 @@ class WizardTab:
                                                 steps_spin, seeds_spin]
 
         then = ttk.Frame(search)
-        then.grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        then.grid(row=7, column=0, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Label(then, text="Then:").pack(side="left")
         self.auto_var = tk.BooleanVar(value=True)
         auto_cb = ttk.Checkbutton(then, variable=self.auto_var, command=self._update_summary,
@@ -279,11 +298,11 @@ class WizardTab:
         preview_cb.pack(side="left", padx=(12, 0))
         self.summary_var = tk.StringVar(value="")
         ttk.Label(pane, textvariable=self.summary_var, wraplength=600).grid(
-            row=4, column=0, sticky="w", pady=(8, 0))
+            row=4, column=0, sticky="w", pady=(6, 0))
         self._register(self.goal_combo, rb_yes, rb_no, *self.search_widgets, auto_cb, preview_cb)
 
         btns = ttk.Frame(pane)
-        btns.grid(row=5, column=0, sticky="ew", pady=(8, 4))
+        btns.grid(row=5, column=0, sticky="ew", pady=(6, 2))
         self.btn_search = ttk.Button(btns, text="▶ Start", command=self.start)
         self.btn_search.pack(side="left")
         self.btn_search_stop = ttk.Button(btns, text="■ Stop", command=self.app.stop_tuning,
@@ -292,7 +311,7 @@ class WizardTab:
         self.btn_use_best = ttk.Button(btns, text="Continue with the best →", command=self.use_best,
                                        state="disabled")
         self.btn_use_best.pack(side="right")
-        self.btn_clear_search = ttk.Button(btns, text="Delete old search results…",
+        self.btn_clear_search = ttk.Button(btns, text="Delete old search runs…",
                                            command=self.clear_search_data)
         self.btn_clear_search.pack(side="right", padx=(0, 6))
 
@@ -304,7 +323,7 @@ class WizardTab:
         ttk.Label(prog, textvariable=self.app.tune_progress_text, width=20, anchor="e").grid(
             row=0, column=1, padx=(6, 0))
         ttk.Label(pane, textvariable=self.app.tune_live_var, font=MONO).grid(
-            row=7, column=0, sticky="w", pady=(2, 4))
+            row=7, column=0, sticky="w", pady=(2, 2))
 
         res = ttk.LabelFrame(pane, text="Variations tried (best first)", padding=4)
         res.grid(row=8, column=0, sticky="nsew")
@@ -312,7 +331,7 @@ class WizardTab:
         self.tree = make_table(res, [
             ("rank", "#", 32, "e", False), ("config", "settings", 300, "w", True),
             ("score", "score", 110, "e", False), ("time", "time", 64, "e", False),
-        ], height=3)
+        ], height=2)
         self._on_template_changed()
         self._on_effort_changed()
         self._on_search_choice()
@@ -520,8 +539,42 @@ class WizardTab:
 
     def _on_goal_changed(self) -> None:
         cfg = self._presets.get(self.goal_var.get())
-        self.goal_note.config(text=describe_preset(cfg) if cfg else "")
+        self.goal_note.config(text=describe_preset(cfg, self.app.fps_for(cfg)) if cfg else "")
         self._on_effort_changed()
+
+    def on_experience_changed(self) -> None:
+        """New records arrived (a search or a training finished): refresh
+        what the wizard says it knows and, in auto mode, what it would try
+        next. Only the wizard's own texts change; the Tune tab is written at
+        Start (see `_sync_tune_tab`), never behind an expert's back."""
+        cfg = self._presets.get(self.goal_var.get())
+        if cfg:
+            self.goal_note.config(text=describe_preset(cfg, self.app.fps_for(cfg)))
+        self._update_known_note()
+        if self._template_name() == AUTO:
+            _combos, self._auto_why = self.auto_plan()
+            self._update_template_note()
+        self._update_summary()
+
+    def _trial_task(self) -> dict | None:
+        """The task the search's trials belong to (goal + trial length)."""
+        cfg = self._presets.get(self.goal_var.get())
+        if not cfg:
+            return None
+        try:
+            steps = int(self.trial_steps_var.get())
+        except (tk.TclError, ValueError):
+            return None
+        return tuning.trial_config(cfg, {}, steps)
+
+    def _update_known_note(self) -> None:
+        task = self._trial_task()
+        if task is None:
+            self.known_note.config(text="")
+            return
+        base = self._presets.get(self.goal_var.get(), {})
+        know = self.app.experience.best_for_task(task)
+        self.known_note.config(text=describe_knowledge(know, base))
 
     def _on_effort_changed(self) -> None:
         """Effort level -> seeds and trial length for the chosen goal."""
@@ -535,12 +588,32 @@ class WizardTab:
         self._sync_tune_tab()
 
     def _template_name(self) -> str:
-        """The Tune-tab template behind the plain name shown in the wizard."""
+        """The Tune-tab template behind the plain name shown in the wizard,
+        or AUTO for the experience-based plan."""
+        if self.template_var.get() == AUTO_CHOICE:
+            return AUTO
         return tuning.TEMPLATE_FROM_PLAIN.get(self.template_var.get(), tuning.DEFAULT_TEMPLATE)
 
     def _on_template_changed(self) -> None:
-        self.template_note.config(text=tuning.TEMPLATE_PLAIN_NOTES.get(self._template_name(), ""))
         self._sync_tune_tab()
+        self._update_template_note()
+
+    def _update_template_note(self) -> None:
+        if self._template_name() == AUTO:
+            self.template_note.config(text=self._auto_why)
+        else:
+            self.template_note.config(text=tuning.TEMPLATE_PLAIN_NOTES.get(self._template_name(), ""))
+
+    def auto_plan(self) -> tuple[list[dict], str]:
+        """The candidates "Let AIboy choose" would try right now, and why."""
+        cfg = self._presets.get(self.goal_var.get())
+        if not cfg:
+            return [], ""
+        try:
+            steps, seeds = int(self.trial_steps_var.get()), max(1, int(self.seeds_var.get()))
+        except (tk.TclError, ValueError):
+            return [], ""
+        return self.app.experience.auto_plan(cfg, steps, seeds, SUGGESTIONS)
 
     def _on_search_choice(self) -> None:
         searching = self.search_var.get() == "yes"
@@ -563,21 +636,30 @@ class WizardTab:
             self.advanced.grid_forget()
 
     def _sync_tune_tab(self) -> None:
-        """Mirror the wizard's choices into the Tune tab, which owns the plan."""
+        """Mirror the wizard's choices into the Tune tab, which owns the plan.
+        In auto mode the sweep is the experience-based candidate list."""
         app = self.app
         if app.busy():
             return
         app.tune_preset_var.set(self.goal_var.get())
-        template = self._template_name()
-        if app.tune_template_var.get() != template:
-            app.tune_template_var.set(template)
-            app.apply_tune_template()
         try:
             app.tune_trial_steps_var.set(int(self.trial_steps_var.get()))
             app.tune_seeds_var.set(int(self.seeds_var.get()))
         except (tk.TclError, ValueError):
             pass
-        search, n_random = tuning.template_search(template)
+        template = self._template_name()
+        if template == AUTO:
+            combos, self._auto_why = self.auto_plan()
+            app.tune_template_var.set(tuning.DEFAULT_TEMPLATE)
+            app.set_sweep(combos or tuning.SWEEP_TEMPLATES[tuning.DEFAULT_TEMPLATE],
+                          "Candidates chosen by the wizard from AIboy's experience.")
+            search, n_random = "grid", 0
+        else:
+            if self._synced != template:
+                app.tune_template_var.set(template)
+                app.apply_tune_template()
+            search, n_random = tuning.template_search(template)
+        self._synced = template
         app.tune_search_type_var.set(search)
         if n_random:
             app.tune_n_random_var.set(n_random)
@@ -586,10 +668,30 @@ class WizardTab:
         app.tune_metric_var.set(tuning.METRIC_LATE)
         app.tune_skip_done_var.set(True)
         app.tune_baseline_var.set(True)
+        self._update_known_note()
+        self._update_template_note()
         app.tune_update_summary()
 
     def on_tune_plan_changed(self) -> None:
         self._update_summary()
+
+    def _plan(self) -> tuple[dict | None, str | None]:
+        """The search the wizard would start now. Fixed templates read the
+        Tune tab (the wizard keeps it in sync); "Let AIboy choose" is
+        computed from the experience, so the plan line is right even
+        before Start writes the candidates into the Tune tab."""
+        if self._template_name() != AUTO:
+            return self.app.tune_plan()
+        cfg = self._presets.get(self.goal_var.get())
+        if not cfg:
+            return None, "pick a goal"
+        try:
+            steps, seeds = int(self.trial_steps_var.get()), max(1, int(self.seeds_var.get()))
+        except (tk.TclError, ValueError):
+            return None, "steps and seeds must be whole numbers"
+        combos, _why = self.app.experience.auto_plan(cfg, steps, seeds, SUGGESTIONS)
+        return {"base": dict(cfg), "combos": tuning.with_baseline(combos), "trial_steps": steps,
+                "n_seeds": seeds, "skip_done": True}, None
 
     def _update_summary(self) -> None:
         """One plain sentence: what will happen and how long it takes."""
@@ -599,17 +701,21 @@ class WizardTab:
         if not cfg:
             self.summary_var.set("")
             return
-        train_eta = tuning.estimate_seconds(1, int(cfg.get("timesteps", 0)), cfg)
+        train_eta = tuning.estimate_seconds(1, int(cfg.get("timesteps", 0)), cfg,
+                                            self.app.fps_for(cfg))
         searching = self.search_var.get() == "yes"
-        plan, err = self.app.tune_plan()
+        plan, err = self._plan()
         if searching and err:
             self.summary_var.set(f"⚠ {err}")
             return
         if searching:
             n_trials = len(plan["combos"]) * plan["n_seeds"]
-            search_eta = tuning.estimate_seconds(n_trials, plan["trial_steps"], plan["base"])
+            known = self.app.known_trials(plan)
+            search_eta = tuning.estimate_seconds(
+                n_trials - known, plan["trial_steps"], plan["base"],
+                self.app.fps_for(tuning.trial_config(plan["base"], {}, plan["trial_steps"])))
             n_variations = sum(1 for c in plan["combos"] if c)      # the baseline is not one
-            text = plain_plan(n_variations, n_trials, search_eta, train_eta, True)
+            text = plain_plan(n_variations, n_trials, search_eta, train_eta, True, known)
         else:
             text = plain_plan(0, 0, 0.0, train_eta, False)
         if not self.auto_var.get():
@@ -643,7 +749,7 @@ class WizardTab:
         self._sync_tune_tab()
         self.goal_name = self.goal_var.get()
         self._render_candidates()
-        if not self.app.start_tuning():
+        if not self.app.start_tuning(source="wizard"):
             return
         self.phase = "tuning"
         self.btn_search.config(state="disabled")
@@ -676,13 +782,14 @@ class WizardTab:
         self.goto(1)
 
     def clear_search_data(self) -> None:
-        """Delete the wizard's trial runs and results from earlier searches."""
+        """Delete the wizard's trial run folders and results table from
+        earlier searches. What AIboy learned from them stays (Experience tab)."""
         if self.phase != "idle":
             return
         if self.app.delete_tune_data(WIZARD_PREFIX):
             self._render_candidates()
             self.btn_use_best.config(state="disabled")
-            self.status_var.set("Old search results deleted.")
+            self.status_var.set("Old search runs deleted; their results stay in AIboy's experience.")
         elif self.app.tune_results():
             self._render_candidates()
 
@@ -750,7 +857,8 @@ class WizardTab:
 
     def _discard_search_runs(self) -> None:
         """The chosen config is all that matters from here on; the trial runs
-        of the search only take up disk space."""
+        of the search only take up disk space. Their scores are already in
+        the experience file, so a later search can reuse them."""
         try:
             n_runs, freed = runs.delete_tune_data(self.app.game, WIZARD_PREFIX)
         except (OSError, ValueError):
@@ -801,8 +909,11 @@ class WizardTab:
         except (tk.TclError, ValueError):
             self.train_eta_var.set("")
             return
-        eta = tuning.estimate_seconds(1, steps, self.config)
-        self.train_eta_var.set(f"≈ {tuning.format_duration(eta)} on an Apple-Silicon-class CPU")
+        fps = self.app.fps_for(self.config)
+        eta = tuning.estimate_seconds(1, steps, self.config, fps)
+        basis = ("at the speed this computer reached before" if fps
+                 else "estimated; AIboy has not measured this computer with these settings yet")
+        self.train_eta_var.set(f"≈ {tuning.format_duration(eta)} ({basis})")
 
     def start_training(self) -> None:
         run_name = self.run_name_var.get().strip()
@@ -913,5 +1024,5 @@ class WizardTab:
         """Current wizard state (used by the smoke test)."""
         return {"step": self.step, "phase": self.phase, "goal": self.goal_name,
                 "overrides": dict(self.overrides), "config": dict(self.config),
-                "preset": self.preset_name, "run": self.run_name,
+                "preset": self.preset_name, "run": self.run_name, "vary": self.template_var.get(),
                 "config_json": json.dumps(self.config, sort_keys=True)}

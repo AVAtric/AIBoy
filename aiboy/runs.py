@@ -25,8 +25,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from paths import app_command, cpu_count, recommended_n_envs  # noqa: F401  (re-exported)
-from presets import PRESET_FIELDS, normalize
+from aiboy.paths import app_command, cpu_count, recommended_n_envs  # noqa: F401  (re-exported)
+from aiboy.presets import PRESET_FIELDS, normalize
 
 MODELS_ROOT = Path("models")
 INTERNAL_PREFIX = "_"
@@ -324,14 +324,15 @@ def open_in_file_manager(path: Path) -> None:
 
 def build_train_cmd(cfg: dict, run_name: str, *, resume: bool = False,
                     timesteps: int | None = None, checkpoint_freq: int | None = None,
-                    eval_freq: int | None = None) -> list[str]:
+                    eval_freq: int | None = None, source: str | None = None) -> list[str]:
     """`train` command line for a preset-style config (see presets.PRESET_FIELDS).
 
     The Train tab, the tuner and the wizard all launch training through this
     so every run gets exactly the same flag set. Fields missing from `cfg`
     take the preset defaults. `timesteps`, `checkpoint_freq` and `eval_freq`
     override the config (the tuner uses them to give every trial the same
-    length and scoring cadence).
+    length and scoring cadence). `source` (train | tune | wizard) is recorded
+    in the experience file with the run's result.
     """
     cfg = normalize(cfg)
     if timesteps is not None:
@@ -344,6 +345,8 @@ def build_train_cmd(cfg: dict, run_name: str, *, resume: bool = False,
     for key in PRESET_FIELDS:
         cmd += [f"--{key.replace('_', '-')}", str(cfg[key])]
     cmd += ["--run-name", run_name]
+    if source:
+        cmd += ["--source", source]
     if resume:
         cmd.append("--resume")
     return cmd

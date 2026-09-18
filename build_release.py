@@ -1,24 +1,30 @@
-"""Build a self-contained release of Game Boy AI for the computer this runs on.
+"""Build a self-contained AIboy app for the computer this runs on.
 
-    python build_release.py                # -> release/GameBoyAI/ and a zip next to it
+    python build_release.py                # -> release/AIboy/ and a zip next to it
     python build_release.py --no-roms      # leave the ROMs folder empty (for handing the build on)
     python build_release.py --no-selftest  # skip running the built app afterwards
     python build_release.py --no-zip
+
+Works the same way on macOS, Windows and Linux; run it in the Python
+environment that runs `python main.py`. If PyInstaller is missing it is
+installed into that environment first (with pip).
 
 What it does
   1. Profiles this machine (cores, performance cores, memory, chip) and writes
      system_profile.json: the number of emulators the release runs in parallel
      is chosen from it, so every built-in preset uses the cores it has and no
      more (see paths.recommended_n_envs / presets.fit_to_machine).
-  2. Runs PyInstaller (one-folder build; a windowed GameBoyAI.app on macOS)
-     with the boot video, the built-in presets and the profile inside.
-  3. Assembles release/GameBoyAI/: the app, a ROMs/ folder (your ROM files are
+  2. Runs PyInstaller (one-folder build; a windowed AIboy.app on macOS, an
+     AIboy/ folder with AIboy.exe on Windows, AIboy/AIboy on Linux) with the
+     boot video, the built-in presets and the profile inside.
+  3. Assembles release/AIboy/: the app, a ROMs/ folder (your ROM files are
      copied in unless --no-roms), an empty models/ folder and a README.txt.
+     The app keeps its own files (models, presets, experience.jsonl) next to
+     itself, never inside, so a newer build can replace it in place.
   4. Self-test: the built app probes a ROM and trains for a few hundred steps
      with two emulator processes, which exercises the frozen-app process
      spawning that training depends on.
 
-Needs PyInstaller in the same environment as the app (`pip install pyinstaller`).
 The build is for this machine's platform and CPU type; build on each kind of
 machine you want to ship to.
 """
@@ -35,12 +41,11 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-APP_NAME = "GameBoyAI"
+APP_NAME = "AIboy"
+PACKAGE = "aiboy"
 BUILD_DIR = ROOT / "build"
 RELEASE_DIR = ROOT / "release" / APP_NAME
 PROFILE_FILE = ROOT / "system_profile.json"
-LOCAL_MODULES = ("env", "games", "gui", "main", "paths", "player", "presets", "presets_tab",
-                 "runs", "tuning", "widgets", "wizard")
 MAX_ENVS = 12                 # beyond this the PPO update, not the rollout, dominates
 MEMORY_PER_ENV_GB = 0.25      # one PyBoy worker with its share of the trainer, generous
 MEMORY_SHARE = 0.5            # never plan to use more than half of the machine's memory
@@ -117,11 +122,26 @@ def make_icon() -> Path | None:
         return None
 
 
-def run_pyinstaller(profile: dict) -> Path:
+def ensure_pyinstaller():
+    """Import PyInstaller, installing it into this environment if needed."""
     try:
         import PyInstaller.__main__ as pyi
+        return pyi
     except ImportError:
-        sys.exit("PyInstaller is not installed in this environment: pip install pyinstaller")
+        pass
+    print("[build] PyInstaller is not installed; installing it with pip…")
+    rc = subprocess.run([sys.executable, "-m", "pip", "install", "pyinstaller"]).returncode
+    if rc != 0:
+        sys.exit("[build] could not install PyInstaller; run `pip install pyinstaller` and retry")
+    try:
+        import PyInstaller.__main__ as pyi
+        return pyi
+    except ImportError:
+        sys.exit("[build] PyInstaller still not importable after installing it")
+
+
+def run_pyinstaller(profile: dict) -> Path:
+    pyi = ensure_pyinstaller()
     PROFILE_FILE.write_text(json.dumps(profile, indent=2))
     sep = os.pathsep
     args = [
@@ -137,14 +157,14 @@ def run_pyinstaller(profile: dict) -> Path:
         "--collect-all", "stable_baselines3",  # reads its version.txt at import
         "--collect-all", "gymnasium",
         "--collect-submodules", "tensorboard",
+        "--collect-submodules", PACKAGE,      # the tabs are imported lazily; include every module
+        "--paths", str(ROOT),
         "--exclude-module", "pytest",
     ]
-    for mod in LOCAL_MODULES:
-        args += ["--hidden-import", mod]
     if sys.platform in ("darwin", "win32"):
         args.append("--windowed")
     if sys.platform == "darwin":
-        args += ["--osx-bundle-identifier", "com.gameboyai.app"]
+        args += ["--osx-bundle-identifier", "com.aiboy.app"]
     icon = make_icon()
     if icon is not None:
         args += ["--icon", str(icon)]
@@ -157,19 +177,23 @@ def run_pyinstaller(profile: dict) -> Path:
 
 # ------------------------- 3. release folder -------------------------
 
-README = """Game Boy AI — train an agent to play Super Mario Land
-======================================================
+README = """AIboy — teach an AI to play Super Mario Land
+============================================
 
 1. Put your own Super Mario Land ROM file, named mario.gb, into the ROMs folder
    next to the app. (The app does not include any game.)
 2. Start {app}. The Wizard tab opens: pick what the agent should learn and press
-   Start. It looks for good settings, trains, and then plays on the Game Boy
+   Start. AIboy looks for good settings, trains, and then plays on the Game Boy
    screen. Everything it makes lands in the models folder next to the app.
-3. Advanced tabs (Train, Tune, Presets) show and control the same runs in full.
+3. AIboy remembers every setting it tries (experience.jsonl next to the app):
+   the next search skips what it already knows and explores what it doesn't,
+   and the Experience tab shows everything it has learned so far.
+4. The other tabs (Train, Tune, Presets) show and control the same runs in full.
 
 Built {built_at} on {chip}: {cores} cores, {memory_gb} GB memory.
 This build runs {n_envs} game emulators in parallel while training. It is made
-for this kind of computer ({platform}, {machine}); build again on another kind.
+for this kind of computer ({platform}, {machine}); build again on another kind
+with `python build_release.py` from the source folder.
 
 If macOS refuses to open the app, right-click it and choose Open once.
 Errors are written to gui_errors.log next to the app.
@@ -234,6 +258,7 @@ def selftest(release: Path) -> None:
     run_dir = release / "models" / "mario" / "selftest"
     ok = out.returncode == 0 and (run_dir / "checkpoints" / "final.zip").exists()
     shutil.rmtree(run_dir, ignore_errors=True)
+    (release / "experience.jsonl").unlink(missing_ok=True)      # the app ships with no memory
     if not ok:
         sys.exit(f"[selftest] training failed (rc={out.returncode}):\n{out.stdout[-3000:]}\n"
                  f"{out.stderr[-3000:]}")
