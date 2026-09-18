@@ -32,7 +32,8 @@ from tkinter import messagebox, ttk
 from aiboy import presets
 from aiboy import runs
 from aiboy import tuning
-from aiboy.gui.widgets import FIELD_BY_KEY, MONO, MONO_BOLD, THEME, WidgetLock, make_table
+from aiboy.gui.widgets import (FIELD_BY_KEY, MONO, MONO_BOLD, THEME, WidgetLock, info_icon,
+                               make_table, tooltip)
 from aiboy.tuning import SHORT_KEYS, compact_overrides  # noqa: F401  (re-exported for callers)
 
 STEPS = ("Set up", "Save", "Train", "Watch")
@@ -42,9 +43,14 @@ TITLE = ("Helvetica", 15, "bold")
 # tests never share trial directories with a real wizard session.
 WIZARD_PREFIX = os.environ.get("AIBOY_WIZARD_PREFIX", "wizard")
 KEEP_BEST_TRIALS = 9            # run folders kept during a search; the rest are deleted
-AUTO_CHOICE = "Let AIboy choose — reuse what it knows, try what it doesn't (recommended)"
+AUTO_CHOICE = "Let AIboy choose (recommended)"
+AUTO_CHOICE_HELP = ("Let AIboy choose: variations it already knows are scored from memory, "
+                    "and once the standard ones are exhausted it explores untested settings "
+                    "around the best it has found. The other entries are fixed sets of "
+                    "variations, the same as the templates on the Tune tab.")
 AUTO = "auto"                   # the template name that stands for the experience-based plan
 SUGGESTIONS = 6                 # untested variations per "Let AIboy choose" search
+# One explanation per step, shown on hover over the ⓘ next to the step title.
 INTRO = {
     0: "Train your own Super Mario Land player. Choose what it should learn, decide whether "
        "AIboy should look for better settings first, and press Start. AIboy remembers every "
@@ -53,8 +59,9 @@ INTRO = {
        "again on the Train tab, or continue without saving.",
     2: "The agent now learns by playing, using every core of this computer. It keeps its best "
        "version as it goes, so you can stop early and still watch what it has learned.",
-    3: "The trained agent plays on the Game Boy screen to the right, exactly the way it "
-       "learned to.",
+    3: "The trained agent plays on the Game Boy screen, exactly the way it learned to. How "
+       "many rounds it plays and how fast are set under Tracking, where the live numbers "
+       "update while it plays.",
 }
 MODE_PLAIN = {
     "default": "plays through the game from 1-1, lives and all, like a person would",
@@ -186,9 +193,12 @@ class WizardTab:
             self._step_labels.append(lbl)
             if i < len(STEPS) - 1:
                 ttk.Label(header, text="→", foreground=THEME.muted).pack(side="left")
+        title_row = ttk.Frame(parent)
+        title_row.grid(row=1, column=0, sticky="ew", pady=(10, 4))
         self.title_var = tk.StringVar()
-        ttk.Label(parent, textvariable=self.title_var, font=TITLE).grid(
-            row=1, column=0, sticky="w", pady=(10, 2))
+        ttk.Label(title_row, textvariable=self.title_var, font=TITLE).pack(side="left")
+        self._intro_icon = info_icon(title_row, lambda: INTRO[self.step])
+        self._intro_icon.pack(side="left", padx=(8, 0))
 
         self.body = ttk.Frame(parent)
         self.body.grid(row=2, column=0, sticky="nsew")
@@ -207,17 +217,12 @@ class WizardTab:
         ttk.Label(parent, textvariable=self.status_var, font=MONO, foreground=THEME.muted,
                   wraplength=600).grid(row=3, column=0, sticky="w", pady=(8, 0))
 
-    def _intro(self, pane: ttk.Frame, step: int, row: int) -> None:
-        ttk.Label(pane, text=INTRO[step], wraplength=600, foreground=THEME.text_soft).grid(
-            row=row, column=0, sticky="w", pady=(0, 6))
-
     def _register(self, *widgets: tk.Widget) -> None:
         self._inputs.extend(widgets)
 
     # ----- pane 1: set up -----
 
     def _build_tune(self, pane: ttk.Frame) -> None:
-        self._intro(pane, 0, 0)
         self.rom_hint_var = tk.StringVar(value="")
         self.rom_hint = ttk.Label(pane, textvariable=self.rom_hint_var, wraplength=600,
                                   foreground=THEME.err)
@@ -232,10 +237,14 @@ class WizardTab:
         self.goal_combo = ttk.Combobox(goal, textvariable=self.goal_var, state="readonly")
         self.goal_combo.grid(row=0, column=1, sticky="ew", padx=6, pady=2)
         self.goal_combo.bind("<<ComboboxSelected>>", lambda e: self._on_goal_changed())
+        tooltip(self.goal_combo, "A goal is a preset: what the agent practises and for how "
+                                 "long. Every preset on the Presets tab is a goal here.")
         self.goal_note = ttk.Label(goal, text="", foreground=THEME.muted, wraplength=540)
         self.goal_note.grid(row=1, column=1, sticky="w", padx=6)
         self.known_note = ttk.Label(goal, text="", foreground=THEME.accent, wraplength=540)
         self.known_note.grid(row=2, column=1, sticky="w", padx=6)
+        tooltip(self.known_note, "What AIboy's experience file says about this goal: the best "
+                                 "settings found in earlier searches, and how sure it is.")
 
         search = ttk.LabelFrame(pane, text="Look for better settings first?", padding=6)
         search.grid(row=3, column=0, sticky="ew", pady=(6, 0))
@@ -243,11 +252,13 @@ class WizardTab:
         self.search_var = tk.StringVar(value="yes")
         rb_yes = ttk.Radiobutton(search, variable=self.search_var, value="yes",
                                  command=self._on_search_choice,
-                                 text="Yes — try a few variations and keep the best one (recommended)")
+                                 text="Yes, search first (recommended)")
         rb_yes.grid(row=0, column=0, columnspan=2, sticky="w")
+        tooltip(rb_yes, "Train a few variations of the goal's settings briefly, keep the best "
+                        "one, and use it for the real training run.")
         rb_no = ttk.Radiobutton(search, variable=self.search_var, value="no",
                                 command=self._on_search_choice,
-                                text="No — use the goal's settings as they are")
+                                text="No, use the goal's settings as they are")
         rb_no.grid(row=1, column=0, columnspan=2, sticky="w")
         ttk.Label(search, text="Vary:").grid(row=2, column=0, sticky="w", pady=(6, 2))
         self.template_var = tk.StringVar(value=AUTO_CHOICE)
@@ -255,6 +266,7 @@ class WizardTab:
                                            values=[AUTO_CHOICE, *tuning.TEMPLATE_FROM_PLAIN])
         self.template_combo.grid(row=2, column=1, sticky="ew", padx=6, pady=(6, 2))
         self.template_combo.bind("<<ComboboxSelected>>", lambda e: self._on_template_changed())
+        tooltip(self.template_combo, AUTO_CHOICE_HELP)
         self.template_note = ttk.Label(search, text="", foreground=THEME.muted, wraplength=540)
         self.template_note.grid(row=3, column=1, sticky="w", padx=6)
         ttk.Label(search, text="Effort:").grid(row=4, column=0, sticky="w", pady=(6, 2))
@@ -267,6 +279,9 @@ class WizardTab:
         self.effort_combo.bind("<<ComboboxSelected>>", lambda e: self._on_effort_changed())
         self.effort_note = ttk.Label(effort_row, text="", foreground=THEME.muted)
         self.effort_note.pack(side="left", padx=(8, 0))
+        tooltip(self.effort_combo, "How carefully each variation is judged: how often and how "
+                                   "long it is trained before the scores are compared. More "
+                                   "effort takes longer and decides more reliably.")
         self.advanced_var = tk.BooleanVar(value=False)
         adv_cb = ttk.Checkbutton(search, text="Advanced…", variable=self.advanced_var,
                                  command=self._toggle_advanced)
@@ -283,8 +298,8 @@ class WizardTab:
         seeds_spin = ttk.Spinbox(self.advanced, from_=1, to=5, width=4, textvariable=self.seeds_var,
                                  command=self._sync_tune_tab)
         seeds_spin.pack(side="left", padx=(6, 0))
-        ttk.Label(self.advanced, text="(details on the Tune tab)",
-                  foreground=THEME.muted).pack(side="left", padx=(12, 0))
+        tooltip(steps_spin, "Training steps per variation. The Tune tab shows the full plan.",
+                seeds_spin)
         self.search_widgets: list[tk.Widget] = [self.template_combo, self.effort_combo, adv_cb,
                                                 steps_spin, seeds_spin]
 
@@ -293,12 +308,16 @@ class WizardTab:
         ttk.Label(then, text="Then:").pack(side="left")
         self.auto_var = tk.BooleanVar(value=True)
         auto_cb = ttk.Checkbutton(then, variable=self.auto_var, command=self._update_summary,
-                                  text="run everything by itself (search → save → train → watch)")
+                                  text="run everything by itself")
         auto_cb.pack(side="left", padx=(6, 0))
+        tooltip(auto_cb, "Search, save the winner as a preset, train it and watch it play, "
+                         "without waiting for a click between the steps.")
         self.preview_var = tk.BooleanVar(value=False)
         preview_cb = ttk.Checkbutton(then, variable=self.preview_var,
-                                     text="show it playing while it trains (slower)")
+                                     text="show it playing while it trains")
         preview_cb.pack(side="left", padx=(12, 0))
+        tooltip(preview_cb, "Play the newest best model on the Preview screen during the "
+                            "training run. Costs some training speed.")
         self.summary_var = tk.StringVar(value="")
         ttk.Label(pane, textvariable=self.summary_var, wraplength=600).grid(
             row=4, column=0, sticky="w", pady=(6, 0))
@@ -317,6 +336,8 @@ class WizardTab:
         self.btn_clear_search = ttk.Button(btns, text="Delete old search runs…",
                                            command=self.clear_search_data)
         self.btn_clear_search.pack(side="right", padx=(0, 6))
+        tooltip(self.btn_clear_search, "Remove the run folders of earlier wizard searches from "
+                                       "disk. What AIboy learned from them is kept.")
 
         prog = ttk.Frame(pane)
         prog.grid(row=6, column=0, sticky="ew")
@@ -342,7 +363,6 @@ class WizardTab:
     # ----- pane 2: save -----
 
     def _build_preset(self, pane: ttk.Frame) -> None:
-        self._intro(pane, 1, 0)
         box = ttk.LabelFrame(pane, text="Settings", padding=8)
         box.grid(row=1, column=0, sticky="nsew")
         pane.rowconfigure(1, weight=1)
@@ -377,7 +397,6 @@ class WizardTab:
     # ----- pane 3: train -----
 
     def _build_train(self, pane: ttk.Frame) -> None:
-        self._intro(pane, 2, 0)
         form = ttk.LabelFrame(pane, text="Training run", padding=8)
         form.grid(row=1, column=0, sticky="ew")
         form.columnconfigure(1, weight=1)
@@ -395,9 +414,11 @@ class WizardTab:
         self.train_eta_var = tk.StringVar()
         ttk.Label(form, textvariable=self.train_eta_var, foreground=THEME.muted).grid(
             row=2, column=1, sticky="w", padx=6)
-        preview_cb = ttk.Checkbutton(form, text="Show it playing while it trains (a bit slower)",
+        preview_cb = ttk.Checkbutton(form, text="Show it playing while it trains",
                                      variable=self.preview_var)
         preview_cb.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        tooltip(preview_cb, "Play the newest best model on the Preview screen during the "
+                            "training run. Costs some training speed.")
         self._register(run_entry, steps_spin, preview_cb)
 
         btns = ttk.Frame(pane)
@@ -437,17 +458,12 @@ class WizardTab:
     # ----- pane 4: watch -----
 
     def _build_watch(self, pane: ttk.Frame) -> None:
-        self._intro(pane, 3, 0)
         box = ttk.LabelFrame(pane, text="Trained agent", padding=8)
         box.grid(row=1, column=0, sticky="ew")
         box.columnconfigure(0, weight=1)
         self.model_var = tk.StringVar(value="—")
         ttk.Label(box, textvariable=self.model_var, font=MONO, wraplength=600).grid(
             row=0, column=0, sticky="w")
-        ttk.Label(box, foreground=THEME.muted, wraplength=600,
-                  text="How many rounds it plays and how fast are set on the screen panel to "
-                       "the right; the live numbers update there while it plays.").grid(
-            row=1, column=0, sticky="w", pady=(4, 0))
 
         btns = ttk.Frame(pane)
         btns.grid(row=2, column=0, sticky="ew", pady=(10, 6))
@@ -995,7 +1011,7 @@ class WizardTab:
         app = self.app
         app.refresh_models()
         if not app.select_model(best):
-            messagebox.showerror("Wizard", f"Model not listed on the screen panel: {best}")
+            messagebox.showerror("Wizard", f"Model not listed under Tracking: {best}")
             return
         app.sync_play_options(self.config)
         app.play_max_steps_var.set(0)

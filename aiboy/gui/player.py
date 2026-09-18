@@ -10,6 +10,8 @@ using the GUI's `_pump` protocol:
     ("play_status", text)         screen-panel status line
     ("play_stat", key, value)     one screen-panel live-episode stat
     ("play_stats", {key: value})  the per-step stats, one event per step
+    ("play_episode", {...})       a round finished: {"episode", "reward",
+                                  "steps", "end"} (playback and preview)
     ("play_done", summary)        playback finished; summary = list of
                                   {"reward", "steps"} per completed episode
     ("play_error", traceback)
@@ -158,10 +160,8 @@ class LatestFrame:
             frame, self._frame = self._frame, None
             return frame
 
-# Canvas geometry and speed presets shared by the Play tab and the wizard.
-SCALE = 3
+# Emulator frame size and the speed presets of the Play controls.
 GAME_W, GAME_H = 160, 144
-CANVAS_W, CANVAS_H = GAME_W * SCALE, GAME_H * SCALE
 SPEED_CHOICES = [("0.5×", 0.5), ("1× (real time)", 1.0), ("2×", 2.0),
                  ("4×", 4.0), ("Unlimited", 0.0)]
 
@@ -366,6 +366,8 @@ class EmbeddedPlayer:
                 if clears:
                     reason += f" — {clears} level(s) cleared in one life"
                 summary.append({"reward": total, "steps": steps, "end": reason})
+                self._emit("play_episode", {"episode": ep + 1, "reward": total, "steps": steps,
+                                            "end": reason})
                 self._emit("play_status",
                            f"Episode {ep + 1}: reward {total:.0f}, {steps} steps, {reason}")
             self._emit("play_done", summary)
@@ -418,6 +420,9 @@ class EmbeddedPlayer:
                 ep_steps += 1
                 self._report_step(game, action, info, ep_reward, ep_steps)
                 if done[0]:
+                    self._emit("play_episode", {"episode": ep_num, "reward": ep_reward,
+                                                "steps": ep_steps,
+                                                "end": episode_end_reason(info, ep_steps, 0)})
                     obs = session.vec.reset()
                     ep_num += 1
                     ep_reward, ep_steps = 0.0, 0

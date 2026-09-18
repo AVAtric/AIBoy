@@ -6,6 +6,9 @@
   fields with the same widgets and validation.
 - `make_table`: a Treeview with one monospaced font and a fixed row height
   for every row, so highlighted rows are the same size as the others.
+- `Tooltip` / `tooltip()` / `info_icon()`: explanations that appear on
+  hover instead of taking up space on the tab. The window keeps only the
+  controls and one-line status texts; everything else is a hover away.
 """
 from __future__ import annotations
 
@@ -85,33 +88,73 @@ class FieldSpec:
     inc: float = 1
     choices: tuple[str, ...] = ()
     entry: bool = False         # plain Entry instead of a Spinbox (scientific notation)
+    help: str = ""              # shown on hover over the label and the input
 
 
 FIELDS: tuple[FieldSpec, ...] = (
     # Basic: what and how long
-    FieldSpec("timesteps", "Timesteps", "int", "basic", 1000, 200_000_000, 10_000),
-    FieldSpec("n_envs", f"Envs ({cpu_count()} cores)", "int", "basic", 1, 32),
-    FieldSpec("obs_type", "Obs type", "choice", "basic", choices=tuple(OBS_TYPES)),
-    FieldSpec("start_level", "Start level", "choice", "basic", choices=tuple(level_choices())),
-    FieldSpec("device", "Device", "choice", "basic", choices=("cpu", "auto", "mps", "cuda")),
-    FieldSpec("seed", "Seed", "int", "basic", 0, 2_147_483_647),
+    FieldSpec("timesteps", "Timesteps", "int", "basic", 1000, 200_000_000, 10_000,
+              help="How many game steps to train in total. More steps take longer and usually "
+                   "give a better player."),
+    FieldSpec("n_envs", f"Envs ({cpu_count()} cores)", "int", "basic", 1, 32,
+              help="How many games run in parallel. One per core is a good default; beyond "
+                   "about 12 the learning update, not the games, sets the pace."),
+    FieldSpec("obs_type", "Obs type", "choice", "basic", choices=tuple(OBS_TYPES),
+              help="What the agent sees. 'tiles': the level's tile map (fast, recommended). "
+                   "'pixels': the raw screen through a small CNN (much slower)."),
+    FieldSpec("start_level", "Start level", "choice", "basic", choices=tuple(level_choices()),
+              help="Where every attempt starts: the campaign from 1-1 ('default'), a random "
+                   "level, level by level, a marathon through all levels, or one fixed level."),
+    FieldSpec("device", "Device", "choice", "basic", choices=("cpu", "auto", "mps", "cuda"),
+              help="Where the network is computed. 'cpu' is fastest for this small network; "
+                   "'mps' / 'cuda' use the GPU, 'auto' lets PyTorch decide."),
+    FieldSpec("seed", "Seed", "int", "basic", 0, 2_147_483_647,
+              help="Random seed. The same seed with the same settings gives a repeatable run."),
     # PPO: the learning algorithm
-    FieldSpec("learning_rate", "Learning rate", "float", "ppo", entry=True),
-    FieldSpec("ent_coef", "Entropy coef", "float", "ppo", 0.0, 0.5, 0.01),
-    FieldSpec("n_steps", "n_steps", "int", "ppo", 32, 8192, 32),
-    FieldSpec("batch_size", "Batch size", "int", "ppo", 8, 4096, 8),
-    FieldSpec("n_epochs", "Epochs", "int", "ppo", 1, 30),
-    FieldSpec("gamma", "Gamma", "float", "ppo", 0.9, 0.9999, 0.005),
-    FieldSpec("gae_lambda", "GAE lambda", "float", "ppo", 0.8, 1.0, 0.01),
-    FieldSpec("clip_range", "Clip range", "float", "ppo", 0.05, 0.5, 0.05),
+    FieldSpec("learning_rate", "Learning rate", "float", "ppo", entry=True,
+              help="Learning speed. Too high diverges after the first level, too low never "
+                   "leaves 1-1. Typical values: 0.0001 to 0.001."),
+    FieldSpec("ent_coef", "Entropy coef", "float", "ppo", 0.0, 0.5, 0.01,
+              help="Curiosity: how much random exploration is rewarded. Raise it if the agent "
+                   "keeps getting stuck at one obstacle."),
+    FieldSpec("n_steps", "n_steps", "int", "ppo", 32, 8192, 32,
+              help="Steps each game plays before the network reviews them (the rollout). "
+                   "Longer rollouts see whole levels."),
+    FieldSpec("batch_size", "Batch size", "int", "ppo", 8, 4096, 8,
+              help="How many steps are learned from at once. Bigger batches make fewer, "
+                   "smoother updates."),
+    FieldSpec("n_epochs", "Epochs", "int", "ppo", 1, 30,
+              help="Passes over each rollout. More squeezes more out of it but risks "
+                   "over-fitting to that rollout."),
+    FieldSpec("gamma", "Gamma", "float", "ppo", 0.9, 0.9999, 0.005,
+              help="Foresight: how much future reward counts. Long levels favour values "
+                   "close to 1."),
+    FieldSpec("gae_lambda", "GAE lambda", "float", "ppo", 0.8, 1.0, 0.01,
+              help="Smoothing of the reward estimate, from 0.8 (steadier, biased) to 1.0 "
+                   "(noisier, unbiased)."),
+    FieldSpec("clip_range", "Clip range", "float", "ppo", 0.05, 0.5, 0.05,
+              help="Step size: how far one update may move the policy. Smaller is safer "
+                   "but slower."),
     # Run: input shape and cadence
-    FieldSpec("action_repeat", "Action repeat", "int", "run", 1, 16),
-    FieldSpec("frame_stack", "Frame stack", "int", "run", 1, 16),
-    FieldSpec("checkpoint_freq", "Checkpoint every", "int", "run", 100, 10_000_000, 1000),
-    FieldSpec("eval_freq", "Eval every", "int", "run", 100, 10_000_000, 1000),
-    FieldSpec("n_eval_episodes", "Eval episodes", "int", "run", 1, 100),
-    FieldSpec("time_budget", "Time budget /400", "int", "run", 0, 400, 10),
-    FieldSpec("stall_steps", "Stall limit (0=off)", "int", "run", 0, 5000, 50),
+    FieldSpec("action_repeat", "Action repeat", "int", "run", 1, 16,
+              help="Emulator frames each chosen action is held. 4 means the agent decides "
+                   "15 times per second of game time."),
+    FieldSpec("frame_stack", "Frame stack", "int", "run", 1, 16,
+              help="How many recent observations the agent sees at once, so it can tell "
+                   "which way things move."),
+    FieldSpec("checkpoint_freq", "Checkpoint every", "int", "run", 100, 10_000_000, 1000,
+              help="Save a resumable snapshot every this many steps."),
+    FieldSpec("eval_freq", "Eval every", "int", "run", 100, 10_000_000, 1000,
+              help="Play test rounds every this many steps; the model with the best test "
+                   "score is kept as best_model.zip."),
+    FieldSpec("n_eval_episodes", "Eval episodes", "int", "run", 1, 100,
+              help="Test rounds per evaluation. More give a steadier score but take longer."),
+    FieldSpec("time_budget", "Time budget /400", "int", "run", 0, 400, 10,
+              help="Game-clock units (of the 400 a level starts with) an attempt may use "
+                   "before it is cut off. 0 = the game's own timer."),
+    FieldSpec("stall_steps", "Stall limit (0=off)", "int", "run", 0, 5000, 50,
+              help="End the attempt after this many steps without getting further right. "
+                   "0 = never."),
 )
 GROUP_TITLES = {"basic": "Basic", "ppo": "PPO", "run": "Input & cadence"}
 FIELD_BY_KEY = {f.key: f for f in FIELDS}
@@ -164,6 +207,110 @@ def setup_styles(root: tk.Misc) -> None:
     style.configure("TNotebook", padding=0)
 
 
+class Tooltip:
+    """A small popup with explanatory text, shown after the pointer rests on
+    `widget` for a moment. `text` may be a string or a callable returning
+    the current text (so a tooltip can follow a setting); an empty text
+    shows nothing. `show_at()` / `hide()` let a canvas drive it by hand."""
+
+    DELAY_MS = 450
+    WRAP = 360
+
+    def __init__(self, widget: tk.Widget, text, wrap: int = WRAP):
+        self.widget = widget
+        self.text = text
+        self.wrap = wrap
+        self._after: str | None = None
+        self._win: tk.Toplevel | None = None
+        widget.bind("<Enter>", self.schedule, add="+")
+        widget.bind("<Leave>", lambda e: self.hide(), add="+")
+        widget.bind("<ButtonPress>", lambda e: self.hide(), add="+")
+        widget.bind("<Destroy>", lambda e: self.hide(), add="+")
+
+    def current_text(self) -> str:
+        return str(self.text() if callable(self.text) else self.text or "")
+
+    def schedule(self, _event=None) -> None:
+        """Show the popup after the usual delay (as hovering the widget does)."""
+        self._cancel()
+        self._after = self.widget.after(self.DELAY_MS, self._show)
+
+    def _cancel(self) -> None:
+        if self._after is not None:
+            try:
+                self.widget.after_cancel(self._after)
+            except tk.TclError:
+                pass
+            self._after = None
+
+    def _show(self) -> None:
+        self._after = None
+        x = self.widget.winfo_pointerx() + 14
+        y = self.widget.winfo_pointery() + 18
+        self.show_at(x, y)
+
+    def show_at(self, x: int, y: int, text: str | None = None) -> None:
+        """Show the popup with its top-left corner at screen position (x, y)."""
+        text = self.current_text() if text is None else text
+        if not text:
+            self.hide()
+            return
+        if self._win is None or not self._win.winfo_exists():
+            try:
+                win = tk.Toplevel(self.widget)
+            except tk.TclError:
+                return
+            win.wm_overrideredirect(True)
+            try:
+                win.tk.call("::tk::unsupported::MacWindowStyle", "style", win._w, "help", "none")
+            except tk.TclError:
+                pass
+            self._label = tk.Label(win, text=text, justify="left", wraplength=self.wrap,
+                                   background="#fffbe6", foreground="#222222",
+                                   relief="solid", borderwidth=1, padx=8, pady=5)
+            self._label.pack()
+            self._win = win
+        else:
+            self._label.config(text=text)
+        win = self._win
+        win.update_idletasks()
+        # Keep the popup on the screen the pointer is on.
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        x = max(0, min(x, sw - w - 4))
+        y = max(0, min(y, sh - h - 4))
+        win.geometry(f"+{x}+{y}")
+        win.deiconify()
+        win.lift()
+
+    def hide(self, _event=None) -> None:
+        self._cancel()
+        if self._win is not None:
+            try:
+                self._win.destroy()
+            except tk.TclError:
+                pass
+            self._win = None
+
+
+def tooltip(widget: tk.Widget, text, *widgets: tk.Widget) -> Tooltip:
+    """Attach the same hover text to one or more widgets; returns the first
+    Tooltip (its `text` can be replaced later)."""
+    first = Tooltip(widget, text)
+    for w in widgets:
+        Tooltip(w, text)
+    return first
+
+
+def info_icon(parent: tk.Misc, text, **grid_or_pack) -> ttk.Label:
+    """A small ⓘ that explains something on hover. The caller places it
+    (`.grid()` / `.pack()`), exactly like a Label."""
+    lbl = ttk.Label(parent, text="ⓘ", foreground=THEME.accent, cursor="question_arrow",
+                    font=("Helvetica", 13))
+    Tooltip(lbl, text)
+    return lbl
+
+
 class ConfigForm(ttk.Frame):
     """Basic, PPO and Input & cadence parameter groups side by side.
 
@@ -190,9 +337,11 @@ class ConfigForm(ttk.Frame):
             var = self._make_var(spec)
             self.vars[spec.key] = var
             widget = self._make_widget(frame, spec, var)
-            ttk.Label(frame, text=f"{spec.label}:").grid(row=rows[spec.group], column=0,
-                                                         sticky="w", pady=1)
+            label = ttk.Label(frame, text=f"{spec.label}:")
+            label.grid(row=rows[spec.group], column=0, sticky="w", pady=1)
             widget.grid(row=rows[spec.group], column=1, sticky="ew", pady=1, padx=(6, 0))
+            if spec.help:
+                tooltip(label, spec.help, widget)
             rows[spec.group] += 1
             self.widgets.append(widget)
             if on_change is not None:

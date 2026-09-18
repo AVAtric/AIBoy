@@ -18,7 +18,7 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
 from aiboy import presets
-from aiboy.gui.widgets import MONO_BOLD, THEME, ConfigForm, make_table
+from aiboy.gui.widgets import MONO_BOLD, THEME, ConfigForm, info_icon, make_table, tooltip
 from aiboy.tuning import mode_label
 
 KIND_NOTE = {
@@ -27,6 +27,9 @@ KIND_NOTE = {
     "modified": "Built-in preset with your changes. 'Reset to default' restores the shipped values.",
     "user": "User preset. Edit, rename or delete it freely.",
 }
+ABOUT = ("A preset is a complete training configuration. Select one to edit it below; "
+         "double-click to load it into the Train tab. Built-in presets keep their shipped "
+         "values behind your edits, so they can always be reset.")
 
 
 class PresetsTab:
@@ -43,12 +46,6 @@ class PresetsTab:
     def _build(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(1, weight=1)
-
-        ttk.Label(parent, wraplength=640, foreground=THEME.text_soft,
-                  text="A preset is a complete training configuration. Select one to edit it "
-                       "below; double-click to load it into the Train tab. Built-in presets "
-                       "keep their shipped values behind your edits, so they can always be "
-                       "reset.").grid(row=0, column=0, sticky="w", pady=(0, 8))
 
         top = ttk.Frame(parent)
         top.grid(row=1, column=0, sticky="nsew", pady=(0, 8))
@@ -75,6 +72,9 @@ class PresetsTab:
         self.btn_dup.pack(side="left", padx=4)
         ttk.Button(lbtns, text="Reload from disk", command=self.app.refresh_presets).pack(
             side="right")
+        info_icon(lbtns, ABOUT).pack(side="right", padx=(0, 8))
+        tooltip(self.btn_new, "A new preset starting from the selected one's values.")
+        tooltip(self.btn_from_train, "A new preset with the values currently on the Train tab.")
         lbtns2 = ttk.Frame(top)
         lbtns2.grid(row=2, column=0, sticky="ew", pady=(4, 0))
         self.btn_rename = ttk.Button(lbtns2, text="Rename…", command=self.rename)
@@ -92,7 +92,9 @@ class PresetsTab:
         self.title_var = tk.StringVar(value="No preset selected")
         ttk.Label(head, textvariable=self.title_var, font=MONO_BOLD).pack(side="left")
         self.kind_var = tk.StringVar(value="")
-        ttk.Label(head, textvariable=self.kind_var, foreground=THEME.muted).pack(side="left", padx=8)
+        kind_lbl = ttk.Label(head, textvariable=self.kind_var, foreground=THEME.muted)
+        kind_lbl.pack(side="left", padx=8)
+        tooltip(kind_lbl, lambda: KIND_NOTE.get(self.kind_var.get().strip("()"), ""))
         self.note_var = tk.StringVar(value="")
         ttk.Label(editor, textvariable=self.note_var, foreground=THEME.muted, wraplength=640).grid(
             row=1, column=0, sticky="w", pady=(0, 6))
@@ -167,12 +169,12 @@ class PresetsTab:
             kind = presets.kind(name)
             self.title_var.set(name)
             self.kind_var.set(f"({kind})")
-            note = KIND_NOTE[kind]
             history = self.app.experience.improvement_history(name)
+            note = ""
             if history:
                 last = history[-1]
-                note += (f" AIboy improved it on "
-                         f"{time.strftime('%Y-%m-%d', time.localtime(last.created_at))}: {last.note}")
+                note = (f"AIboy improved it on "
+                        f"{time.strftime('%Y-%m-%d', time.localtime(last.created_at))}: {last.note}")
             self.note_var.set(note)
             self.form.set_config(cfg)
             self.form.set_enabled(True)

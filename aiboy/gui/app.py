@@ -6,7 +6,9 @@ Tabs, in workflow order:
   Tune        hyperparameter sweeps over short training trials
   Presets     browse / edit / organise presets (see presets_tab.py)
   Experience  everything AIboy has tried so far (see experience_tab.py)
-plus the Game Boy screen on the right, which plays any saved model.
+then the Preview (a photo of a Game Boy with the emulator on its LCD and
+its buttons lit per action, see gameboy.py) and the Tracking panel (live episode, training progress, and the controls to
+play any saved model) to its right.
 
 Training and tuning run `main.py train` as subprocesses so the window stays
 responsive; playback runs on a background thread (player.py). All
@@ -38,11 +40,12 @@ from aiboy import APP_NAME, presets, runs, settings, tuning
 from aiboy.experience import Experience, Record
 from aiboy.games import OBS_TYPES, RomInfo, discover_roms, level_choices, probe_rom
 from aiboy.gui.experience_tab import ExperienceTab
-from aiboy.gui.player import (CANVAS_H, CANVAS_W, GAME_H, GAME_W, SPEED_CHOICES, EmbeddedPlayer,
-                              IntroVideo, LatestFrame)
+from aiboy.gui.gameboy import PHOTO_W, SCREEN_H, SCREEN_W, GameBoyView
+from aiboy.gui.player import GAME_H, GAME_W, SPEED_CHOICES, EmbeddedPlayer, IntroVideo, LatestFrame
 from aiboy.gui.presets_tab import PresetsTab
 from aiboy.paths import DATA_DIR, FROZEN
-from aiboy.gui.widgets import MONO, MONO_BOLD, THEME, ConfigForm, WidgetLock, make_table, setup_styles
+from aiboy.gui.widgets import (MONO, MONO_BOLD, THEME, ConfigForm, WidgetLock, info_icon, make_table,
+                               setup_styles, tooltip)
 
 PROJECT_DIR = DATA_DIR      # ROMs/, models/, presets and the error log live here
 DEFAULT_GAME = "mario"
@@ -54,7 +57,13 @@ TRACKED_STATS = ("total_timesteps", "ep_rew_mean", "ep_len_mean", "fps", "time_e
 
 LEVEL_CHOICES = level_choices()
 
+# Window: tabs (grow) | Preview (screen width) | Tracking (TRACK_W).
+WINDOW_W, WINDOW_H = 1650, 900
+MIN_W, MIN_H = 1560, 820
+TRACK_W = 330               # width of the Tracking panel's contents
+
 STOP_GRACE_SECONDS = 20     # SIGINT -> trainer saves final.zip; SIGKILL after this
+NO_MODEL = "(no trained model yet)"     # shown in the model box until a run has produced one
 FLASH_SECONDS = 6           # transient status-bar messages
 
 
@@ -63,16 +72,16 @@ INTRO_DISABLED = os.environ.get("AIBOY_NO_INTRO") == "1"      # tests: silent, n
 
 
 def idle_screen(intro: IntroVideo | None = None) -> Image.Image:
-    """Screen for the canvas while no video is active: the intro video's
-    last frame with the logo, with a pixel-font "No video" under it. Falls
-    back to a drawn screen when the intro assets are missing."""
+    """Screen for the LCD while no video is active: the intro video's last
+    frame with the logo, with a pixel-font "No video" under it. Falls back
+    to a drawn screen when the intro assets are missing."""
     from PIL import ImageDraw
     if intro is not None:
         base = Image.fromarray(intro.idle_frame())                        # 160x144
         draw = ImageDraw.Draw(base)
         w = draw.textlength(IDLE_SCREEN_TEXT)
         draw.text(((GAME_W - w) / 2, 92), IDLE_SCREEN_TEXT, fill=(2, 10, 7))
-        return base.resize((CANVAS_W, CANVAS_H), Image.NEAREST)
+        return base.resize((SCREEN_W, SCREEN_H), Image.NEAREST)
     img = Image.new("RGB", (GAME_W, GAME_H), (155, 188, 15))
     draw = ImageDraw.Draw(img)
     dark = (15, 56, 15)
@@ -80,7 +89,7 @@ def idle_screen(intro: IntroVideo | None = None) -> Image.Image:
     for i, line in enumerate((APP_NAME, IDLE_SCREEN_TEXT)):
         w = draw.textlength(line)
         draw.text(((GAME_W - w) / 2, 56 + i * 20), line, fill=dark)
-    return img.resize((CANVAS_W, CANVAS_H), Image.NEAREST)
+    return img.resize((SCREEN_W, SCREEN_H), Image.NEAREST)
 
 
 def interrupt(proc: subprocess.Popen | None) -> None:
@@ -110,8 +119,8 @@ class AIboyGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title(f"{APP_NAME} — Super Mario Land")
-        root.geometry("1300x900")
-        root.minsize(1240, 820)
+        root.geometry(f"{WINDOW_W}x{WINDOW_H}")
+        root.minsize(MIN_W, MIN_H)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Cross-thread channels
@@ -138,8 +147,7 @@ class AIboyGUI:
         self._model_paths: dict[str, Path] = {}
         self._all_presets: dict[str, dict] = {}
         self._tune_results: dict[int, tuning.ConfigResult] = {}
-        self._canvas_img_id: int | None = None
-        self._tk_img: ImageTk.PhotoImage | None = None
+        self._tk_img: ImageTk.PhotoImage | None = None        # what the LCD shows right now
         self.train_progress_var = tk.DoubleVar(value=0.0)
         self.train_progress_text = tk.StringVar(value="—")
         self._closing = False
@@ -168,6 +176,7 @@ class AIboyGUI:
         if self.intro is not None:
             # Boot video with sound once the window is up; ends on the idle
             # frame ("No video") unless something else takes the screen.
+            self.gameboy.set_power(True)
             self.root.after(300, lambda: self.intro.play(
                 self.frames, self.intro_stop,
                 on_done=lambda: self.stats_queue.put(("intro_done",))))
@@ -291,15 +300,17 @@ class AIboyGUI:
         ttk.Label(bar, textvariable=self.disk_var, foreground=THEME.muted, font=MONO).pack(
             side="right")
 
-        # Main area: workflow tabs on the left, the Game Boy screen on the right.
+        # Main area, three sections: workflow tabs | Preview | Tracking.
         main = ttk.Frame(self.root)
         main.pack(fill="both", expand=True, padx=10, pady=(8, 4))
         main.columnconfigure(0, weight=1)
         main.rowconfigure(0, weight=1)
         self.nb = ttk.Notebook(main)
         self.nb.grid(row=0, column=0, sticky="nsew")
-        screen = ttk.LabelFrame(main, text="Preview", padding=8)
-        screen.grid(row=0, column=1, sticky="ns", padx=(10, 0))
+        self.preview_frame = ttk.LabelFrame(main, text="Preview", padding=8)
+        self.preview_frame.grid(row=0, column=1, sticky="ns", padx=(10, 0))
+        self.tracking_frame = ttk.LabelFrame(main, text="Tracking", padding=8)
+        self.tracking_frame.grid(row=0, column=2, sticky="ns", padx=(10, 0))
 
         self.wizard_tab = ttk.Frame(self.nb, padding=8)
         self.train_tab = ttk.Frame(self.nb, padding=8)
@@ -314,7 +325,8 @@ class AIboyGUI:
         # Train and Tune define the variables the wizard mirrors; build them first.
         self._build_train(self.train_tab)
         self._build_tune(self.tune_tab)
-        self._build_screen(screen)
+        self._build_screen(self.preview_frame)
+        self._build_tracking(self.tracking_frame)
         self.wizard = WizardTab(self, self.wizard_tab)
         self.presets_tab = PresetsTab(self, self.presets_frame)
         self.experience_tab = ExperienceTab(self, self.experience_frame)
@@ -379,13 +391,11 @@ class AIboyGUI:
     def show_tab(self, tab: ttk.Frame) -> None:
         self.nb.select(tab)
 
-    def _init_canvas(self, canvas: tk.Canvas) -> None:
-        """Idle screen ("No video") when nothing else is on the canvas."""
+    def _init_canvas(self) -> None:
+        """Idle screen ("No video") when nothing else is on the LCD; LED off."""
         self._tk_img = ImageTk.PhotoImage(idle_screen(self.intro))
-        if self._canvas_img_id is None:
-            self._canvas_img_id = canvas.create_image(0, 0, anchor="nw", image=self._tk_img)
-        else:
-            canvas.itemconfig(self._canvas_img_id, image=self._tk_img)
+        self.gameboy.set_screen(self._tk_img)
+        self.gameboy.set_power(False)
 
     # ---------- Train tab ----------
 
@@ -437,16 +447,21 @@ class AIboyGUI:
         self.run_name_combo.pack(side="left", padx=(6, 4))
         self.run_name_combo.bind("<KeyRelease>", lambda e: self._on_run_name_changed())
         self.run_name_combo.bind("<<ComboboxSelected>>", lambda e: self._on_run_name_changed())
-        self.resume_check = ttk.Checkbutton(
-            run_row, text="Resume from newest checkpoint if one exists", variable=self.resume_var)
+        self.resume_check = ttk.Checkbutton(run_row, text="Resume if possible",
+                                            variable=self.resume_var)
         self.resume_check.pack(side="left", padx=(18, 0))
+        tooltip(self.resume_check, "Continue from the run's newest checkpoint if it has one. A "
+                                   "run without a checkpoint simply starts fresh. Untick it to "
+                                   "start over and replace the run's models.")
         self.run_hint_var = tk.StringVar(value="")
         ttk.Label(controls, textvariable=self.run_hint_var, foreground=THEME.muted, font=MONO,
-                  wraplength=640).grid(row=1, column=0, sticky="w", pady=(2, 0))
-        self.preview_check = ttk.Checkbutton(
-            controls, text="Show live preview on the screen while training (slower)",
-            variable=self.preview_var)
+                  wraplength=600).grid(row=1, column=0, sticky="w", pady=(2, 0))
+        self.preview_check = ttk.Checkbutton(controls, text="Live preview while training",
+                                             variable=self.preview_var)
         self.preview_check.grid(row=2, column=0, sticky="w", pady=(4, 0))
+        tooltip(self.preview_check, "Play the run's newest best model on the Preview screen "
+                                    "while it trains, reloading it whenever it improves. Costs "
+                                    "some training speed.")
 
         btns = ttk.Frame(controls)
         btns.grid(row=3, column=0, sticky="ew", pady=(6, 0))
@@ -455,8 +470,9 @@ class AIboyGUI:
         self.btn_train_stop = ttk.Button(btns, text="Stop", command=self.stop_training,
                                          state="disabled")
         self.btn_train_stop.pack(side="left", padx=4)
-        ttk.Button(btns, text="TensorBoard", command=self.open_tensorboard).pack(
-            side="left", padx=(16, 4))
+        btn_tb = ttk.Button(btns, text="TensorBoard", command=self.open_tensorboard)
+        btn_tb.pack(side="left", padx=(16, 4))
+        tooltip(btn_tb, "Open the training curves of every run of this game in the browser.")
         # Housekeeping for the named run, on its own line so nothing is clipped.
         keep = ttk.Frame(controls)
         keep.grid(row=4, column=0, sticky="ew", pady=(4, 0))
@@ -490,82 +506,125 @@ class AIboyGUI:
         yscroll.grid(row=0, column=1, sticky="ns")
         self.log_text.config(yscrollcommand=yscroll.set)
 
-    # ---------- Screen panel (always visible) ----------
+    # ---------- Preview and Tracking panels (always visible) ----------
 
     def _build_screen(self, parent: ttk.Frame) -> None:
-        """The emulator view plus the controls to play a saved model. Live
-        preview during training and the wizard's Watch step render here too,
-        so nothing has to switch tabs to be seen."""
-        self.canvas = tk.Canvas(parent, width=CANVAS_W, height=CANVAS_H, bg="#222",
-                                highlightthickness=0)
-        self.canvas.pack()
-        self._init_canvas(self.canvas)
+        """The Game Boy: the emulator view on its LCD, its buttons lighting
+        up as the agent presses them, and a status line under it. Playback,
+        the live preview during training and the wizard's Watch step all
+        render here, so nothing has to switch tabs to be seen."""
+        self.gameboy = GameBoyView(parent)
+        self.gameboy.pack()
+        self.canvas = self.gameboy                    # the same canvas, older name
+        self._init_canvas()
         self.play_status_var = tk.StringVar(value="idle")
-        ttk.Label(parent, textvariable=self.play_status_var, font=MONO, wraplength=CANVAS_W).pack(
-            fill="x", pady=(4, 2))
+        status = ttk.Label(parent, textvariable=self.play_status_var, font=MONO,
+                           wraplength=PHOTO_W, anchor="center", justify="center")
+        status.pack(fill="x", pady=(4, 0))
+        tooltip(status, "What the screen is showing right now: the model being played, the "
+                        "live preview of a training run, or the last round's result.")
 
-        # Live episode, three columns.
+    def _build_tracking(self, parent: ttk.Frame) -> None:
+        """Live numbers next to the screen: the episode being played, the
+        training run's progress, and the controls to play a saved model."""
+        # Live episode: two columns of label / value pairs.
         stats = ttk.LabelFrame(parent, text="Live episode", padding=(6, 2))
-        stats.pack(fill="x", pady=(0, 4))
-        keys = ["episode", "world", "power", "reward", "x", "lives", "steps", "coins", "action"]
+        stats.pack(fill="x", pady=(0, 6))
+        keys = ["episode", "world", "power", "lives", "coins", "reward", "x", "steps", "action"]
+        help_texts = {
+            "episode": "Round being played, of how many.",
+            "world": "Level Mario is in (world-level).",
+            "power": "Mario's size: 0 small, 1 big, 2 flower.",
+            "lives": "Lives left.", "coins": "Coins collected in this round.",
+            "reward": "Score the agent has earned in this round so far.",
+            "x": "How far right Mario is in the level (and the furthest he got).",
+            "steps": "Decisions the agent has made in this round.",
+            "action": "What the agent is pressing right now (also lit on the buttons).",
+        }
         self.play_stat_vars = {k: tk.StringVar(value="—") for k in keys}
-        for i, key in enumerate(keys):
-            row, col = divmod(i, 3)
-            ttk.Label(stats, text=f"{key}:", foreground=THEME.muted).grid(
-                row=row, column=col * 2, sticky="w", padx=(0 if col == 0 else 10, 4))
-            ttk.Label(stats, textvariable=self.play_stat_vars[key], font=MONO_BOLD,
-                      width=8 if key != "action" else 13, anchor="w").grid(
-                row=row, column=col * 2 + 1, sticky="w")
+        left = keys[:5]
+        for col, column_keys in enumerate((left, keys[5:])):
+            for row, key in enumerate(column_keys):
+                lbl = ttk.Label(stats, text=f"{key}:", foreground=THEME.muted)
+                lbl.grid(row=row, column=col * 2, sticky="w", padx=(0 if col == 0 else 12, 4))
+                val = ttk.Label(stats, textvariable=self.play_stat_vars[key], font=MONO_BOLD,
+                                width=7 if col == 0 else 14, anchor="w")
+                val.grid(row=row, column=col * 2 + 1, sticky="w")
+                tooltip(lbl, help_texts[key], val)
 
-        # Training, always visible: status line, progress + ETA, key stats.
+        # Training, always visible: status, key stats, progress + ETA.
         train_box = ttk.LabelFrame(parent, text="Training", padding=(6, 2))
-        train_box.pack(fill="x", pady=(0, 4))
-        train_box.columnconfigure(0, weight=1)
+        train_box.pack(fill="x", pady=(0, 6))
+        train_box.columnconfigure(1, weight=1)
+        train_box.columnconfigure(3, weight=1)
         self.stat_vars: dict[str, tk.StringVar] = {
             k: tk.StringVar(value=v) for k, v in
             [("status", "idle"), ("total_timesteps", "—"), ("ep_rew_mean", "—"),
              ("ep_len_mean", "—"), ("fps", "—"), ("time_elapsed", "—")]}
-        line = ttk.Frame(train_box)
-        line.grid(row=0, column=0, columnspan=2, sticky="w")
-        ttk.Label(line, textvariable=self.stat_vars["status"], font=MONO_BOLD, width=9,
-                  anchor="w").pack(side="left", padx=(0, 8))
-        for key, label in (("ep_rew_mean", "reward"), ("fps", "fps"), ("time_elapsed", "elapsed")):
-            ttk.Label(line, text=f"{label}:", foreground=THEME.muted).pack(side="left")
-            ttk.Label(line, textvariable=self.stat_vars[key], font=MONO_BOLD, width=8,
-                      anchor="w").pack(side="left", padx=(3, 6))
+        status_lbl = ttk.Label(train_box, textvariable=self.stat_vars["status"], font=MONO_BOLD,
+                               anchor="w")
+        status_lbl.grid(row=0, column=0, columnspan=4, sticky="w")
+        tooltip(status_lbl, "State of the training run started on the Train tab or by the "
+                            "wizard: idle, running, stopping, finished, stopped or failed.")
+        train_help = {"ep_rew_mean": "Average score of the last 100 training rounds.",
+                      "fps": "Game steps per second across all parallel games.",
+                      "time_elapsed": "Seconds since the run started.",
+                      "ep_len_mean": "Average length (steps) of the last 100 training rounds."}
+        cells = (("ep_rew_mean", "reward"), ("fps", "fps"),
+                 ("time_elapsed", "elapsed"), ("ep_len_mean", "ep len"))
+        for i, (key, label) in enumerate(cells):
+            row, col = divmod(i, 2)
+            lbl = ttk.Label(train_box, text=f"{label}:", foreground=THEME.muted)
+            lbl.grid(row=1 + row, column=col * 2, sticky="w", padx=(0 if col == 0 else 12, 4))
+            val = ttk.Label(train_box, textvariable=self.stat_vars[key], font=MONO_BOLD,
+                            width=8, anchor="w")
+            val.grid(row=1 + row, column=col * 2 + 1, sticky="w")
+            tooltip(lbl, train_help[key], val)
         ttk.Progressbar(train_box, mode="determinate", maximum=100,
-                        variable=self.train_progress_var).grid(row=1, column=0, sticky="ew",
-                                                               pady=(2, 0))
-        ttk.Label(train_box, textvariable=self.train_progress_text, font=MONO, width=28,
-                  anchor="e").grid(row=1, column=1, sticky="e", padx=(6, 0), pady=(2, 0))
+                        variable=self.train_progress_var).grid(row=3, column=0, columnspan=4,
+                                                               sticky="ew", pady=(4, 0))
+        prog = ttk.Label(train_box, textvariable=self.train_progress_text, font=MONO, anchor="w",
+                         wraplength=TRACK_W - 10)
+        prog.grid(row=4, column=0, columnspan=4, sticky="w", pady=(1, 2))
+        tooltip(prog, "Steps trained of the run's target, and the estimated time left from "
+                      "the speed of the last few updates.")
 
         # Play controls.
         ctl = ttk.LabelFrame(parent, text="Play a model", padding=6)
         ctl.pack(fill="x")
         ctl.columnconfigure(1, weight=1)
-        ctl.columnconfigure(3, weight=1)
         self.model_var = tk.StringVar(value="")
         self.model_combo = ttk.Combobox(ctl, textvariable=self.model_var, state="readonly")
-        self.model_combo.grid(row=0, column=0, columnspan=4, sticky="ew")
+        self.model_combo.grid(row=0, column=0, columnspan=3, sticky="ew")
         self.model_combo.bind("<<ComboboxSelected>>", lambda e: self._on_model_selected())
         # Re-scan the model files whenever the list is opened; no Refresh button needed.
         self.model_combo.bind("<Button-1>", lambda e: self.refresh_models(), add="+")
         self.model_note_var = tk.StringVar(value="")
-        ttk.Label(ctl, textvariable=self.model_note_var, foreground=THEME.muted,
-                  wraplength=CANVAS_W - 20).grid(row=1, column=0, columnspan=4, sticky="w",
-                                                 pady=(2, 2))
+        tooltip(self.model_combo, lambda: "Every saved model of this game (best and final model "
+                                          "of each run, and checkpoints). " + (
+                                          f"Selected: {self.model_note_var.get()}"
+                                          if self.model_note_var.get() else ""))
         self.play_episodes_var = tk.IntVar(value=3)
         self.play_speed_label_var = tk.StringVar(value=SPEED_CHOICES[1][0])
-        ttk.Label(ctl, text="Episodes:").grid(row=2, column=0, sticky="w")
+        ep_lbl = ttk.Label(ctl, text="Rounds:")
+        ep_lbl.grid(row=1, column=0, sticky="w", pady=(6, 0))
         ep_spin = ttk.Spinbox(ctl, from_=1, to=100, textvariable=self.play_episodes_var, width=5)
-        ep_spin.grid(row=2, column=1, sticky="w", padx=(4, 12))
-        ttk.Label(ctl, text="Speed:").grid(row=2, column=2, sticky="w")
+        ep_spin.grid(row=1, column=1, sticky="w", padx=(4, 0), pady=(6, 0))
+        tooltip(ep_lbl, "How many rounds (episodes) to play. A round ends when Mario dies, "
+                        "the marathon is complete, or the attempt limits are reached.", ep_spin)
+        sp_lbl = ttk.Label(ctl, text="Speed:")
+        sp_lbl.grid(row=2, column=0, sticky="w", pady=(4, 0))
         speed_combo = ttk.Combobox(ctl, textvariable=self.play_speed_label_var, state="readonly",
                                    values=[c[0] for c in SPEED_CHOICES], width=13)
-        speed_combo.grid(row=2, column=3, sticky="w", padx=(4, 0))
+        speed_combo.grid(row=2, column=1, sticky="w", padx=(4, 0), pady=(4, 0))
+        tooltip(sp_lbl, "Playback speed relative to a real Game Boy.", speed_combo)
+        self.btn_play_adv = ttk.Button(ctl, text="Advanced…", command=self._open_play_advanced)
+        self.btn_play_adv.grid(row=2, column=2, sticky="e", pady=(4, 0))
+        tooltip(self.btn_play_adv, "Step cap, random actions, and the observation setup "
+                                   "(normally read from the model's run).")
 
         btns = ttk.Frame(ctl)
-        btns.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        btns.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         self.btn_play_start = ttk.Button(btns, text="▶ Play", command=self.start_playing)
         self.btn_play_start.pack(side="left")
         self.btn_play_stop = ttk.Button(btns, text="■ Stop", command=self.stop_playing,
@@ -573,8 +632,19 @@ class AIboyGUI:
         self.btn_play_stop.pack(side="left", padx=4)
         self.btn_screen_clear = ttk.Button(btns, text="Clear", command=self.clear_screen)
         self.btn_screen_clear.pack(side="left", padx=4)
-        self.btn_play_adv = ttk.Button(btns, text="Advanced…", command=self._open_play_advanced)
-        self.btn_play_adv.pack(side="right")
+        tooltip(self.btn_play_start, "Play the selected model on the Preview screen.")
+        tooltip(self.btn_screen_clear, "Stop playback and blank the screen and the live numbers.")
+
+        # Every finished round of the current playback or preview, newest last.
+        rounds = ttk.LabelFrame(parent, text="Rounds played", padding=4)
+        rounds.pack(fill="both", expand=True, pady=(6, 0))
+        self.rounds_tree = make_table(rounds, [
+            ("round", "#", 30, "e", False), ("score", "score", 58, "e", False),
+            ("steps", "steps", 52, "e", False), ("end", "ended", 150, "w", True),
+        ], height=6)
+        tooltip(self.rounds_tree, "One line per finished round: the score it reached, how many "
+                                  "decisions it took, and how it ended (died, cleared, time "
+                                  "budget, stalled…). Cleared when a new playback starts.")
 
         # Advanced options live in a small dialog (see _open_play_advanced). The
         # observation setup is normally filled in from the model's run.json.
@@ -591,6 +661,10 @@ class AIboyGUI:
         self._play_widgets: list[tk.Widget] = [self.model_combo, ep_spin, speed_combo,
                                                self.btn_play_start, self.btn_play_adv]
 
+    def clear_rounds(self) -> None:
+        for row in self.rounds_tree.get_children():
+            self.rounds_tree.delete(row)
+
     def clear_screen(self) -> None:
         """Blank the emulator view and the live-episode panel (stops playback first)."""
         if self.playing_active():
@@ -599,7 +673,9 @@ class AIboyGUI:
             self.preview_stop.set()
         self.intro_stop.set()
         self.frames.take()
-        self._init_canvas(self.canvas)
+        self._init_canvas()
+        self.gameboy.show(None)
+        self.clear_rounds()
         for v in self.play_stat_vars.values():
             v.set("—")
         self.play_status_var.set("idle")
@@ -634,11 +710,12 @@ class AIboyGUI:
         r += 1
         ttk.Separator(body).grid(row=r, column=0, columnspan=2, sticky="ew", pady=8)
         r += 1
-        ttk.Label(body, wraplength=420, foreground=THEME.muted,
-                  text="Observation setup. Filled in automatically from the model's run.json; "
-                       "only change it for models from older runs, and make it match how "
-                       "the model was trained.").grid(row=r, column=0, columnspan=2, sticky="w",
-                                                      pady=(0, 6))
+        head = ttk.Frame(body)
+        head.grid(row=r, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        ttk.Label(head, text="Observation setup", foreground=THEME.muted).pack(side="left")
+        info_icon(head, "Filled in automatically from the model's run.json. Only change it "
+                        "for models from older runs, and make it match how the model was "
+                        "trained.").pack(side="left", padx=(6, 0))
         r += 1
         row("Obs type:", ttk.Combobox(body, textvariable=self.play_obs_type_var,
                                       values=list(OBS_TYPES), state="readonly", width=8))
@@ -651,7 +728,7 @@ class AIboyGUI:
         ttk.Button(body, text="Close", command=win.destroy).grid(row=r, column=1, sticky="e",
                                                                  pady=(10, 0))
         win.update_idletasks()
-        win.geometry(f"+{self.canvas.winfo_rootx()}+{self.root.winfo_rooty() + 80}")
+        win.geometry(f"+{self.gameboy.winfo_rootx()}+{self.root.winfo_rooty() + 80}")
 
     # ---------- Tune tab ----------
 
@@ -702,28 +779,35 @@ class AIboyGUI:
                                     width=24, values=list(tuning.METRICS))
         _field(2, 1, "Metric:", metric_combo)
         self.tune_keep_best_var = tk.IntVar(value=9)
-        _field(3, 0, "Keep best N trial runs:", ttk.Spinbox(
-            cfg_frame, from_=0, to=100, width=6, textvariable=self.tune_keep_best_var))
-        ttk.Label(cfg_frame, text="(0 = keep all; scores of deleted runs are kept)",
-                  foreground=THEME.muted, wraplength=330).grid(row=3, column=2, columnspan=2,
-                                                                sticky="w", padx=12)
-        # The metric's explanation sits right under the fields and follows the
-        # variable, whoever sets it (the combobox, a loaded results file, the wizard).
-        self.tune_metric_note = ttk.Label(cfg_frame, text=tuning.METRIC_NOTES[tuning.METRIC_BEST],
-                                          foreground=THEME.muted, wraplength=640)
-        self.tune_metric_note.grid(row=4, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        keep_spin = ttk.Spinbox(cfg_frame, from_=0, to=100, width=6,
+                                textvariable=self.tune_keep_best_var)
+        _field(3, 0, "Keep best N trial runs:", keep_spin)
+        tooltip(keep_spin, "Only the run folders of the best N configs are kept on disk; the "
+                           "others are deleted as the sweep goes. 0 keeps all. Scores of "
+                           "deleted runs stay in the results and in AIboy's experience.")
+        # The metric's explanation follows the variable, whoever sets it (the
+        # combobox, a loaded results file, the wizard), and shows on hover.
+        self.tune_metric_tip = tooltip(
+            metric_combo, lambda: tuning.METRIC_NOTES.get(self.tune_metric_var.get(), ""))
         self.tune_metric_var.trace_add("write", lambda *_a: self._on_metric_changed())
+        tooltip(self.tune_preset_combo, "The preset every candidate starts from; the sweep "
+                                        "changes only the listed knobs.")
         self.tune_skip_done_var = tk.BooleanVar(value=True)
         skip_cb = ttk.Checkbutton(
             cfg_frame, variable=self.tune_skip_done_var, command=self.tune_update_summary,
-            text="Reuse results AIboy already knows for the same settings (also resumes a sweep)")
-        skip_cb.grid(row=5, column=0, columnspan=4, sticky="w", pady=(4, 0))
+            text="Reuse known results")
+        skip_cb.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        tooltip(skip_cb, "A candidate AIboy has already trained with the same settings and "
+                         "trial length is scored from memory instead of trained again. This "
+                         "also resumes an interrupted sweep.")
         self._tune_config_widgets.append(skip_cb)
         self.tune_baseline_var = tk.BooleanVar(value=True)
         base_cb = ttk.Checkbutton(
             cfg_frame, variable=self.tune_baseline_var, command=self.tune_update_summary,
-            text="Include the base preset unchanged as candidate 1 (a winner must beat it)")
-        base_cb.grid(row=6, column=0, columnspan=4, sticky="w")
+            text="Include the base preset as candidate 1")
+        base_cb.grid(row=4, column=2, columnspan=2, sticky="w", pady=(4, 0), padx=12)
+        tooltip(base_cb, "The base preset itself is trained unchanged as the first candidate, "
+                         "so a winner has to beat it, not just the other variations.")
         self._tune_config_widgets.append(base_cb)
 
 
@@ -744,13 +828,18 @@ class AIboyGUI:
         self.btn_tune_suggest.grid(row=0, column=3, padx=(4, 0))
         self._tune_config_widgets.extend([tmpl_combo, self.btn_tune_template, self.btn_tune_suggest])
         self.tune_template_note = ttk.Label(sweep_frame, text="", foreground=THEME.muted,
-                                            wraplength=620)
+                                            wraplength=600)
         self.tune_template_note.grid(row=1, column=0, columnspan=4, sticky="w", pady=(2, 4))
+        tooltip(self.btn_tune_suggest, "Fill the sweep with untested variations around the "
+                                       "best settings AIboy knows for this preset.")
 
         self.tune_sweep_text = tk.Text(sweep_frame, height=5, wrap="word", font=MONO, undo=True)
         self.tune_sweep_text.grid(row=2, column=0, columnspan=4, sticky="ew")
         self.tune_sweep_text.bind("<<Modified>>", self._on_sweep_modified)
         self._tune_config_widgets.append(self.tune_sweep_text)
+        tooltip(self.tune_sweep_text, "The sweep as JSON: either {knob: [values, …]} for a grid "
+                                      "/ random sample, or a list of {knob: value} candidates. "
+                                      "Edit it freely; the line below reports what it expands to.")
 
         search_row = ttk.Frame(sweep_frame)
         search_row.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(4, 0))
@@ -771,7 +860,7 @@ class AIboyGUI:
         ttk.Label(search_row, text="configs").pack(side="left")
         self.tune_summary_var = tk.StringVar(value="")
         self.tune_summary_label = ttk.Label(sweep_frame, textvariable=self.tune_summary_var,
-                                            font=MONO, wraplength=640)
+                                            font=MONO, wraplength=600)
         self.tune_summary_label.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
         self._tune_config_widgets.extend([rb_grid, rb_random, n_random_spin])
 
@@ -812,8 +901,9 @@ class AIboyGUI:
         self.btn_tune_to_train = ttk.Button(actions, text="Load into Train tab",
                                             command=self._tune_load_into_train)
         self.btn_tune_to_train.pack(side="left", padx=4)
-        ttk.Label(actions, text="(selected row; double-click also loads)",
-                  foreground=THEME.muted).pack(side="left", padx=8)
+        tooltip(self.btn_tune_save_preset, "Keep the selected row's settings as a preset.")
+        tooltip(self.btn_tune_to_train, "Put the selected row's settings on the Train tab "
+                                        "(double-clicking a row does the same).")
         self.btn_tune_delete = ttk.Button(actions, text="Delete trial runs…",
                                           command=lambda: self.delete_tune_data(
                                               self.tune_run_prefix_var.get().strip() or "tune"))
@@ -825,7 +915,6 @@ class AIboyGUI:
         """The metric variable changed: explain it and re-rank the current
         results under it (a trace; the table may not exist yet at build time)."""
         metric = self.tune_metric_var.get()
-        self.tune_metric_note.config(text=tuning.METRIC_NOTES.get(metric, ""))
         if hasattr(self, "tune_tree"):
             self.tune_tree.heading("score", text=metric)
             self._rescore_results(metric)
@@ -1503,7 +1592,7 @@ class AIboyGUI:
         if prev in labels:
             self.model_var.set(prev)
         else:
-            self.model_var.set(labels[0] if labels else "")
+            self.model_var.set(labels[0] if labels else NO_MODEL)
             self._on_model_selected()
         if hasattr(self, "run_hint_var"):
             self._update_run_hint()
@@ -1628,6 +1717,8 @@ class AIboyGUI:
         """Watch the newest best_model.zip play alongside training."""
         self.intro_stop.set()
         self.preview_stop.clear()
+        self.gameboy.set_power(True)
+        self.clear_rounds()
         raw_level = cfg["start_level"]
         self.sync_play_options(cfg)
         self.preview_thread = self.player.preview(
@@ -1654,10 +1745,10 @@ class AIboyGUI:
             messagebox.showerror("Play", why)
             return False
         label = self.model_var.get()
-        if not label:
+        if label not in self._model_paths:
             self.refresh_models()
             label = self.model_var.get()
-        if not label:
+        if label not in self._model_paths:
             messagebox.showerror(
                 "Play",
                 f"No trained model found for '{self.game}'. Train first, or place a .zip at\n"
@@ -1680,9 +1771,11 @@ class AIboyGUI:
 
         self.intro_stop.set()
         self.play_stop.clear()
+        self.gameboy.set_power(True)
         self.btn_play_start.config(state="disabled")
         self.btn_play_stop.config(state="normal")
         self.play_status_var.set(f"loading {model_path.name}…")
+        self.clear_rounds()
         for v in self.play_stat_vars.values():
             v.set("—")
         self.play_thread = self.player.play(
@@ -1712,10 +1805,10 @@ class AIboyGUI:
             pass
 
         latest = self.frames.take()
-        if latest is not None and self._canvas_img_id is not None:
-            img = Image.fromarray(latest).resize((CANVAS_W, CANVAS_H), Image.NEAREST)
+        if latest is not None:
+            img = Image.fromarray(latest).resize((SCREEN_W, SCREEN_H), Image.NEAREST)
             self._tk_img = ImageTk.PhotoImage(img)
-            self.canvas.itemconfig(self._canvas_img_id, image=self._tk_img)
+            self.gameboy.set_screen(self._tk_img)
 
         self._update_status_bar()
         try:
@@ -1759,7 +1852,7 @@ class AIboyGUI:
             if not self.playing_active() and not (
                     self.preview_thread is not None and self.preview_thread.is_alive()):
                 self.frames.take()
-                self._init_canvas(self.canvas)
+                self._init_canvas()
         elif kind == "disk_usage":
             _, n_bytes, n_runs = item
             self.disk_var.set(f"models/ {runs.format_size(n_bytes)} · {n_runs} run(s)")
@@ -1775,6 +1868,9 @@ class AIboyGUI:
             self._on_train_done(item[1])
         elif kind == "play_status":
             self.play_status_var.set(item[1])
+            if item[1] == "idle":               # the preview loop ended
+                self.gameboy.show(None)
+                self.gameboy.set_power(self.playing_active())
         elif kind == "play_stat":
             _, key, val = item
             if key in self.play_stat_vars:
@@ -1783,6 +1879,12 @@ class AIboyGUI:
             for key, val in item[1].items():
                 if key in self.play_stat_vars:
                     self.play_stat_vars[key].set(val)
+            self.gameboy.show(item[1].get("action"))
+        elif kind == "play_episode":
+            r = item[1]
+            self.rounds_tree.insert("", "end", values=(r["episode"], f"{r['reward']:.0f}",
+                                                       r["steps"], r["end"]))
+            self.rounds_tree.see(self.rounds_tree.get_children()[-1])
         elif kind == "play_done":
             # Keep the last episode's report ("Episode 2: … died in 1-2") visible.
             last = self.play_status_var.get()
@@ -1865,12 +1967,14 @@ class AIboyGUI:
         self.on_experience_changed()    # the trainer recorded the run
         best = runs.best_model_for_run(self.game, self._train_run_name)
         if best is not None and self.select_model(best):
-            self.flash(f"Run '{self._train_run_name}' {status} — its best model is selected on "
-                       f"the screen panel, click ▶ Play to watch it.", seconds=12)
+            self.flash(f"Run '{self._train_run_name}' {status} — its best model is selected "
+                       f"under Tracking, click ▶ Play to watch it.", seconds=12)
         if self.wizard is not None:
             self.wizard.on_train_done(rc, self._train_stop_requested)
 
     def _play_finished(self) -> None:
+        self.gameboy.show(None)
+        self.gameboy.set_power(self.preview_thread is not None and self.preview_thread.is_alive())
         self.btn_play_stop.config(state="disabled")
         self._update_start_buttons()
 

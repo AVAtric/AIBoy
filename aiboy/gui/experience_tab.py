@@ -18,11 +18,16 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
 from aiboy import experience, runs, settings, tuning
-from aiboy.gui.widgets import MONO, MONO_BOLD, THEME, make_table
+from aiboy.gui.widgets import MONO, MONO_BOLD, THEME, info_icon, make_table, tooltip
 from aiboy.tuning import mode_label
 
 KIND_LABEL = {experience.KIND_TRIAL: "test", experience.KIND_RUN: "training",
               experience.KIND_IMPROVEMENT: "improved"}
+ABOUT = ("AIboy remembers every short test and every training it finishes: the settings, how "
+         "the score developed and how long it took. Searches skip what is already known, the "
+         "wizard explores around the best known settings (borrowing from a related goal when "
+         "a goal is new), time estimates use the speed this computer really reached, and "
+         "presets are updated when tests show clearly better settings for their goal.")
 
 
 def when_label(ts: float) -> str:
@@ -92,17 +97,12 @@ class ExperienceTab:
     def _build(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(2, weight=1)
-        ttk.Label(parent, wraplength=640, foreground=THEME.text_soft,
-                  text="AIboy remembers every short test and every training it finishes: the "
-                       "settings, how the score developed and how long it took. Searches skip "
-                       "what is already known, the wizard explores around the best known "
-                       "settings (borrowing from a related goal when a goal is new), time "
-                       "estimates use the speed this computer really reached, and presets are "
-                       "updated when tests show clearly better settings for their goal."
-                  ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        head = ttk.Frame(parent)
+        head.grid(row=1, column=0, sticky="ew", pady=(0, 6))
         self.summary_var = tk.StringVar(value="")
-        ttk.Label(parent, textvariable=self.summary_var, font=MONO_BOLD, wraplength=700).grid(
-            row=1, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(head, textvariable=self.summary_var, font=MONO_BOLD, wraplength=600).pack(
+            side="left")
+        info_icon(head, ABOUT).pack(side="left", padx=(8, 0))
 
         table_frame = ttk.Frame(parent)
         table_frame.grid(row=2, column=0, sticky="nsew")
@@ -142,11 +142,19 @@ class ExperienceTab:
         self.auto_improve_var = tk.BooleanVar(value=bool(settings.get("auto_improve_presets")))
         self.auto_improve_check = ttk.Checkbutton(
             improve, variable=self.auto_improve_var, command=self._on_auto_improve_changed,
-            text="Let AIboy improve presets by itself when tests show clearly better settings")
+            text="Improve presets automatically")
         self.auto_improve_check.pack(side="left")
+        tooltip(self.auto_improve_check,
+                "After every finished test or training, change a preset when the tests show "
+                "settings that clearly beat its own. Built-in presets can always be reset to "
+                "their shipped values on the Presets tab.")
         self.btn_improve = ttk.Button(improve, text="Improve presets now",
                                       command=lambda: self.app.improve_presets())
         self.btn_improve.pack(side="left", padx=(12, 0))
+        tooltip(self.btn_improve, "Check every preset of this game against what AIboy has "
+                                  "measured, and change the ones it can clearly improve.")
+        tooltip(self.btn_forget, "Remove the selected record. AIboy may then train these "
+                                 "settings again in a later search.")
 
     # ---------- data ----------
 
