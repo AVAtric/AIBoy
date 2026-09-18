@@ -32,11 +32,10 @@ import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-import numpy as np
 from PIL import Image, ImageTk
 
 from aiboy import APP_NAME, presets, runs, tuning
-from aiboy.experience import Experience
+from aiboy.experience import Experience, Record
 from aiboy.games import OBS_TYPES, RomInfo, discover_roms, level_choices, probe_rom
 from aiboy.gui.experience_tab import ExperienceTab
 from aiboy.gui.player import (CANVAS_H, CANVAS_W, GAME_H, GAME_W, SPEED_CHOICES, EmbeddedPlayer,
@@ -423,15 +422,19 @@ class AIboyGUI:
         self.btn_train_stop.pack(side="left", padx=4)
         ttk.Button(btns, text="TensorBoard", command=self.open_tensorboard).pack(
             side="left", padx=(16, 4))
-        self.btn_run_delete = ttk.Button(btns, text="Delete run…", command=self._delete_run)
-        self.btn_run_delete.pack(side="right")
-        self.btn_run_compact = ttk.Button(btns, text="Compact run…", command=self._compact_run)
-        self.btn_run_compact.pack(side="right", padx=(0, 4))
-        self.btn_run_open = ttk.Button(btns, text="Open folder", command=self._open_run_folder)
-        self.btn_run_open.pack(side="right", padx=(0, 4))
+        # Housekeeping for the named run, on its own line so nothing is clipped.
+        keep = ttk.Frame(controls)
+        keep.grid(row=4, column=0, sticky="ew", pady=(4, 0))
+        ttk.Label(keep, text="This run:", foreground=THEME.muted).pack(side="left", padx=(0, 4))
+        self.btn_run_open = ttk.Button(keep, text="Open folder", command=self._open_run_folder)
+        self.btn_run_open.pack(side="left", padx=2)
+        self.btn_run_compact = ttk.Button(keep, text="Compact…", command=self._compact_run)
+        self.btn_run_compact.pack(side="left", padx=2)
+        self.btn_run_delete = ttk.Button(keep, text="Delete…", command=self._delete_run)
+        self.btn_run_delete.pack(side="left", padx=2)
 
         pb_frame = ttk.Frame(controls)
-        pb_frame.grid(row=4, column=0, sticky="ew", pady=(4, 0))
+        pb_frame.grid(row=5, column=0, sticky="ew", pady=(4, 0))
         pb_frame.columnconfigure(0, weight=1)
         ttk.Progressbar(pb_frame, mode="determinate", maximum=100,
                         variable=self.train_progress_var).grid(row=0, column=0, sticky="ew",
@@ -668,16 +671,19 @@ class AIboyGUI:
         self.tune_metric_var = tk.StringVar(value=tuning.METRIC_BEST)
         metric_combo = ttk.Combobox(cfg_frame, textvariable=self.tune_metric_var, state="readonly",
                                     width=24, values=list(tuning.METRICS))
-        metric_combo.bind("<<ComboboxSelected>>", lambda e: self._on_metric_changed())
         _field(2, 1, "Metric:", metric_combo)
-        self.tune_metric_note = ttk.Label(cfg_frame, text=tuning.METRIC_NOTES[tuning.METRIC_BEST],
-                                          foreground=THEME.muted, wraplength=640)
-        self.tune_metric_note.grid(row=6, column=0, columnspan=4, sticky="w", pady=(2, 0))
         self.tune_keep_best_var = tk.IntVar(value=9)
         _field(3, 0, "Keep best N trial runs:", ttk.Spinbox(
             cfg_frame, from_=0, to=100, width=6, textvariable=self.tune_keep_best_var))
-        ttk.Label(cfg_frame, text="(0 = keep all; scores of deleted runs stay in the table)",
-                  foreground=THEME.muted).grid(row=3, column=2, columnspan=2, sticky="w", padx=12)
+        ttk.Label(cfg_frame, text="(0 = keep all; scores of deleted runs are kept)",
+                  foreground=THEME.muted, wraplength=330).grid(row=3, column=2, columnspan=2,
+                                                                sticky="w", padx=12)
+        # The metric's explanation sits right under the fields and follows the
+        # variable, whoever sets it (the combobox, a loaded results file, the wizard).
+        self.tune_metric_note = ttk.Label(cfg_frame, text=tuning.METRIC_NOTES[tuning.METRIC_BEST],
+                                          foreground=THEME.muted, wraplength=640)
+        self.tune_metric_note.grid(row=4, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        self.tune_metric_var.trace_add("write", lambda *_a: self._on_metric_changed())
         self.tune_skip_done_var = tk.BooleanVar(value=True)
         skip_cb = ttk.Checkbutton(
             cfg_frame, variable=self.tune_skip_done_var, command=self.tune_update_summary,
@@ -688,7 +694,7 @@ class AIboyGUI:
         base_cb = ttk.Checkbutton(
             cfg_frame, variable=self.tune_baseline_var, command=self.tune_update_summary,
             text="Include the base preset unchanged as candidate 1 (a winner must beat it)")
-        base_cb.grid(row=7, column=0, columnspan=4, sticky="w")
+        base_cb.grid(row=6, column=0, columnspan=4, sticky="w")
         self._tune_config_widgets.append(base_cb)
 
 
@@ -766,19 +772,19 @@ class AIboyGUI:
             ("score", "score", 90, "e", False), ("ep_len", "ep len", 52, "e", False),
             ("steps", "steps", 66, "e", False), ("time", "time", 52, "e", False),
             ("runs", "runs", 110, "w", True),
-        ], height=7)
+        ], height=6)
         self.tune_tree.bind("<Double-1>", lambda e: self._tune_load_into_train())
 
         actions = ttk.Frame(parent)
         actions.grid(row=5, column=0, sticky="ew", pady=(6, 0))
-        self.btn_tune_save_preset = ttk.Button(actions, text="Save selected as preset",
+        self.btn_tune_save_preset = ttk.Button(actions, text="Save as preset…",
                                                command=self._tune_save_as_preset)
         self.btn_tune_save_preset.pack(side="left", padx=(0, 4))
-        self.btn_tune_to_train = ttk.Button(actions, text="Load selected into Train tab",
+        self.btn_tune_to_train = ttk.Button(actions, text="Load into Train tab",
                                             command=self._tune_load_into_train)
         self.btn_tune_to_train.pack(side="left", padx=4)
-        ttk.Label(actions, text="(double-click a row to load it)", foreground=THEME.muted).pack(
-            side="left", padx=8)
+        ttk.Label(actions, text="(selected row; double-click also loads)",
+                  foreground=THEME.muted).pack(side="left", padx=8)
         self.btn_tune_delete = ttk.Button(actions, text="Delete trial runs…",
                                           command=lambda: self.delete_tune_data(
                                               self.tune_run_prefix_var.get().strip() or "tune"))
@@ -787,11 +793,13 @@ class AIboyGUI:
         self.apply_tune_template()
 
     def _on_metric_changed(self) -> None:
-        """Re-rank the current results under the newly chosen metric."""
+        """The metric variable changed: explain it and re-rank the current
+        results under it (a trace; the table may not exist yet at build time)."""
         metric = self.tune_metric_var.get()
         self.tune_metric_note.config(text=tuning.METRIC_NOTES.get(metric, ""))
-        self.tune_tree.heading("score", text=metric)
-        self._rescore_results(metric)
+        if hasattr(self, "tune_tree"):
+            self.tune_tree.heading("score", text=metric)
+            self._rescore_results(metric)
 
     def _rescore_results(self, metric: str) -> None:
         """Recompute every config's score under `metric` from the eval
@@ -832,7 +840,6 @@ class AIboyGUI:
     def tune_suggest(self) -> None:
         """Fill the sweep with untested variations around the best known
         settings of the base preset (or around the preset itself)."""
-        plan, err = self.tune_plan()
         base = self._all_presets.get(self.tune_preset_var.get())
         if base is None:
             messagebox.showwarning("Tune", "Pick a base preset first.")
@@ -943,11 +950,13 @@ class AIboyGUI:
         plan["source"] = source
         n_trials = len(plan["combos"]) * plan["n_seeds"]
         to_train = n_trials - self.known_trials(plan)
-        if to_train > 40 and not messagebox.askyesno(
-                "Tune", f"This sweep trains {to_train} trials (≈ "
-                        f"{tuning.format_duration(tuning.estimate_seconds(to_train, plan['trial_steps'], plan['base'], self.fps_for(plan['base'])))}). "
-                        f"Start anyway?"):
-            return False
+        if to_train > 40:
+            eta = tuning.estimate_seconds(to_train, plan["trial_steps"], plan["base"],
+                                          self.fps_for(plan["base"]))
+            if not messagebox.askyesno(
+                    "Tune", f"This sweep trains {to_train} trials "
+                            f"(≈ {tuning.format_duration(eta)}). Start anyway?"):
+                return False
         if self.playing_active():
             self.play_stop.set()
 
@@ -1043,7 +1052,7 @@ class AIboyGUI:
 
         # Which planned trials does AIboy already know? Those are scored from
         # memory (instant), so the ETA must not count them as work.
-        def _known(i: int, s: int) -> "Record | None":
+        def _known(i: int, s: int) -> Record | None:
             if not plan["skip_done"]:
                 return None
             return exp.find(tuning.trial_config(base, combos[i - 1], trial_steps, s))
@@ -1165,11 +1174,9 @@ class AIboyGUI:
         except (OSError, ValueError, TypeError, KeyError) as e:
             messagebox.showerror("Tune", f"Could not read {path}:\n{e}")
             return
-        self._tune_results = {r.index: r for r in results}
         if meta.get("metric") in tuning.METRICS:
-            self.tune_metric_var.set(meta["metric"])
-            self.tune_tree.heading("score", text=meta["metric"])
-            self.tune_metric_note.config(text=tuning.METRIC_NOTES[meta["metric"]])
+            self.tune_metric_var.set(meta["metric"])     # note and heading follow (trace)
+        self._tune_results = {r.index: r for r in results}
         if meta.get("sweep"):
             self.tune_sweep_text.delete("1.0", "end")
             self.tune_sweep_text.insert("1.0", json.dumps(meta["sweep"], indent=2))

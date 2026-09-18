@@ -52,6 +52,12 @@ class SweepTests(unittest.TestCase):
         self.assertEqual(tuning.trial_run_name("tune", 3, 0, 1), "tune-003")
         self.assertEqual(tuning.trial_run_name("tune", 3, 1, 2), "tune-003-s1")
 
+    def test_mode_label(self):
+        self.assertEqual(tuning.mode_label({"start_level": "default"}), "campaign")
+        self.assertEqual(tuning.mode_label({}), "campaign")
+        self.assertEqual(tuning.mode_label({"start_level": "sequential"}), "level by level")
+        self.assertEqual(tuning.mode_label({"start_level": "3-2"}), "level 3-2")
+
     def test_progress_helpers(self):
         self.assertEqual(tuning.format_steps(4000), "4,000")
         self.assertEqual(tuning.format_steps(250_000), "250k")

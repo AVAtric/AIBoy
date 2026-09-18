@@ -293,8 +293,8 @@ def _remember_run(args: argparse.Namespace, run_name: str, paths: dict, duration
     """Append this run to the experience file: what was trained, how it
     scored over time and how long it took. Never fails the run."""
     try:
-        from aiboy import experience
-        evals = experience.tuning.evals_from_npz(paths["logs"] / "evaluations.npz") or []
+        from aiboy import experience, tuning
+        evals = tuning.evals_from_npz(paths["logs"] / "evaluations.npz") or []
         record = experience.make_record(vars(args), evals, duration, completed=completed,
                                         source=args.source, run_name=run_name, resumed=resumed)
         experience.append_record(record)

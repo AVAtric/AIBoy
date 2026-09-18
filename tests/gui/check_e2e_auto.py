@@ -1,5 +1,5 @@
 """Wizard, Auto-complete: one click -> preset saved -> training -> playing. ~30 s."""
-import json, sys, tkinter as tk
+import sys, tkinter as tk
 from _common import say, silence_dialogs, cleanup
 
 from aiboy import presets, runs, tuning

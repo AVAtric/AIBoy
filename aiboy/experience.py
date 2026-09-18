@@ -429,8 +429,11 @@ class Experience:
             why = (f"AIboy knows {len(known)} standard variations of this goal and now tries "
                    f"{len(candidates)} untested changes.")
         if not candidates:
-            why = ("Every nearby variation of this goal has been tested; only the known "
-                   "results will be compared.")
+            # Nothing untested nearby (the best known settings are the goal's
+            # own): fall back to the standard grid, which the sweep scores
+            # from memory where it is known and trains where it is not.
+            return grid, ("Every nearby variation of this goal has been tested; the standard "
+                          "variations are compared again, from memory where they are known.")
         return candidates, why
 
 

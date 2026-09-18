@@ -176,8 +176,7 @@ class WizardTab:
         header.grid(row=0, column=0, sticky="ew")
         self._step_labels: list[ttk.Label] = []
         for i, name in enumerate(STEPS):
-            lbl = ttk.Label(header, text=f"  {i + 1}  {name}  ", font=MONO_BOLD, padding=(6, 4),
-                            cursor="hand2")
+            lbl = ttk.Label(header, text=f"  {i + 1}  {name}  ", font=MONO_BOLD, padding=(6, 4))
             lbl.pack(side="left")
             lbl.bind("<Button-1>", lambda e, step=i: self._click_step(step))
             self._step_labels.append(lbl)
@@ -280,7 +279,7 @@ class WizardTab:
         seeds_spin = ttk.Spinbox(self.advanced, from_=1, to=5, width=4, textvariable=self.seeds_var,
                                  command=self._sync_tune_tab)
         seeds_spin.pack(side="left", padx=(6, 0))
-        ttk.Label(self.advanced, text="(the Tune tab shows the full search)",
+        ttk.Label(self.advanced, text="(details on the Tune tab)",
                   foreground=THEME.muted).pack(side="left", padx=(12, 0))
         self.search_widgets: list[tk.Widget] = [self.template_combo, self.effort_combo, adv_cb,
                                                 steps_spin, seeds_spin]
@@ -349,7 +348,7 @@ class WizardTab:
                                    background=THEME.panel[0], foreground=THEME.panel[1],
                                    highlightthickness=0)
         self.config_text.grid(row=0, column=0, sticky="nsew")
-        self.config_text.tag_configure("tuned", foreground=THEME.accent, font=("Menlo", 10, "bold"))
+        self.config_text.tag_configure("tuned", foreground=THEME.accent, font=[*MONO, "bold"])
         self.config_text.config(state="disabled")
 
         name_row = ttk.Frame(pane)
@@ -359,6 +358,7 @@ class WizardTab:
         self.preset_name_var = tk.StringVar()
         name_entry = ttk.Entry(name_row, textvariable=self.preset_name_var)
         name_entry.grid(row=0, column=1, sticky="ew", padx=6)
+        name_entry.bind("<Return>", lambda e: self.save_and_continue())
         self._register(name_entry)
 
         btns = ttk.Frame(pane)
@@ -381,6 +381,7 @@ class WizardTab:
         self.run_name_var = tk.StringVar()
         run_entry = ttk.Entry(form, textvariable=self.run_name_var, width=32)
         run_entry.grid(row=0, column=1, sticky="w", padx=6, pady=2)
+        run_entry.bind("<Return>", lambda e: self.start_training())
         ttk.Label(form, text="Training length (steps):").grid(row=1, column=0, sticky="w", pady=2)
         self.timesteps_var = tk.IntVar(value=2_000_000)
         steps_spin = ttk.Spinbox(form, from_=10_000, to=200_000_000, increment=100_000, width=14,
@@ -458,19 +459,22 @@ class WizardTab:
 
     # ---------- navigation ----------
 
-    def _click_step(self, step: int) -> None:
+    def _step_is_link(self, step: int) -> bool:
         """Completed steps in the indicator are links back; later ones are not."""
         if self.phase != "idle" or step >= self.step:
-            return
-        if step >= 1 and not self.config:
-            return
-        self.goto(step)
+            return False
+        return step == 0 or bool(self.config)
+
+    def _click_step(self, step: int) -> None:
+        if self._step_is_link(step):
+            self.goto(step)
 
     def goto(self, step: int) -> None:
         self.step = step
         for i, lbl in enumerate(self._step_labels):
             lbl.config(foreground=THEME.accent if i == step
-                       else (THEME.done if i < step else THEME.muted))
+                       else (THEME.done if i < step else THEME.muted),
+                       cursor="hand2" if self._step_is_link(i) else "")
         self.title_var.set(f"Step {step + 1} of {len(STEPS)} — {STEPS[step]}")
         self.panes[step].tkraise()
         if step == 1:
@@ -605,15 +609,18 @@ class WizardTab:
             self.template_note.config(text=tuning.TEMPLATE_PLAIN_NOTES.get(self._template_name(), ""))
 
     def auto_plan(self) -> tuple[list[dict], str]:
-        """The candidates "Let AIboy choose" would try right now, and why."""
+        """The candidates "Let AIboy choose" would try right now, and why.
+        Never empty: without a usable goal it is the standard grid."""
+        fallback = tuning.expand_grid(tuning.SWEEP_TEMPLATES[tuning.DEFAULT_TEMPLATE])
         cfg = self._presets.get(self.goal_var.get())
         if not cfg:
-            return [], ""
+            return fallback, ""
         try:
             steps, seeds = int(self.trial_steps_var.get()), max(1, int(self.seeds_var.get()))
         except (tk.TclError, ValueError):
-            return [], ""
-        return self.app.experience.auto_plan(cfg, steps, seeds, SUGGESTIONS)
+            return fallback, ""
+        combos, why = self.app.experience.auto_plan(cfg, steps, seeds, SUGGESTIONS)
+        return combos or fallback, why
 
     def _on_search_choice(self) -> None:
         searching = self.search_var.get() == "yes"
@@ -651,8 +658,7 @@ class WizardTab:
         if template == AUTO:
             combos, self._auto_why = self.auto_plan()
             app.tune_template_var.set(tuning.DEFAULT_TEMPLATE)
-            app.set_sweep(combos or tuning.SWEEP_TEMPLATES[tuning.DEFAULT_TEMPLATE],
-                          "Candidates chosen by the wizard from AIboy's experience.")
+            app.set_sweep(combos, "Candidates chosen by the wizard from AIboy's experience.")
             search, n_random = "grid", 0
         else:
             if self._synced != template:
@@ -689,7 +695,7 @@ class WizardTab:
             steps, seeds = int(self.trial_steps_var.get()), max(1, int(self.seeds_var.get()))
         except (tk.TclError, ValueError):
             return None, "steps and seeds must be whole numbers"
-        combos, _why = self.app.experience.auto_plan(cfg, steps, seeds, SUGGESTIONS)
+        combos, _why = self.auto_plan()
         return {"base": dict(cfg), "combos": tuning.with_baseline(combos), "trial_steps": steps,
                 "n_seeds": seeds, "skip_done": True}, None
 
@@ -880,7 +886,8 @@ class WizardTab:
         if self.overrides:
             self.config_text.insert("end", "# values found by the search are highlighted\n")
         self.config_text.insert("end", "\n")
-        labels = {key: (FIELD_BY_KEY[key].label if key in FIELD_BY_KEY else key)
+        labels = {key: (FIELD_BY_KEY[key].label if key in FIELD_BY_KEY
+                        else key.replace("_", " ").capitalize())
                   for key in self.config}
         width = max((len(v) for v in labels.values()), default=10)
         for key in presets.PRESET_FIELDS:

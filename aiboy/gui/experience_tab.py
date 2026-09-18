@@ -16,15 +16,9 @@ from tkinter import messagebox, simpledialog, ttk
 
 from aiboy import experience, runs, tuning
 from aiboy.gui.widgets import MONO, MONO_BOLD, THEME, make_table
+from aiboy.tuning import mode_label
 
 KIND_LABEL = {experience.KIND_TRIAL: "test", experience.KIND_RUN: "training"}
-MODE_LABEL = {"default": "campaign", "random": "random levels", "sequential": "level by level",
-              "marathon": "marathon"}
-
-
-def mode_label(cfg: dict) -> str:
-    level = str(cfg.get("start_level", "default"))
-    return MODE_LABEL.get(level, f"level {level}")
 
 
 def when_label(ts: float) -> str:

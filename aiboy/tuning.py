@@ -151,6 +151,16 @@ PLAIN_KEYS: dict[str, str] = {
 }
 BASELINE_PLAIN = "the goal's own settings"
 
+# Level modes as table cells (the Presets and Experience tabs).
+MODE_LABEL = {"default": "campaign", "random": "random levels", "sequential": "level by level",
+              "marathon": "marathon"}
+
+
+def mode_label(cfg: dict) -> str:
+    """'campaign', 'random levels', … or 'level 3-2' for a fixed level."""
+    level = str(cfg.get("start_level", "default"))
+    return MODE_LABEL.get(level, f"level {level}")
+
 SHORT_KEYS = {"learning_rate": "lr", "ent_coef": "ent", "n_steps": "steps", "batch_size": "batch",
               "n_epochs": "epochs", "gamma": "gamma", "gae_lambda": "gae", "clip_range": "clip",
               "n_envs": "envs", "action_repeat": "repeat", "frame_stack": "stack",

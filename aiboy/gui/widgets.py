@@ -11,14 +11,19 @@ from __future__ import annotations
 
 import tkinter as tk
 from dataclasses import dataclass
-from tkinter import ttk
+from tkinter import font as tkfont, ttk
 
 from aiboy.games import OBS_TYPES, level_choices
 from aiboy.presets import DEFAULT_CONFIG
 from aiboy.runs import cpu_count
 
-MONO = ("Menlo", 10)
-MONO_BOLD = ("Menlo", 11, "bold")
+# Monospaced fonts for tables, logs and status lines. Lists, not tuples:
+# `setup_styles()` swaps in the family this desktop actually has (Menlo is
+# macOS-only) and every module that imported the name sees the change, so
+# widgets created afterwards line up on Windows and Linux too.
+MONO = ["Menlo", 10]
+MONO_BOLD = ["Menlo", 11, "bold"]
+MONO_FAMILIES = ("Menlo", "Consolas", "DejaVu Sans Mono", "Liberation Mono", "Courier New")
 TABLE_STYLE = "Mono.Treeview"
 
 
@@ -134,8 +139,21 @@ class WidgetLock:
                 pass
 
 
+def mono_family(root: tk.Misc) -> str:
+    """The first of MONO_FAMILIES installed here, else Tk's own fixed font."""
+    try:
+        installed = set(tkfont.families(root))
+        for family in MONO_FAMILIES:
+            if family in installed:
+                return family
+        return tkfont.nametofont("TkFixedFont").actual("family")
+    except tk.TclError:
+        return MONO_FAMILIES[0]
+
+
 def setup_styles(root: tk.Misc) -> None:
     THEME.apply(detect_dark(root))
+    MONO[0] = MONO_BOLD[0] = mono_family(root)
     style = ttk.Style(root)
     style.configure(TABLE_STYLE, font=MONO, rowheight=22)
     style.configure(f"{TABLE_STYLE}.Heading", font=("Helvetica", 11))

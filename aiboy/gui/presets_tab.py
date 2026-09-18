@@ -18,20 +18,14 @@ from tkinter import messagebox, simpledialog, ttk
 
 from aiboy import presets
 from aiboy.gui.widgets import MONO_BOLD, THEME, ConfigForm, make_table
+from aiboy.tuning import mode_label
 
-MODE_LABEL = {"default": "campaign", "random": "random", "sequential": "sequential",
-              "marathon": "marathon"}
 KIND_NOTE = {
     "built-in": "Built-in preset. You can edit it; Save stores your version and "
                 "'Reset to default' brings the shipped values back.",
     "modified": "Built-in preset with your changes. 'Reset to default' restores the shipped values.",
     "user": "User preset. Edit, rename or delete it freely.",
 }
-
-
-def mode_label(cfg: dict) -> str:
-    level = str(cfg.get("start_level", "default"))
-    return MODE_LABEL.get(level, f"level {level}")
 
 
 class PresetsTab:
@@ -63,7 +57,7 @@ class PresetsTab:
         table_frame.grid(row=0, column=0, sticky="nsew")
         self.tree = make_table(table_frame, [
             ("name", "preset", 280, "w", True), ("kind", "type", 76, "w", False),
-            ("mode", "mode", 90, "w", False), ("steps", "steps", 90, "e", False),
+            ("mode", "mode", 104, "w", False), ("steps", "steps", 90, "e", False),
             ("envs", "envs", 44, "e", False), ("obs", "obs", 56, "w", False),
         ], height=7)
         self.tree.bind("<<TreeviewSelect>>", lambda e: self._on_select())

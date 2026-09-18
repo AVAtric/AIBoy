@@ -278,8 +278,8 @@ trial*). Trials are named `<prefix>-<config>[-s<seed>]` under `models/mario/`.
 
 Results stream into the table and are saved to
 `models/mario/_tune/<prefix>.json` after every config (**Load results…**
-reopens them). **Save selected as preset** or **Load selected into Train
-tab** promote a row.
+reopens them). **Save as preset…** and **Load into Train tab** promote the
+selected row.
 
 ### Train tab
 
@@ -321,7 +321,7 @@ Training artefacts are kept small automatically:
   while it trains (CLI: `--keep-checkpoints`, 0 = keep all), and drops
   them all when it finishes, because `final.zip` holds the last state.
   Interrupted runs keep theirs for **Resume**. `best_model.zip` and
-  `final.zip` are always kept. **Compact run…** on the Train tab applies
+  `final.zip` are always kept. **Compact…** (under *This run* on the Train tab) applies
   the same rule to older runs.
 - **Tuning trials** keep only `logs/` (eval history, best model);
   checkpoints and TensorBoard events go as soon as the trial is scored.
@@ -337,7 +337,7 @@ Training artefacts are kept small automatically:
 Manual clean-up lives where the data was made: **Delete trial runs…** on
 the Tune tab removes every run of the current prefix plus its results
 file, **Delete old search runs…** on the wizard's first step does the
-same for the wizard's trials, and **Delete run…** on the Train tab removes
+same for the wizard's trials, and **Delete…** under *This run* on the Train tab removes
 the run named in the run field. Each asks first and shows the size it will
 free; saved presets and the experience are never touched by these. **Open
 folder** reveals a run in the file manager, and **Clear** on the screen

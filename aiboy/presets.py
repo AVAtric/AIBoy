@@ -21,7 +21,8 @@ from aiboy.paths import BUNDLE_DIR, DATA_DIR, recommended_n_envs
 BUILTINS_FILE = BUNDLE_DIR / "builtin_presets.json"     # shipped with the program
 PRESETS_FILE = DATA_DIR / "training_presets.json"       # the user's own, next to the program
 
-# Fields a preset can set. Keep in sync with gui.py's training-tab StringVars.
+# Fields a preset can set. Keep in sync with gui/widgets.py's FIELDS (the
+# parameter form) and the `train` flags in cli.py.
 PRESET_FIELDS = (
     "game", "timesteps", "n_envs", "ent_coef", "learning_rate",
     "n_steps", "batch_size", "n_epochs", "gamma", "gae_lambda", "clip_range",

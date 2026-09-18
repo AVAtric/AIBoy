@@ -1,6 +1,6 @@
 """Wizard, manual flow: 2-candidate search (keep best 1) -> continue with best
 (search data deleted) -> save preset -> train -> autoplay. ~30 s."""
-import json, sys, tkinter as tk
+import sys, tkinter as tk
 from _common import say, silence_dialogs, cleanup
 
 from aiboy import presets, runs, tuning
