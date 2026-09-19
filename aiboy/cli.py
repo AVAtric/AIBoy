@@ -269,6 +269,8 @@ def cmd_train(args: argparse.Namespace) -> None:
         deterministic=True,
         render=False,
     )
+    if resumed_from is not None:
+        _continue_eval_history(eval_cb, paths["logs"] / "evaluations.npz")
 
     completed = False
     try:
@@ -294,6 +296,34 @@ def cmd_train(args: argparse.Namespace) -> None:
         eval_env.close()
         _remember_run(args, run_name, paths, time.time() - started, completed,
                       resumed=resumed_from is not None)
+
+
+def _continue_eval_history(eval_cb, eval_file: Path) -> None:
+    """On --resume, give the new EvalCallback the run's earlier evaluations:
+    a fresh callback starts with no best score, so the first evaluation of
+    the continued run would replace `best_model.zip` even when it is worse
+    than what the run had reached, and it rewrites evaluations.npz from
+    scratch, losing the history the experience file and the Tune tab read.
+    """
+    import numpy as np
+    if not eval_file.exists():
+        return
+    try:
+        data = np.load(eval_file)
+        eval_cb.evaluations_timesteps = [int(t) for t in data["timesteps"]]
+        eval_cb.evaluations_results = [list(map(float, r)) for r in data["results"]]
+        eval_cb.evaluations_length = [list(map(int, l)) for l in data["ep_lengths"]]
+        if "successes" in data:
+            eval_cb.evaluations_successes = [list(map(bool, s)) for s in data["successes"]]
+        means = [float(np.mean(r)) for r in eval_cb.evaluations_results]
+        if means:
+            eval_cb.best_mean_reward = max(means)
+            eval_cb.last_mean_reward = means[-1]
+        print(f"[train] --resume: keeping {len(means)} earlier evaluation(s); best_model.zip is "
+              f"only replaced by a score above {eval_cb.best_mean_reward:.2f}")
+    except Exception as e:                                   # noqa: BLE001
+        print(f"[train] --resume: could not read the earlier evaluations ({e}); the eval "
+              f"history starts over")
 
 
 def _remember_run(args: argparse.Namespace, run_name: str, paths: dict, duration: float,

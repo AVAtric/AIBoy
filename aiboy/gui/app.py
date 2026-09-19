@@ -1571,7 +1571,8 @@ class AIboyGUI:
                                                           if exists else "(new run)"))
         elif self.resume_var.get():
             self.run_hint_var.set(f"{paths['base']}/ exists: continues from "
-                                  f"{checkpoint.parent.name}/{checkpoint.name}")
+                                  f"{checkpoint.parent.name}/{checkpoint.name} and trains the "
+                                  f"Timesteps above on top of what it has")
         else:
             self.run_hint_var.set(f"{paths['base']}/ exists: Resume is off, so training starts "
                                   f"over and replaces its models — choose a new name to keep them")

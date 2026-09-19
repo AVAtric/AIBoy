@@ -170,3 +170,33 @@ class RunDiscoveryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResumeEvalHistoryTests(unittest.TestCase):
+    def test_continued_run_keeps_its_evaluations_and_best_score(self):
+        import tempfile
+        import numpy as np
+        from aiboy.cli import _continue_eval_history
+
+        class FakeEvalCallback:
+            evaluations_timesteps: list = []
+            evaluations_results: list = []
+            evaluations_length: list = []
+            evaluations_successes: list = []
+            best_mean_reward = -np.inf
+            last_mean_reward = -np.inf
+
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "evaluations.npz"
+            np.savez(f, timesteps=[300, 600], results=[[3.0, 5.0], [-450.0, -460.0]],
+                     ep_lengths=[[71, 80], [70, 70]])
+            cb = FakeEvalCallback()
+            _continue_eval_history(cb, f)
+            self.assertEqual(cb.evaluations_timesteps, [300, 600])
+            self.assertEqual(cb.evaluations_results, [[3.0, 5.0], [-450.0, -460.0]])
+            self.assertEqual(cb.evaluations_length, [[71, 80], [70, 70]])
+            self.assertEqual(cb.best_mean_reward, 4.0)          # the run's best so far
+            self.assertEqual(cb.last_mean_reward, -455.0)
+            cb2 = FakeEvalCallback()
+            _continue_eval_history(cb2, Path(tmp) / "missing.npz")   # a run without evals
+            self.assertEqual(cb2.best_mean_reward, -np.inf)

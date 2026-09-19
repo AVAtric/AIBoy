@@ -240,7 +240,10 @@ update under Tracking and the log scrolls below the fields.
   overwrites a trained model by accident. When a run is continued the saved
   model's architecture, `n_steps`, `batch_size` and observation settings are
   kept; `ent_coef`, `learning_rate` and `n_epochs` come from the fields. The
-  hint under the run name says which will happen.
+  continued run trains the *Timesteps* of the form on top of what it has,
+  keeps its earlier evaluations, and only replaces `best_model.zip` with a
+  score above the best it had reached. The hint under the run name says
+  which will happen.
 - A **modified** marker appears under the preset selector as soon as a field
   differs from the preset.
 - **Live preview while training** plays each new `best_model.zip` on the
