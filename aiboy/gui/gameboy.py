@@ -49,13 +49,21 @@ BEZEL = (86, 78, 89)                           # the glass bezel's colour next t
 LCD_OFF = (12, 14, 24)                         # the drawn rim between bezel and screen
 RIM = 2.5                                      # its width, in photo pixels
 
-# The DMG's four shades, from PyBoy's four greys (255, 153, 85, 0).
+# The DMG's four shades, lightest first, for PyBoy's four greys.
 DMG_SHADES = ((155, 188, 15), (139, 172, 15), (48, 98, 48), (15, 56, 15))
-_DMG_LUT = np.zeros((256, 3), dtype=np.uint8)
-for _g, _rgb in zip((255, 153, 85, 0), DMG_SHADES):
-    _DMG_LUT[_g] = _rgb
-for _v in range(256):                          # anything in between: the nearest shade
-    _DMG_LUT[_v] = _DMG_LUT[min((255, 153, 85, 0), key=lambda g: abs(g - _v))]
+PYBOY_GREYS = (255, 153, 85, 0)
+
+
+def _dmg_lut() -> np.ndarray:
+    """Grey level -> DMG shade; a level in between gets the nearest shade."""
+    lut = np.zeros((256, 3), dtype=np.uint8)
+    for v in range(256):
+        nearest = min(range(4), key=lambda i: abs(PYBOY_GREYS[i] - v))
+        lut[v] = DMG_SHADES[nearest]
+    return lut
+
+
+_DMG_LUT = _dmg_lut()
 
 
 def dmg_tint(frame: np.ndarray) -> np.ndarray:
