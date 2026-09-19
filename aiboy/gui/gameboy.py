@@ -15,8 +15,8 @@ dark rim: the photo's own shadow around the window is uneven, so that area
 is repainted in the bezel colour) and the controls region, which is
 swapped for a version with a glow over the pressed buttons (composed with
 PIL once per action and cached). Emulator frames arrive in PyBoy's four
-greys and are shown in the original Game Boy's four green shades
-(`dmg_tint`). Hovering a button tells
+greys and are shown in the pale green of the boot video's idle screen,
+dark on light (`dmg_tint`), so the game looks like the rest of the device. Hovering a button tells
 what it does; when a person plays, pressing a button with the mouse holds
 it (`on_buttons`) and a click gives the canvas the keyboard focus.
 
@@ -49,8 +49,10 @@ BEZEL = (86, 78, 89)                           # the glass bezel's colour next t
 LCD_OFF = (12, 14, 24)                         # the drawn rim between bezel and screen
 RIM = 2.5                                      # its width, in photo pixels
 
-# The DMG's four shades, lightest first, for PyBoy's four greys.
-DMG_SHADES = ((155, 188, 15), (139, 172, 15), (48, 98, 48), (15, 56, 15))
+# The screen's four shades, lightest first, for PyBoy's four greys: the
+# boot video's idle screen (pale green paper, near-black ink, sampled from
+# the video) with two shades in between.
+DMG_SHADES = ((219, 243, 204), (133, 155, 134), (76, 96, 88), (4, 22, 30))
 PYBOY_GREYS = (255, 153, 85, 0)
 
 

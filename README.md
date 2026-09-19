@@ -127,7 +127,7 @@ away: rest the pointer on a field, a checkbox or a ⓘ.
 <img src="assets/screenshot_play.png" width="300" align="right" alt="The Game Boy playing, with RIGHT, B and A lit">
 
 **Preview.** A photo of a real Game Boy with the emulator's picture on its
-LCD, in the original's four green shades behind an even dark rim. Whatever
+LCD, in the pale green of its idle screen behind an even dark rim. Whatever
 produces something to watch shows here without switching tabs: a finished
 model, the live preview of a training run, the wizard's Watch step, your
 own game. The D-pad, A and B light up with every button

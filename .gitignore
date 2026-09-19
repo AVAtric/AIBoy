@@ -21,3 +21,5 @@ dist/
 release/
 system_profile.json
 *.spec
+# a local reference picture, never shipped
+assets/img.png
