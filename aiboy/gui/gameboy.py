@@ -23,9 +23,12 @@ of its own (`own_windows`): Tk there redraws a whole window, every image
 in it, whenever anything in it changes, and the photo is big. With
 everything in the main window a new frame or a lit button cost ~35 ms
 (the display fell to ~14 fps) and every live-panel number did the same.
-A child window redraws only itself, follows the main window as it moves,
-and hides and shows with it; `_place_windows` keeps the three on the
-frame. Elsewhere the canvases are simply placed in the frame. Either way
+A child window redraws only itself and hides and shows with the main
+window; `_follow` polls where the frame is every FOLLOW_MS and moves the
+three along (macOS sends no event while the window is dragged, so
+event-driven placement left them behind), and re-stacks them whenever the
+main window is shown, focused or moved. Elsewhere the canvases are simply
+placed in the frame. Either way
 `screen_image` is the PhotoImage to paste frames into. Emulator frames
 arrive in PyBoy's four greys and are shown in the pale green of the boot
 video's idle screen, dark on light (`dmg_tint`). Hovering a button tells
@@ -53,6 +56,7 @@ PHOTO_W, PHOTO_H = 446, 737
 
 GAME_W, GAME_H = 160, 144
 LCD_SCALES = (2.0, 1.75, 1.5)                  # emulator pixel scales, largest first
+FOLLOW_MS = 16                                 # how often the child windows check where the frame is
 
 # Everything below is in the photo's own pixels (measured from the image).
 LCD = (109, 99, 351, 317)                      # the window behind the glass (blue in the photo)
@@ -360,10 +364,20 @@ class GameBoyView(tk.Frame):
             widget.bind("<ButtonPress-1>", lambda e: self.focus_set(), add="+")
 
         if self.own_windows:
-            # Any move, resize, hide or show of the main window or of this frame.
-            for widget in (self, self.winfo_toplevel()):
-                for event in ("<Configure>", "<Map>", "<Unmap>", "<Visibility>"):
-                    widget.bind(event, self._place_windows, add="+")
+            # The child windows follow this frame by polling its place on the
+            # screen (`_follow`): macOS delivers no <Configure> while the
+            # main window is being dragged, so an event-driven placement left
+            # them behind. Hide, show and focus changes of the main window
+            # re-place and re-stack them at once.
+            top = self.winfo_toplevel()
+            for event in ("<Map>", "<Unmap>", "<Visibility>", "<FocusIn>", "<Activate>"):
+                top.bind(event, self._on_main_window_event, add="+")
+            # A click brings the main window to the front on its own; the
+            # children must come along or the LCD vanishes behind the photo.
+            top.bind("<ButtonPress>", lambda e: self._place_windows(lift=True), add="+")
+            self.bind("<Destroy>", self._stop_following, add="+")
+            self._follow_id: str | None = None
+            self._follow()
 
     # ----- the three canvases -----
 
@@ -397,15 +411,42 @@ class GameBoyView(tk.Frame):
         except tk.TclError:
             pass
 
-    def _place_windows(self, _event=None) -> None:
+    def _follow(self) -> None:
+        """Poll: keep the child windows on this frame, every frame."""
+        self._follow_id = None
+        if not self._place_windows():
+            return                                  # gone
+        try:
+            self._follow_id = self.after(FOLLOW_MS, self._follow)
+        except tk.TclError:
+            pass
+
+    def _stop_following(self, _event=None) -> None:
+        if self._follow_id is not None:
+            try:
+                self.after_cancel(self._follow_id)
+            except tk.TclError:
+                pass
+            self._follow_id = None
+
+    def _on_main_window_event(self, event) -> None:
+        """A hide / show / focus change of the main window itself (the
+        binding is on the toplevel, so it also fires for every widget in
+        it; only the toplevel's own events matter here)."""
+        if event.widget is self.winfo_toplevel():
+            self._place_windows(lift=True)
+
+    def _place_windows(self, lift: bool = False) -> bool:
         """Keep the child windows on this frame: shown and positioned while
         the frame is viewable, hidden otherwise (a withdrawn or iconified
-        main window, or a test that never shows one). Shown in creation
-        order, so the pad and the screen lie over the device."""
+        main window, or a test that never shows one). Stacked in creation
+        order (device, then the pad and the screen over it) whenever one
+        was shown or moved, or `lift` asks for it, so they never end up
+        underneath the main window. False once the widgets are gone."""
         try:
             viewable = self.winfo_viewable()
             ox, oy = self.winfo_rootx(), self.winfo_rooty()
-            shown = False
+            restack = lift
             for win, x, y, w, h in self._windows:
                 if not viewable:
                     if win.state() != "withdrawn":
@@ -415,14 +456,16 @@ class GameBoyView(tk.Frame):
                 if self._placed.get(win) != wanted:
                     self._placed[win] = wanted
                     win.geometry(wanted)
+                    restack = True
                 if win.state() != "normal":
                     win.deiconify()
-                    shown = True
-            if shown:
-                for win, *_ in self._windows:      # device, then the pad and the screen over it
+                    restack = True
+            if restack and viewable:
+                for win, *_ in self._windows:
                     win.lift()
+            return True
         except tk.TclError:                 # the window is going away
-            pass
+            return False
 
     # ----- screen -----
 
