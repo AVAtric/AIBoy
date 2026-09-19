@@ -70,8 +70,8 @@ def insight_text(exp: experience.Experience, record: experience.Record | None,
                 f"({record.env_version}); kept for reference, never reused.")
     know = exp.best_for_task(cfg, metric)
     if know is None:
-        return f"{task_name}: no finished short tests yet, so nothing to compare."
-    lines = [f"{task_name}: {know.n_trials} tests remembered.",
+        return f"{task_name}: no finished tests or runs yet, so nothing to compare."
+    lines = [f"{task_name}: {know.n_trials} tests or runs remembered.",
              f"Best known settings: {tuning.compact_config(know.config)} "
              f"→ score {know.score:.0f} (average of {know.n_seeds} seed(s))."]
     effects = exp.effects(cfg, metric)

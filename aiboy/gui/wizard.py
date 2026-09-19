@@ -101,7 +101,7 @@ def describe_knowledge(know, base: dict) -> str:
         return "AIboy has not tried this goal yet; the first search starts from scratch."
     tuned = tuning.config_diff(know.config, tuning.full_config(base, {}))
     what = tuning.plain_overrides(tuned)
-    tests = f"{know.n_trials} short test{'s' if know.n_trials != 1 else ''}"
+    tests = f"{know.n_trials} earlier test{'s' if know.n_trials != 1 else ''} or run{'s' if know.n_trials != 1 else ''}"
     if know.borrowed_from:
         return (f"AIboy has not tried this goal yet, but for the {know.borrowed_from} its best "
                 f"settings were {what} (score {know.score:.0f}, from {tests}); the first search "

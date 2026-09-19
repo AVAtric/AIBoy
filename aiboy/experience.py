@@ -33,7 +33,9 @@ winner rule the sweeps use; the app applies a clear win to the preset
 (built-ins get a resettable override) and appends an "improvement" record
 so the change is visible and traceable on the Experience tab. Presets that
 share a task (the campaign presets of different lengths) all profit from
-the same tests.
+the same tests. Real training runs count as evidence exactly like trials:
+two finished runs of a preset with different settings are compared the
+same way, so the app learns from ordinary use, not only from searches.
 
 The file is append-only JSON lines: cheap to write from a subprocess, robust
 to a crash mid-write (a torn last line is skipped), and easy to inspect.
@@ -316,16 +318,19 @@ class Experience:
                    if self.known(tuning.trial_config(base, overrides, trial_steps, s)))
 
     def trials_of_task(self, cfg: dict, *, any_length: bool = False) -> list[Record]:
-        """Usable trial records of the same task as `cfg`. With `any_length`
-        the trial length is ignored (the longest trials come first)."""
+        """Usable records of the same task as `cfg`: the short search trials
+        and the real training runs alike (a run is evidence about its own
+        length just like a trial; only resumed or interrupted runs are left
+        out, see `Record.usable`). With `any_length` the length is ignored
+        (the longest come first)."""
         if any_length:
             fields = tuple(k for k in TASK_FIELDS if k != "timesteps")
             want = signature_of(cfg, fields)
-            found = [r for r in self.records if r.kind == KIND_TRIAL and r.usable()
+            found = [r for r in self.records if r.usable()
                      and signature_of(r.config, fields) == want]
             return sorted(found, key=lambda r: -int(r.config.get("timesteps", 0)))
         want = task_of(cfg)
-        return [r for r in self.records if r.kind == KIND_TRIAL and r.usable() and r.task == want]
+        return [r for r in self.records if r.usable() and r.task == want]
 
     def comparable_trials(self, cfg: dict) -> list[Record]:
         """The trials a conclusion about the task of `cfg` rests on: those of
@@ -381,7 +386,7 @@ class Experience:
         own = signature_of(cfg, tuple(k for k in TASK_FIELDS if k != "timesteps"))
         by_task: dict[str, list[Record]] = {}
         for r in self.records:
-            if r.kind != KIND_TRIAL or not r.usable():
+            if not r.usable():
                 continue
             if signature_of(r.config, RELATED_FIELDS) != want:
                 continue

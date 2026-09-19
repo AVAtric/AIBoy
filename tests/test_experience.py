@@ -242,6 +242,33 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(again.improvements(improved), [])
         self.assertEqual(again.best_for_task(tuning.trial_config(BASE, {}, 100_000)).n_trials, 4)
 
+    def test_real_runs_are_evidence_too(self):
+        """A finished training run counts like a trial for its own length;
+        a resumed or interrupted one never does."""
+        task = tuning.trial_config(BASE, {}, 2_000_000)
+        self.assertIsNone(self.exp.best_for_task(task))
+        self.exp.add(trial({}, 700.0, steps=2_000_000, source="train", run_name="campaign"))
+        know = self.exp.best_for_task(task)
+        self.assertEqual((know.n_trials, know.trial_steps), (1, 2_000_000))
+        self.assertEqual(self.exp.summary("mario")["runs"], 1)
+        # a second run with other settings and a clearly better score improves the preset
+        self.exp.add(trial({"ent_coef": 0.03}, 1400.0, steps=2_000_000, source="train",
+                           run_name="campaign-ent"))
+        found = self.exp.improvements({"goal": dict(BASE)})
+        self.assertEqual([(i.preset, i.overrides) for i in found], [("goal", {"ent_coef": 0.03})])
+        # resumed and interrupted runs are not evidence
+        self.exp.add(trial({"ent_coef": 0.09}, 9000.0, steps=2_000_000, source="train",
+                           run_name="resumed", resumed=True))
+        rec = experience.make_record(tuning.trial_config(BASE, {"ent_coef": 0.2}, 2_000_000, 0),
+                                     evals_for(9000.0, 400_000), duration=10.0, completed=False,
+                                     source="train", run_name="stopped")
+        self.exp.add(rec)
+        self.assertEqual(self.exp.best_for_task(task).config["ent_coef"], 0.03)
+        # the wizard's search for a short trial length borrows nothing from it
+        # while the real length is known: same task, so it is the task's own knowledge
+        short = tuning.trial_config(BASE, {}, 100_000)
+        self.assertEqual(self.exp.best_for_task(short).trial_steps, 2_000_000)
+
     def test_forget_and_clear(self):
         a, b = trial({}, 1.0, seed=0), trial({}, 2.0, seed=1)
         self.exp.add(a); self.exp.add(b)
