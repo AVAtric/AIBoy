@@ -241,8 +241,8 @@ class GameSpec:
     rom_file: str
     cartridge_title: str
     # A supported game has an AIboy environment (env.ENV_CLASSES): shaped
-    # reward, pixel or tile observations, presets. Other titles run through
-    # PyBoy's generic openai_gym wrapper (pixels only) from the CLI only.
+    # reward, pixel or tile observations, presets. Any other ROM can be
+    # played by hand, not trained.
     supported: bool = False
     name: str = ""                  # how the game is called in the window
     levels: bool = False            # has Super Mario Land's level modes (start_level)
@@ -303,10 +303,8 @@ class RomInfo:
         """(level, text) where level is one of
         "ok"            fully supported: train it and play it (its own env,
                         presets; level modes for Super Mario Land)
-        "experimental"  play it yourself; PyBoy has a wrapper, so the CLI
-                        can train a generic pixel agent
-        "playable"      play it yourself; no training (no wrapper, or an
-                        unknown cartridge under a known name)
+        "playable"      play it yourself; no training (no AIboy environment
+                        for it, or an unknown cartridge under a known name)
         "unsupported"   cannot boot
         "checking"      probe still running
 
@@ -323,11 +321,9 @@ class RomInfo:
             return "ok", f"{self.title or spec.cartridge_title} — supported: train it, play it"
         if not self.probed:
             return "checking", "checking whether PyBoy can run this ROM…"
-        if self.has_wrapper:
-            return "experimental", (f"{self.title} — play it yourself; training only from the "
-                                    f"CLI (PyBoy's generic wrapper, pixels: --game {self.name})")
         return "playable", (f"{self.title} — play it yourself; no training for this game "
-                            f"(PyBoy has no game wrapper for it)")
+                            f"(AIboy has environments for Super Mario Land and Kirby's "
+                            f"Dream Land)")
 
     @property
     def runnable(self) -> bool:

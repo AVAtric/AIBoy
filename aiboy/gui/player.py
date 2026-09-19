@@ -267,7 +267,7 @@ class _Session:
         from pyboy import PyBoy
         from stable_baselines3.common.monitor import Monitor
         from stable_baselines3.common.vec_env import DummyVecEnv
-        from aiboy.env import ENV_CLASSES, make_env, wrap_vec_env
+        from aiboy.env import make_env, wrap_vec_env
 
         spec = GAMES[game]
         rom_path = ROM_DIR / spec.rom_file
@@ -282,19 +282,13 @@ class _Session:
         self._frames = frames
         self.pacer = FramePacer.for_speed(speed_mult)
 
-        if game in ENV_CLASSES:
+        try:
             base = make_env(game, self.pyboy, frame_skip=action_repeat, obs_type=obs_type,
                             tick_callback=self.on_tick, start_level=start_level,
                             time_budget=time_budget, stall_steps=stall_steps)
-        else:
-            if self.pyboy.game_wrapper() is None:
-                self.pyboy.stop(save=False)
-                raise RuntimeError(f"Game '{game}' has no PyBoy game_wrapper and cannot be played.")
-            if obs_type != "pixels":
-                self.pyboy.stop(save=False)
-                raise RuntimeError(f"obs_type={obs_type!r} is only supported for "
-                                   f"{', '.join(ENV_CLASSES)}")
-            base = self.pyboy.openai_gym(observation_type="raw", action_type="press")
+        except Exception:
+            self.pyboy.stop(save=False)
+            raise
         self.vec = wrap_vec_env(DummyVecEnv([lambda env=Monitor(base): env]),
                                 obs_type, frame_stack)
 

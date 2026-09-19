@@ -275,7 +275,7 @@ class AIboyGUI:
         else:
             level, text = info.status()
         self.game_status_var.set(text)
-        colors = {"ok": THEME.ok, "experimental": THEME.warn, "playable": THEME.warn,
+        colors = {"ok": THEME.ok, "playable": THEME.warn,
                   "unsupported": THEME.err, "checking": THEME.muted}
         self.game_status_label.config(foreground=colors[level])
         self.root.title(f"{APP_NAME} — {display_name(self.game)}" if info else APP_NAME)

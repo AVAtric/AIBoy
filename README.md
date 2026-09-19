@@ -47,16 +47,31 @@ be played by hand.
 
 ## Install
 
-Requirements: Python 3.10+, macOS / Linux / Windows, no GPU. The window
-needs a display of at least 1700 × 960; on a larger one the Game Boy grows
-(up to 1770 × 1130 with the emulator at 2×). The app follows the system
-appearance, light or dark.
+Requirements: Python 3.10–3.12 (3.11 is what AIboy is developed with),
+macOS / Linux / Windows, no GPU. The window needs a display of at least
+1700 × 960; on a larger one the Game Boy grows (up to 1770 × 1130 with the
+emulator at 2×). The app follows the system appearance, light or dark.
+
+The tested setup is a conda environment from conda-forge (Python 3.11 with
+its Tk 8.6.13; every library comes from pip through `requirements.txt`):
 
 ```bash
 git clone <this repo> aiboy && cd aiboy
+conda env create -f environment.yml
+conda activate aiboy
+```
+
+Without conda, a virtual environment works too; use a Python whose
+Tkinter has Tk 8.6 (`python -m tkinter` shows the version):
+
+```bash
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
+
+`requirements.txt` pins the major versions AIboy is written for: PyBoy 1.6
+(PyBoy 2 changed its API), NumPy 1 (PyBoy's wheels are built against it),
+Gymnasium 0.29 with Stable-Baselines3 2.2–2.3, PyTorch 2.
 
 Put your ROM at **`ROMs/mario.gb`**. ROMs are copyrighted and not included:
 you must own the game and dump the cartridge yourself. The file must be the
@@ -332,7 +347,7 @@ from. Every `train` is recorded in `experience.jsonl` when it ends.
 
 | Flag                 | Default | Notes                                                             |
 |----------------------|---------|-------------------------------------------------------------------|
-| `--game`             | mario   | Only `mario` is supported                                         |
+| `--game`             | mario   | `mario` or `kirby` (the games with an AIboy environment)          |
 | `--obs-type`         | tiles   | `tiles` (fast MLP) or `pixels` (CNN, ~40× slower)                 |
 | `--start-level`      | default | `default` / `random` / `sequential` / `marathon` / `W-L`          |
 | `--n-envs`           | cores   | Parallel emulators, one per core (max 12), clamped to cores        |
@@ -542,6 +557,8 @@ CPU type.
 ```
 main.py                 Entry point: python main.py [gui | train | play]
 build_release.py        Packages a standalone app for this machine (PyInstaller)
+requirements.txt        Libraries, pinned to the tested major versions (requirements-build.txt adds PyInstaller)
+environment.yml         The conda environment AIboy is developed in (Python 3.11, Tk 8.6.13, pip)
 builtin_presets.json    Shipped presets (hand-editable)
 assets/                 Game Boy photo, boot video, README screenshots
 aiboy/
@@ -611,8 +628,9 @@ and writes screenshots of the window mid-play into it (macOS).
 - **Kirby's Dream Land: stages.** The environment rewards getting further,
   score and health; stage clears and boss fights are not yet recognised as
   events, and there are no level modes like Mario's.
-- **Wario Land.** Only the generic path (PyBoy's default wrapper, pixel
-  observations, CLI only), untested, no reward shaping.
+- **Wario Land** and other ROMs can be played by hand; training needs an
+  environment of its own (PyBoy has no wrapper for Wario Land, so its RAM
+  would have to be mapped first).
 - Curriculum training across level modes from inside the wizard.
 - Sharing experience between computers automatically.
 

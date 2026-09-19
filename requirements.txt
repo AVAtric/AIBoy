@@ -1,8 +1,13 @@
-pyboy>=1.6,<2.0
-stable-baselines3>=2.2.1
-gymnasium>=0.29
-numpy>=1.24
-torch>=2.0
+# The versions AIboy is developed and tested with (Python 3.10-3.12; 3.11 recommended).
+# PyBoy 2 changed its API, and PyBoy 1.6 wheels are built against NumPy 1,
+# so both stay below the next major; Stable-Baselines3 < 2.4 keeps the
+# Gymnasium 0.29 line these environments are written for.
+pyboy>=1.6.14,<2.0
+numpy>=1.24,<2
+gymnasium>=0.29,<0.30
+stable-baselines3>=2.2.1,<2.4
+torch>=2.0,<3
 tensorboard>=2.14
-pysdl2-dll>=2.28
+pysdl2>=0.9.16
+pysdl2-dll>=2.28,<3
 pillow>=10.0

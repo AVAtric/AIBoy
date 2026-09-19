@@ -13,9 +13,9 @@
 A game adds three things to the base: its action table (`ACTION_NAMES` /
 `ACTIONS`, press events; the releases follow), its tile grid (`_tiles`, a
 16x20 float array in [-1, 1] for the "tiles" observation) and its reward
-(`_evaluate`, called after every action with the emulator advanced). Any
-other ROM with a PyBoy game wrapper still runs through PyBoy's generic
-`openai_gym` (pixels only, no shaping) from the command line.
+(`_evaluate`, called after every action with the emulator advanced). A ROM
+without an environment here can be played by hand, not trained. Only the
+stock PyBoy 1.6 is needed: the tile meanings live in `mario_tile_lut`.
 """
 from __future__ import annotations
 
@@ -60,27 +60,43 @@ UP, DOWN, LEFT, RIGHT = (WindowEvent.PRESS_ARROW_UP, WindowEvent.PRESS_ARROW_DOW
 A, B = WindowEvent.PRESS_BUTTON_A, WindowEvent.PRESS_BUTTON_B
 
 
-class ActionRepeat(gym.Wrapper):
-    """Repeat each action for k emulator steps; sum reward, return last frame.
-    (For PyBoy's generic env; GameBoyEnv holds buttons itself.)"""
+def mario_tile_lut() -> np.ndarray:
+    """Tile identifier -> the value MarioEnv's tile observation shows for it.
 
-    def __init__(self, env: gym.Env, k: int = 4):
-        super().__init__(env)
-        if k < 1:
-            raise ValueError("action_repeat must be >= 1")
-        self.k = k
+    Built from the tile categories PyBoy's Super Mario Land wrapper defines
+    (its module-level lists), in this order, a later category overriding an
+    earlier one for a tile listed twice:
 
-    def step(self, action):
-        total_reward = 0.0
-        terminated = truncated = False
-        obs = None
-        info: dict = {}
-        for _ in range(self.k):
-            obs, reward, terminated, truncated, info = self.env.step(action)
-            total_reward += float(reward)
-            if terminated or truncated:
-                break
-        return obs, total_reward, terminated, truncated, info
+        Mario (incl. plane and submarine)        -1.0
+        coin                                      0.80
+        mushroom, heart, star, lever              0.85
+        plain and moving blocks (ground)          0.5
+        pushable and question blocks              0.6
+        pipes                                     0.5
+        enemies, easy and hard, and projectiles   1.0
+        everything else (sky, background)         0.0
+
+    These are exactly the values of the `custom_minimal_enemy()` method a
+    locally patched PyBoy used to provide, so models trained before this
+    table existed see the same observation. Changing a value here changes
+    what a trained model sees: bump ENV_VERSIONS["mario"].
+    """
+    from pyboy.plugins import game_wrapper_super_mario_land as sml
+    categories = (
+        (sml.base_scripts + sml.plane + sml.submarine, -1.0),
+        (sml.coin, 0.80),
+        (sml.mushroom + sml.heart + sml.star + sml.lever, 0.85),
+        (sml.neutral_blocks + sml.moving_blocks, 0.5),
+        (sml.pushable_blokcs + sml.question_block, 0.6),
+        (sml.pipes, 0.5),
+        (sml.goomba + sml.koopa + sml.moth + sml.flying_moth + sml.sphinx, 1.0),
+        (sml.big_sphinx + sml.fist + sml.bill + sml.projectiles + sml.shell + sml.explosion
+         + sml.spike + sml.plant, 1.0),
+    )
+    lut = np.zeros(int(sml.TILES), dtype=np.float32)
+    for tiles, value in categories:
+        lut[list(tiles)] = value
+    return lut
 
 
 class GameBoyEnv(gym.Env):
@@ -243,11 +259,11 @@ class MarioEnv(GameBoyEnv):
         7 LEFT+JUMP      8 LEFT+RUN       9 LEFT+RUN+JUMP
         10 DOWN  (crouch / enter pipe when standing on one)
 
-    Tiles: PyBoy's `custom_minimal_enemy()` — values in {-1.0=Mario,
-    0.0=empty, 0.5=ground/ledge, 0.6=enemy, 1.0=pipe/wall}. Mario is
-    distinguished from enemies (unlike custom_minimal_policy() where both
-    are 0.6). Seven HUD scalars (lives, coins, timer, x, world, level,
-    power-up) are written into cells (0, 0..6); see `_tiles`.
+    Tiles: the 16x20 game area with every tile replaced by its meaning
+    (`mario_tile_lut`): -1.0 Mario, 0.0 empty, 0.5 ground and pipes, 0.6
+    question / pushable blocks, 0.80 coin, 0.85 power-up, 1.0 enemy. Seven
+    HUD scalars (lives, coins, timer, x, world, level, power-up) are written
+    into cells (0, 0..6); see `_tiles`.
 
     Per-step reward:
         + progress_weight * new_max_x_delta   (ONLY reward for new territory;
@@ -386,9 +402,9 @@ class MarioEnv(GameBoyEnv):
         return self.frame_skip + (self.jump_hold_bonus if action in self._jump_actions else 0)
 
     def _tiles(self) -> np.ndarray:
-        # Semantic tile grid from PyBoy's SML wrapper:
-        #   -1.0 = Mario, 0.0 = empty, 0.5 = ground/ledge, 0.6 = enemy, 1.0 = pipe/wall
-        arr = np.asarray(self.gw.custom_minimal_enemy(), dtype=np.float32)
+        # The game area (background tiles with the sprites drawn in) as
+        # meanings: see mario_tile_lut. A fresh array each call.
+        arr = MARIO_TILE_LUT[np.asarray(self.gw.game_area(), dtype=np.uint16)]
         # The HUD row collapses to 0.0 in this representation, so the agent
         # would know nothing about lives, coins, the timer, where it is in
         # the level or which level it plays. Seven normalised numbers go
@@ -754,6 +770,8 @@ class KirbyEnv(GameBoyEnv):
         return reward, terminated, truncated, info
 
 
+MARIO_TILE_LUT = mario_tile_lut()
+
 ENV_CLASSES: dict[str, type[GameBoyEnv]] = {"mario": MarioEnv, "kirby": KirbyEnv}
 
 
@@ -803,13 +821,13 @@ def make_pyboy_env(
     time_budget: int = DEFAULT_TIME_BUDGET,
     stall_steps: int = DEFAULT_STALL_STEPS,
 ) -> gym.Env:
-    """Build a PyBoy gym env.
-    - a game in ENV_CLASSES (mario, kirby) → its AIboy environment (hold-button
-      actions, shaped reward, pixels or tiles)
-    - other games → PyBoy's default openai_gym + ActionRepeat (pixels only)
-    """
+    """Open the game's ROM in PyBoy and build its AIboy environment (see
+    ENV_CLASSES: hold-button actions, shaped reward, pixels or tiles)."""
     if game not in GAMES:
         raise ValueError(f"Unknown game '{game}'. Available: {sorted(GAMES)}")
+    if game not in ENV_CLASSES:
+        raise ValueError(f"'{game}' cannot be trained: AIboy has environments for "
+                         f"{', '.join(ENV_CLASSES)} (any ROM can still be played by hand)")
     spec = GAMES[game]
     rom_path = Path(rom_dir) / spec.rom_file
     if not rom_path.exists():
@@ -838,25 +856,13 @@ def make_pyboy_env(
     if actual_title != spec.cartridge_title:
         print(f"[env] warning: expected '{spec.cartridge_title}', got '{actual_title}'")
 
-    if game in ENV_CLASSES:
-        env: gym.Env = make_env(game, pyboy, frame_skip=action_repeat, obs_type=obs_type,
-                                start_level=start_level, time_budget=time_budget,
-                                stall_steps=stall_steps)
-    else:
-        if pyboy.game_wrapper() is None:
-            pyboy.stop(save=False)
-            raise ValueError(
-                f"Game '{game}' has no PyBoy game_wrapper; cannot build a gym env. "
-                f"Only games with a built-in wrapper are supported."
-            )
-        if obs_type != "pixels":
-            pyboy.stop(save=False)
-            raise ValueError(f"obs_type={obs_type!r} is only supported for "
-                             f"{', '.join(ENV_CLASSES)}")
-        env = pyboy.openai_gym(observation_type="raw", action_type="press")
-        if action_repeat > 1:
-            env = ActionRepeat(env, k=action_repeat)
-
+    try:
+        env = make_env(game, pyboy, frame_skip=action_repeat, obs_type=obs_type,
+                       start_level=start_level, time_budget=time_budget,
+                       stall_steps=stall_steps)
+    except Exception:
+        pyboy.stop(save=False)
+        raise
     if seed is not None:
         env.reset(seed=seed)
     return env

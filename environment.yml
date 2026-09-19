@@ -1,0 +1,16 @@
+# The conda environment AIboy is developed in: conda-forge Python 3.11 with
+# its Tk 8.6.13 (the window is Tkinter; this Tk is the one the macOS layout
+# and the 60 fps screen were tuned on), everything else from pip.
+#
+#     conda env create -f environment.yml
+#     conda activate aiboy
+#     python main.py
+name: aiboy
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - tk=8.6.13
+  - pip
+  - pip:
+      - -r requirements.txt

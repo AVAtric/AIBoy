@@ -381,9 +381,8 @@ def cmd_play(args: argparse.Namespace) -> None:
 # ------------------------- CLI -------------------------
 
 def _add_common(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--game", default="mario", choices=sorted(GAMES),
-                   help=f"Supported (own environment, presets): {', '.join(SUPPORTED_GAMES)}. "
-                        f"Other titles are experimental (PyBoy's generic wrapper, pixels only).")
+    p.add_argument("--game", default="mario", choices=sorted(SUPPORTED_GAMES),
+                   help=f"A game with an AIboy environment: {', '.join(SUPPORTED_GAMES)}")
     p.add_argument("--action-repeat", type=int, default=4, help="Frames each action is held")
     p.add_argument("--frame-stack", type=int, default=4, help="Consecutive frames stacked as obs")
     p.add_argument("--obs-type", default="tiles", choices=list(OBS_TYPES),

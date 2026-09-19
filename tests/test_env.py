@@ -295,7 +295,7 @@ class RomDiscoveryTests(unittest.TestCase):
         self.assertEqual(wario.status()[0], "checking")
         self.assertTrue(wario.playable)
         wario.probed, wario.title, wario.has_wrapper = True, "SUPERMARIOLAND", True
-        self.assertEqual(wario.status()[0], "experimental")
+        self.assertEqual(wario.status()[0], "playable")      # a wrapper alone is not an env
         other = env.RomInfo("tetris", Path("ROMs/tetris.gb"), probed=True, title="TETRIS",
                             has_wrapper=False)
         self.assertEqual(other.status()[0], "playable")      # any ROM that boots: play it
