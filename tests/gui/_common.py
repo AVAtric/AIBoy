@@ -11,6 +11,7 @@ train real models for ~30 s). Run them one at a time with the app closed:
     python tests/gui/check_e2e_auto.py     # the same via the Auto-complete box
     python tests/gui/check_play_visual.py  # play on the Game Boy: LCD, lit buttons, LED, rounds
     python tests/gui/check_human_play.py   # play yourself: keys reach the game, stats, stop
+    python tests/gui/check_tensorboard.py  # the TensorBoard button: comes up, busy port, crash
 
 Every check prints a final OK line and cleans up everything it created.
 """

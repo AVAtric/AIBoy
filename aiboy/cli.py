@@ -13,7 +13,10 @@ learns which settings it has already tried and how fast this computer is.
 
 Two internal sub-commands run PyBoy in a throw-away process for the GUI
 (`probe-rom <file>`, `level-state <rom> <world> <level> <out>`); they are what
-lets the GUI stay responsive even for a ROM the emulator cannot boot.
+lets the GUI stay responsive even for a ROM the emulator cannot boot. A third,
+`tensorboard --logdir <dir> --port <n>`, serves the training curves with the
+TensorBoard that ships inside the program, so the built app needs no
+`tensorboard` command installed on the computer.
 
 All paths (ROMs/, models/) are relative to the data directory (the project
 folder, or the folder next to the built app; see paths.py), which `main()`
@@ -454,6 +457,9 @@ def build_parser() -> argparse.ArgumentParser:
     ls.add_argument("world", type=int)
     ls.add_argument("level", type=int)
     ls.add_argument("out")
+    tb = sub.add_parser("tensorboard", help=argparse.SUPPRESS)
+    tb.add_argument("--logdir", required=True)
+    tb.add_argument("--port", type=int, default=6006)
 
     p = sub.add_parser("play", help="Watch a trained agent in an SDL2 window")
     _add_common(p)
@@ -466,6 +472,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device", default="cpu")
 
     return parser
+
+
+def cmd_tensorboard(args: argparse.Namespace) -> None:
+    """Serve `args.logdir` on localhost:`args.port` with the TensorBoard this
+    program was installed (or built) with. Exits with a plain message when the
+    package is missing, which the GUI shows in a dialog."""
+    try:
+        from tensorboard.main import run_main
+    except ImportError:
+        sys.exit("TensorBoard is not installed (pip install tensorboard)")
+    # absl reads the command line from sys.argv; TensorBoard's own flag
+    # syntax is `--flag=value`. The plain Python event loader is enough for
+    # a handful of runs and needs no extra data-server binary.
+    sys.argv = ["tensorboard", f"--logdir={args.logdir}", f"--port={args.port}",
+                "--host=localhost", "--load_fast=false"]
+    run_main()
 
 
 def _prepare_process() -> None:
@@ -511,6 +533,8 @@ def main(argv: list[str] | None = None) -> None:
         probe_rom_worker(args.rom)
     elif args.mode == "level-state":
         level_state_worker(args.rom, args.world, args.level, args.out)
+    elif args.mode == "tensorboard":
+        cmd_tensorboard(args)
 
 
 if __name__ == "__main__":

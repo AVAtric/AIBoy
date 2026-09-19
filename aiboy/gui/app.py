@@ -21,12 +21,13 @@ Experience tab.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import queue
 import re
-import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -48,13 +49,15 @@ from aiboy.gui.experience_tab import ExperienceTab
 from aiboy.gui.gameboy import LCD_SCALES, GameBoyView, dmg_tint, photo_size
 from aiboy.gui.player import GAME_H, GAME_W, SPEED_CHOICES, EmbeddedPlayer, IntroVideo, LatestFrame
 from aiboy.gui.presets_tab import PresetsTab
-from aiboy.paths import DATA_DIR, FROZEN
+from aiboy.paths import DATA_DIR, app_command
 from aiboy.gui.widgets import (MONO, MONO_BOLD, THEME, ConfigForm, WidgetLock, info_icon, make_table,
                                setup_styles, tooltip)
 
 PROJECT_DIR = DATA_DIR      # ROMs/, models/, presets and the error log live here
 DEFAULT_GAME = "mario"
 TENSORBOARD_PORT = 6006
+TENSORBOARD_LOG = PROJECT_DIR / "tensorboard.log"    # what the TensorBoard process printed
+TENSORBOARD_START_S = 90     # how long the built app's TensorBoard may take to answer
 
 # SB3's verbose=1 table: "|    ep_rew_mean    | 123     |"
 STAT_LINE = re.compile(r"\|\s+([a-z_]+)\s+\|\s+([\S]+)\s+\|")
@@ -180,6 +183,7 @@ class AIboyGUI:
         self.tune_thread: threading.Thread | None = None
         self.tune_proc: subprocess.Popen | None = None
         self.tb_proc: subprocess.Popen | None = None
+        self._tb_started_at = 0.0
         self._train_target_steps = 1
         self._train_rollout_size = 1
         self._train_baseline_steps: int | None = None
@@ -2240,30 +2244,84 @@ class AIboyGUI:
             self.experience_tab.set_inputs_disabled(disabled)
 
     def open_tensorboard(self) -> None:
-        """Serve models/<game>/ (every run, incl. tune trials) and open a browser tab."""
+        """Serve models/<game>/ (every run, incl. tune trials) and open a browser tab.
+
+        TensorBoard runs as `main.py tensorboard` (the built app: the app
+        itself with that sub-command), so it is the copy this program was
+        installed or built with; nothing on the computer's PATH is needed.
+        Its output goes to TENSORBOARD_LOG; the browser opens once the port
+        answers (`_tensorboard_poll`), and a start-up failure is shown."""
         url = f"http://localhost:{TENSORBOARD_PORT}"
         if self.tb_proc is not None and self.tb_proc.poll() is None:
             webbrowser.open(url)
             return
         logdir = PROJECT_DIR / "models" / self.game
-        exe = shutil.which("tensorboard")
-        if exe is None and FROZEN:
+        if importlib.util.find_spec("tensorboard") is None:
             messagebox.showinfo("TensorBoard",
                                 "TensorBoard is not installed on this computer. Install it with "
                                 "`pip install tensorboard` and click again, or read the training "
                                 f"curves later from {logdir}.")
             return
-        cmd = [exe] if exe else [sys.executable, "-m", "tensorboard.main"]
-        cmd += ["--logdir", str(logdir), "--port", str(TENSORBOARD_PORT)]
-        try:
-            self.tb_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                            stderr=subprocess.DEVNULL, cwd=str(PROJECT_DIR))
-        except OSError as e:
-            messagebox.showerror("TensorBoard", f"Could not start TensorBoard:\n{e}\n\n"
-                                                f"Install it with: pip install tensorboard")
+        if self._port_answers(TENSORBOARD_PORT):
+            # Somebody else's server (an earlier TensorBoard that was never
+            # closed?); starting ours would fail, and the readiness poll
+            # could not tell the two apart.
+            messagebox.showerror("TensorBoard",
+                                 f"Port {TENSORBOARD_PORT} is already in use by another program "
+                                 f"(an earlier TensorBoard?). Close it and click again.")
             return
-        self.append_log(f"[gui] tensorboard --logdir {logdir} → {url}\n")
-        self.root.after(2500, lambda: webbrowser.open(url))
+        cmd = app_command("tensorboard", "--logdir", str(logdir), "--port", str(TENSORBOARD_PORT))
+        try:
+            with TENSORBOARD_LOG.open("w") as log:      # a file, not a pipe: nobody would drain it
+                self.tb_proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
+                                                cwd=str(PROJECT_DIR))
+        except OSError as e:
+            messagebox.showerror("TensorBoard", f"Could not start TensorBoard:\n{e}")
+            return
+        self.append_log(f"[gui] {' '.join(cmd)} → {url}\n")
+        self._tb_started_at = time.monotonic()
+        self.root.after(500, lambda: self._tensorboard_poll(url))
+
+    def _tensorboard_poll(self, url: str) -> None:
+        """Open the browser as soon as TensorBoard answers on its port. If the
+        process quit first (port taken, package broken) or nothing answers
+        within TENSORBOARD_START_S, say why instead of opening a tab on
+        nothing."""
+        proc = self.tb_proc
+        if self._closing or proc is None:
+            return
+        if proc.poll() is not None:
+            why = self._tensorboard_output()
+            self.append_log(f"[gui] tensorboard exited with {proc.returncode}: {why}\n")
+            messagebox.showerror("TensorBoard",
+                                 f"TensorBoard stopped right after starting:\n{why[-1500:]}\n\n"
+                                 f"(the full output is in {TENSORBOARD_LOG.name})")
+            return
+        if not self._port_answers(TENSORBOARD_PORT):
+            if time.monotonic() - self._tb_started_at > TENSORBOARD_START_S:
+                messagebox.showerror("TensorBoard",
+                                     f"TensorBoard did not answer on port {TENSORBOARD_PORT} within "
+                                     f"{TENSORBOARD_START_S} s; see {TENSORBOARD_LOG.name}.")
+                return
+            self.root.after(500, lambda: self._tensorboard_poll(url))
+            return
+        self.append_log(f"[gui] tensorboard is up: {url}\n")
+        webbrowser.open(url)
+
+    @staticmethod
+    def _port_answers(port: int) -> bool:
+        try:
+            with socket.create_connection(("localhost", port), timeout=0.2):
+                return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def _tensorboard_output() -> str:
+        try:
+            return TENSORBOARD_LOG.read_text(errors="replace").strip()
+        except OSError:
+            return ""
 
     def append_log(self, text: str) -> None:
         self.log_text.insert("end", text)

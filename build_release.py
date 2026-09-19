@@ -42,6 +42,8 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -173,7 +175,7 @@ def run_pyinstaller(profile: dict) -> Path:
         "--collect-submodules", "sdl2",
         "--collect-all", "stable_baselines3",  # reads its version.txt at import
         "--collect-all", "gymnasium",
-        "--collect-submodules", "tensorboard",
+        "--collect-all", "tensorboard",       # its web UI is a data file (webfiles.zip)
         "--collect-submodules", PACKAGE,      # the tabs are imported lazily; include every module
         "--paths", str(ROOT),
         "--exclude-module", "pytest",
@@ -288,6 +290,46 @@ def executable(release: Path) -> Path:
     return exe
 
 
+SELFTEST_TB_PORT = 6099
+
+
+def check_tensorboard(exe: Path, logdir: Path) -> str | None:
+    """The TensorBoard button runs `<app> tensorboard`; make sure the bundled
+    copy serves its web page (a missing webfiles.zip or plugin would only
+    show up when a user clicks the button). Returns what went wrong, or None."""
+    print("[selftest] serving the run's curves with the built app's TensorBoard…")
+    log_path = BUILD_DIR / "selftest-tensorboard.log"
+    with log_path.open("w") as log:                 # a file: a full pipe would stall the child
+        proc = subprocess.Popen([str(exe), "tensorboard", "--logdir", str(logdir),
+                                 "--port", str(SELFTEST_TB_PORT)],
+                                stdout=log, stderr=subprocess.STDOUT)
+    url = f"http://localhost:{SELFTEST_TB_PORT}/"
+    deadline = time.monotonic() + 90
+    page = ""
+    try:
+        while time.monotonic() < deadline and proc.poll() is None:
+            try:
+                with urllib.request.urlopen(url, timeout=2) as r:
+                    page = r.read(4000).decode("utf-8", "replace")
+                    break
+            except (urllib.error.URLError, OSError):
+                time.sleep(1)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+    if "tensorboard" not in page.lower():
+        out = log_path.read_text(errors="replace")
+        return (f"[selftest] the built app's TensorBoard did not answer on {url} "
+                f"(rc={proc.returncode}):\n{out[-3000:]}")
+    print(f"[selftest] OK — TensorBoard answers on {url}")
+    return None
+
+
 def selftest(release: Path) -> None:
     exe = executable(release)
     rom = release / "ROMs" / "mario.gb"
@@ -307,12 +349,18 @@ def selftest(release: Path) -> None:
                          capture_output=True, text=True, timeout=600)
     run_dir = release / "models" / "mario" / "selftest"
     ok = out.returncode == 0 and (run_dir / "checkpoints" / "final.zip").exists()
+    tb_error = None
+    if ok:
+        print("[selftest] OK — the built app trains with parallel emulators")
+        tb_error = check_tensorboard(exe, run_dir.parent)
+    # Clean up before any exit: the release must never ship the test run.
     shutil.rmtree(run_dir, ignore_errors=True)
     (release / "experience.jsonl").unlink(missing_ok=True)      # the app ships with no memory
     if not ok:
         sys.exit(f"[selftest] training failed (rc={out.returncode}):\n{out.stdout[-3000:]}\n"
                  f"{out.stderr[-3000:]}")
-    print("[selftest] OK — the built app trains with parallel emulators")
+    if tb_error:
+        sys.exit(tb_error)
     print("[selftest] checking game-controller support in the built app…")
     out = subprocess.run([str(exe), "controller-test", "--seconds", "1"], capture_output=True,
                          text=True, timeout=60)

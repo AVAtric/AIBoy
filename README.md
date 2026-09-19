@@ -269,7 +269,8 @@ update under Tracking and the log scrolls below the fields.
   ends its best model is selected under Tracking.
 - **Stop** interrupts the trainer: it saves `checkpoints/final.zip` and
   exits. `logs/best_model.zip` is always kept.
-- **TensorBoard** serves `models/mario/` on port 6006. **Save as…** stores
+- **TensorBoard** serves `models/mario/` on port 6006 with the TensorBoard the
+  app was installed or built with (the built app needs nothing extra). **Save as…** stores
   the fields as a preset; **Manage…** opens the Presets tab.
 
 While training or tuning runs, every input on every tab is locked.
@@ -596,6 +597,7 @@ python tests/gui/check_e2e_auto.py               # the same with "run everything
 python tests/gui/check_marathon.py               # train a marathon, play one life from 1-1
 python tests/gui/check_experience.py             # reuse, borrowing and preset improvement
 python tests/gui/check_play_visual.py            # play on the Game Boy: LCD, lit buttons, LED, rounds
+python tests/gui/check_tensorboard.py            # the TensorBoard button (~5 s)
 python tests/gui/check_human_play.py             # play yourself: keys reach the game, stats, stop
 python tests/gui/check_intro.py                  # boot video and sound (plays once)
 ```
@@ -621,7 +623,7 @@ and writes screenshots of the window mid-play into it (macOS).
 | The wizard says every variation is already known | Raise *Effort* (longer trials are a new task), pick a fixed set under *Vary*, or **Forget all…** on the Experience tab. |
 | Training plateaus | Raise `ent_coef` to 0.02–0.05, sweep `ent_coef × learning_rate` on Tune, or try `pixels`. |
 | Slow training | Keep `obs_type=tiles`, `device=cpu`, `n_envs` near your core count; turn the live preview off. |
-| TensorBoard button does nothing | `pip install tensorboard`. |
+| TensorBoard button does nothing | From source: `pip install tensorboard`. Otherwise a dialog says why it stopped (a busy port 6006 is the usual reason); its output is in `tensorboard.log` next to the app. |
 | Something went wrong in the window | Unexpected errors go to a dialog and `gui_errors.log`; a running training or sweep is not affected. |
 | Playback looks wrong | Obs type, action repeat and frame stack must match the run; select the model from the list so they are filled in. |
 

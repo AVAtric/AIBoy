@@ -12,6 +12,7 @@ experience*.jsonl
 settings.json
 
 gui_errors.log
+tensorboard.log
 
 assets/orig_gb*
 
