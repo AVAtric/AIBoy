@@ -28,8 +28,11 @@ A child window redraws only itself and hides and shows with the main
 window; `_follow` polls where the frame is every FOLLOW_MS and moves the
 three along (macOS sends no event while the window is dragged, so
 event-driven placement left them behind), and re-stacks them whenever the
-main window is shown, focused or moved. Elsewhere the canvases are simply
-placed in the frame. Either way
+main window is shown, focused or moved. Tk gives such a window a level
+above every application; `_place_windows` puts it back to the normal
+level each time it shows one, so another app's window covers the Game
+Boy like any other. Elsewhere the canvases are simply placed in the
+frame. Either way
 `screen_image` is the PhotoImage to paste frames into. Emulator frames
 arrive in PyBoy's four greys and are shown in the pale green of the boot
 video's idle screen, dark on light (`dmg_tint`). Hovering a button tells
@@ -449,8 +452,11 @@ class GameBoyView(tk.Frame):
         """A hide / show / focus change of the main window itself (the
         binding is on the toplevel, so it also fires for every widget in
         it; only the toplevel's own events matter here)."""
-        if event.widget is self.winfo_toplevel():
-            self._place_windows(lift=True)
+        try:
+            if event.widget is self.winfo_toplevel():
+                self._place_windows(lift=True)
+        except tk.TclError:                 # the main window is closing; this frame is gone
+            pass
 
     def _place_windows(self, lift: bool = False) -> bool:
         """Keep the child windows on this frame: shown and positioned while
@@ -475,6 +481,12 @@ class GameBoyView(tk.Frame):
                     restack = True
                 if win.state() != "normal":
                     win.deiconify()
+                    # Tk on macOS keeps a borderless transient window above
+                    # every application (the "utility" level: the Game Boy
+                    # stayed on top of the browser), and `deiconify` sets
+                    # that again after the window is mapped, so it is
+                    # undone here, not in a <Map> binding.
+                    win.attributes("-topmost", False)
                     restack = True
             if restack and viewable:
                 for win, *_ in self._windows:
