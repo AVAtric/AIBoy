@@ -186,9 +186,12 @@ jump holds the button for 10 frames and a walk step for 4.
 full log. *Tune* runs sweeps. *Presets* manages configurations.
 *Experience* shows everything AIboy has learned. Details in
 [The tabs in detail](#the-tabs-in-detail). The **Game** selector at the top
-lists every ROM in `ROMs/` and shows whether it can run (green: supported,
-amber: PyBoy has a wrapper but this version has no environment for it, red:
-cannot run). The status bar at the bottom always says what is running.
+lists every ROM in `ROMs/` (`.gb` and `.gbc`) and says what AIboy can do
+with it: green, supported — train it and play it; amber, play it yourself
+only (PyBoy has no environment for it here; with a wrapper the CLI can
+still train a pixel agent); red, the ROM does not boot. AIboy is an
+emulator for every game and a trainer for the supported ones. The status
+bar at the bottom always says what is running.
 
 ## How AIboy learns
 
@@ -558,7 +561,8 @@ and writes screenshots of the window mid-play into it (macOS).
 | Symptom | What to do |
 |---------|------------|
 | `ROM not found: ROMs/mario.gb` | Place your ROM there (see Install). |
-| Game shows red or amber | Only Super Mario Land is supported; check that `mario.gb` is the original cartridge. |
+| Game shows amber | You can play it yourself; only Super Mario Land can be trained. If it *is* Super Mario Land, check that `mario.gb` is the original cartridge. |
+| Game shows red | The ROM does not boot in PyBoy; the text says why. |
 | The wizard says every variation is already known | Raise *Effort* (longer trials are a new task), pick a fixed set under *Vary*, or **Forget all…** on the Experience tab. |
 | Training plateaus | Raise `ent_coef` to 0.02–0.05, sweep `ent_coef × learning_rate` on Tune, or try `pixels`. |
 | Slow training | Keep `obs_type=tiles`, `device=cpu`, `n_envs` near your core count; turn the live preview off. |

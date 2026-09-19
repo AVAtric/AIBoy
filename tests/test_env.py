@@ -208,17 +208,22 @@ class RomDiscoveryTests(unittest.TestCase):
         self.assertEqual(mario.status()[0], "ok")            # supported before the probe
         self.assertTrue(mario.runnable)
         mario.probed, mario.title = True, "SOMETHING ELSE"
-        self.assertEqual(mario.status()[0], "unsupported")   # wrong cartridge
+        self.assertEqual(mario.status()[0], "playable")      # wrong cartridge: play it, no training
+        self.assertFalse(mario.runnable)
+        self.assertTrue(mario.playable)
         kirby = env.RomInfo("kirby", Path("ROMs/kirby.gb"))
         self.assertEqual(kirby.status()[0], "checking")
+        self.assertTrue(kirby.playable)
         kirby.probed, kirby.title, kirby.has_wrapper = True, "KIRBY DREAM LA", True
         self.assertEqual(kirby.status()[0], "experimental")
-        self.assertFalse(kirby.runnable)
-        unknown = env.RomInfo("zelda", Path("ROMs/zelda.gb"), probed=True, title="ZELDA",
-                              has_wrapper=False)
-        self.assertEqual(unknown.status()[0], "unsupported")
-        broken = env.RomInfo("x", Path("x.gb"), probed=True, error="boom")
+        other = env.RomInfo("tetris", Path("ROMs/tetris.gb"), probed=True, title="TETRIS",
+                            has_wrapper=False)
+        self.assertEqual(other.status()[0], "playable")      # any ROM that boots: play it
+        self.assertTrue(other.playable and not other.runnable)
+        broken = env.RomInfo("bad", Path("ROMs/bad.gb"), probed=True, error="boom")
         self.assertEqual(broken.status()[0], "unsupported")
+        self.assertFalse(broken.playable)
+        self.assertFalse(kirby.runnable)
 
     @unittest.skipUnless((env.ROM_DIR / "mario.gb").exists(), "needs ROMs/mario.gb")
     def test_probe_real_rom(self):

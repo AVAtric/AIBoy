@@ -40,8 +40,8 @@ from PIL import Image, ImageTk
 
 from aiboy import APP_NAME, presets, runs, settings, tuning
 from aiboy.experience import Experience, Record
-from aiboy.games import (OBS_TYPES, SML_ALL_LEVELS, RomInfo, discover_roms, level_choices,
-                         probe_rom)
+from aiboy.games import (OBS_TYPES, SML_ALL_LEVELS, RomInfo, discover_roms, display_name,
+                         level_choices, probe_rom)
 from aiboy.gui.controls import ControlMap, Gamepad, HeldButtons, KeyboardInput
 from aiboy.gui.controls_dialog import ControlsDialog
 from aiboy.gui.experience_tab import ExperienceTab
@@ -145,7 +145,7 @@ def kill_if_alive(proc: subprocess.Popen | None) -> None:
 class AIboyGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
-        root.title(f"{APP_NAME} — Super Mario Land")
+        root.title(APP_NAME)
         self.lcd_scale = choose_lcd_scale(root.winfo_screenwidth(), root.winfo_screenheight())
         self.window_w, self.window_h = window_size(self.lcd_scale)
         root.geometry(f"{self.window_w}x{self.window_h}")
@@ -263,7 +263,7 @@ class AIboyGUI:
             return True, ""
         if level == "checking":
             return False, "Still checking whether this ROM can run; try again in a moment."
-        return False, f"'{self.game}' cannot be used in this version: {text}"
+        return False, f"'{self.game}' cannot be trained here: {text}"
 
     def _update_game_status(self) -> None:
         info = self.current_rom()
@@ -272,9 +272,10 @@ class AIboyGUI:
         else:
             level, text = info.status()
         self.game_status_var.set(text)
-        colors = {"ok": THEME.ok, "experimental": THEME.warn, "unsupported": THEME.err,
-                  "checking": THEME.muted}
+        colors = {"ok": THEME.ok, "experimental": THEME.warn, "playable": THEME.warn,
+                  "unsupported": THEME.err, "checking": THEME.muted}
         self.game_status_label.config(foreground=colors[level])
+        self.root.title(f"{APP_NAME} — {display_name(self.game)}" if info else APP_NAME)
         self._update_start_buttons()
 
     def _update_start_buttons(self) -> None:
@@ -285,9 +286,9 @@ class AIboyGUI:
         self.btn_tune_start.config(state=state)
         if not self.playing_active():
             self.btn_play_start.config(state=state)
-            # Anyone can play a ROM that boots, wrapper or not.
+            # Anyone can play a ROM that boots, supported for training or not.
             info = self.current_rom()
-            can_play = info is not None and not info.error and not self.busy()
+            can_play = info is not None and info.playable and not self.busy()
             self.btn_human.config(state="normal" if can_play else "disabled")
             self.human_start_combo.config(
                 state="readonly" if self.game == DEFAULT_GAME else "disabled")
@@ -1947,7 +1948,7 @@ class AIboyGUI:
         if info is None:
             messagebox.showerror("Play", f"No ROM for '{self.game}' in ROMs/.")
             return False
-        if info.error:
+        if not info.playable:
             messagebox.showerror("Play", f"'{self.game}' cannot boot: {info.error}")
             return False
         start_level = None

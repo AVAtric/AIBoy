@@ -266,30 +266,44 @@ class RomInfo:
 
     def status(self) -> tuple[str, str]:
         """(level, text) where level is one of
-        "ok"            fully supported (custom env, presets, level modes)
-        "experimental"  PyBoy has a wrapper; generic pixel env, CLI only
-        "unsupported"   cannot run (no wrapper, unknown cartridge, boot error)
+        "ok"            fully supported: train it and play it (custom env,
+                        presets, level modes)
+        "experimental"  play it yourself; PyBoy has a wrapper, so the CLI
+                        can train a generic pixel agent
+        "playable"      play it yourself; no training (no wrapper, or an
+                        unknown cartridge under a known name)
+        "unsupported"   cannot boot
         "checking"      probe still running
+
+        AIboy is an emulator for every ROM in the folder and a trainer for
+        the supported ones: anything that boots can be played by a person.
         """
         if self.error:
             return "unsupported", f"cannot boot ROM: {self.error}"
         spec = self.spec
         if spec is not None and spec.supported:
             if self.probed and self.title != spec.cartridge_title:
-                return "unsupported", (f"expected cartridge '{spec.cartridge_title}' "
-                                       f"but the ROM reports '{self.title}'")
-            return "ok", f"{self.title or spec.cartridge_title} — supported"
+                return "playable", (f"expected cartridge '{spec.cartridge_title}' but the ROM "
+                                    f"reports '{self.title}' — play it yourself; no training")
+            return "ok", f"{self.title or spec.cartridge_title} — supported: train it, play it"
         if not self.probed:
             return "checking", "checking whether PyBoy can run this ROM…"
         if self.has_wrapper:
-            return "experimental", (f"{self.title} — PyBoy game wrapper only; no custom "
-                                    f"environment, presets or level modes in this version "
-                                    f"(CLI: --game {self.name}, pixels)")
-        return "unsupported", f"{self.title} — no PyBoy game wrapper; cannot be trained or played"
+            return "experimental", (f"{self.title} — play it yourself; training only from the "
+                                    f"CLI (PyBoy's generic wrapper, pixels: --game {self.name})")
+        return "playable", (f"{self.title} — play it yourself; no training for this game "
+                            f"(PyBoy has no game wrapper for it)")
 
     @property
     def runnable(self) -> bool:
+        """Can be trained and played by the agent here."""
         return self.status()[0] == "ok"
+
+    @property
+    def playable(self) -> bool:
+        """Can be played by a person: everything that boots (or is still
+        being checked)."""
+        return self.error is None
 
 
 def discover_roms(rom_dir: str | Path = ROM_DIR) -> list[RomInfo]:
