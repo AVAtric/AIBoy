@@ -58,7 +58,8 @@ INTRO = {
     1: "These are the settings that will be trained. Give them a name so you can find them "
        "again on the Train tab, or continue without saving.",
     2: "The agent now learns by playing, using every core of this computer. It keeps its best "
-       "version as it goes, so you can stop early and still watch what it has learned.",
+       "version as it goes, so you can stop early and still watch what it has learned. Progress "
+       "and the live numbers are under Tracking; Details opens the Train tab.",
     3: "The trained agent plays on the Game Boy screen, exactly the way it learned to. How "
        "many rounds it plays and how fast are set under Tracking, where the live numbers "
        "update while it plays.",
@@ -69,9 +70,6 @@ MODE_PLAIN = {
     "sequential": "works through the levels in order, repeating a level until it beats it",
     "marathon": "tries to beat every level in one go",
 }
-STAT_LABELS = (("status", "status"), ("total_timesteps", "steps trained"),
-               ("ep_rew_mean", "average score"), ("ep_len_mean", "episode length"),
-               ("fps", "speed (steps/s)"), ("time_elapsed", "elapsed (s)"))
 ROM_HINT = ("Put your Super Mario Land ROM file, named mario.gb (or Kirby's Dream Land as "
             "kirby.gb), into the ROMs folder next to the app, then click 'Rescan ROMs' at the top.")
 
@@ -431,8 +429,11 @@ class WizardTab:
         self.btn_train_stop = ttk.Button(btns, text="■ Stop", command=self.app.stop_training,
                                          state="disabled")
         self.btn_train_stop.pack(side="left")
-        ttk.Button(btns, text="Show log", command=lambda: self.app.show_tab(self.app.train_tab)).pack(
-            side="left", padx=(18, 0))
+        btn_details = ttk.Button(btns, text="Details",
+                                 command=lambda: self.app.show_tab(self.app.train_tab))
+        btn_details.pack(side="left", padx=(18, 0))
+        tooltip(btn_details, "The Train tab: every evaluation of this run and the trainer's "
+                             "messages. The live numbers are under Tracking.")
         self.btn_watch = ttk.Button(btns, text="Watch it play →", command=lambda: self.goto(3),
                                     state="disabled")
         self.btn_watch.pack(side="right")
@@ -445,13 +446,6 @@ class WizardTab:
         ttk.Label(prog, textvariable=self.app.train_progress_text, width=32, anchor="e").grid(
             row=0, column=1, padx=(6, 0))
 
-        stats = ttk.LabelFrame(pane, text="Live", padding=8)
-        stats.grid(row=4, column=0, sticky="w", pady=(8, 0))
-        for i, (key, label) in enumerate(STAT_LABELS):
-            ttk.Label(stats, text=f"{label}:").grid(row=i % 3, column=(i // 3) * 2, sticky="w",
-                                                    padx=(0 if i < 3 else 24, 10))
-            ttk.Label(stats, textvariable=self.app.stat_vars[key], font=MONO_BOLD, width=22,
-                      anchor="w").grid(row=i % 3, column=(i // 3) * 2 + 1, sticky="w")
         self.train_result_var = tk.StringVar()
         ttk.Label(pane, textvariable=self.train_result_var, wraplength=640).grid(
             row=5, column=0, sticky="w", pady=(10, 0))
@@ -783,7 +777,7 @@ class WizardTab:
         self.btn_search_stop.config(state="normal")
         self.btn_use_best.config(state="disabled")
         self.status_var.set("Trying the variations: each one is a short training run "
-                            "(details on the Tune tab).")
+                            "(progress under Tracking, the full table on the Tune tab).")
 
     def skip_search(self) -> None:
         ok, why = self.app.game_runnable()
@@ -834,8 +828,8 @@ class WizardTab:
         winner, why = tuning.explain_winner(self.app.tune_results())
         if winner is None:
             self.status_var.set("The search " + ("was stopped" if cancelled else "finished")
-                                + " before any variation could be scored. The Train tab log "
-                                  "has the details.")
+                                + " before any variation could be scored. The Messages box on "
+                                  "the Train tab says why.")
             return
         self.btn_use_best.config(state="normal")
         if self.auto_var.get() and not cancelled:
@@ -975,7 +969,7 @@ class WizardTab:
         self.btn_train_stop.config(state="normal")
         self.btn_watch.config(state="disabled")
         self.train_result_var.set("")
-        self.status_var.set(f"Training '{run_name}'… the full log is on the Train tab.")
+        self.status_var.set(f"Training '{run_name}'… progress and numbers are under Tracking.")
 
     def _best_model(self):
         if not self.run_name:
@@ -991,7 +985,7 @@ class WizardTab:
         best = self._best_model()
         if best is None:
             self.train_result_var.set(
-                "Training ended without saving a model (see the Train tab log)."
+                "Training ended without saving a model (see Messages on the Train tab)."
                 if rc != 0 else "Training finished but no model file was found.")
             self.status_var.set("Nothing to play.")
             return

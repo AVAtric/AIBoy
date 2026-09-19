@@ -62,6 +62,54 @@ TENSORBOARD_START_S = 90     # how long the built app's TensorBoard may take to 
 # SB3's verbose=1 table: "|    ep_rew_mean    | 123     |"
 STAT_LINE = re.compile(r"\|\s+([a-z_]+)\s+\|\s+([\S]+)\s+\|")
 TRACKED_STATS = ("total_timesteps", "ep_rew_mean", "ep_len_mean", "fps", "time_elapsed")
+# SB3's EvalCallback, three lines per evaluation (the third only on a record):
+#   Eval num_timesteps=100000, episode_reward=123.45 +/- 6.78
+#   Episode length: 1234.00 +/- 0.00
+#   New best mean reward!
+EVAL_LINE = re.compile(r"Eval num_timesteps=(\d+), episode_reward=(-?[\d.]+) \+/- ([\d.]+)")
+EVAL_LEN_LINE = re.compile(r"Episode length: (-?[\d.]+) \+/-")
+EVAL_BEST_LINE = "New best mean reward!"
+# Live-game cells, in display order. A person playing sees fewer of them
+# (see set_live_mode): the round counter and the agent's position are for
+# watching an agent.
+LIVE_KEYS = ("episode", "world", "power", "lives", "coins", "reward", "x", "steps", "action")
+HUMAN_HIDDEN_KEYS = ("episode", "x")
+# What the Tracking panel follows: nothing, a training run, a search
+# (tune sweep or wizard search), an agent playing, or the person playing.
+ACTIVITIES = ("none", "train", "tune", "play", "human")
+
+
+def is_noise_line(line: str) -> bool:
+    """True for trainer output that the Messages box does not need: the
+    stats tables (shown as numbers under Tracking) and the evaluation
+    lines (shown in the Evaluations table)."""
+    s = line.strip()
+    if not s or s.startswith(("|", "-")):
+        return True
+    return bool(EVAL_LINE.search(s) or EVAL_LEN_LINE.search(s)) or s == EVAL_BEST_LINE
+
+
+def format_stat(val: str) -> str:
+    """A trainer number for a label: SB3 prints 1.74e+03, people read 1740."""
+    try:
+        x = float(val)
+    except ValueError:
+        return val
+    if x != x:                                   # nan
+        return "—"
+    return f"{x:,.0f}" if abs(x) >= 100 else f"{x:.1f}"
+
+
+def format_elapsed(seconds: float) -> str:
+    """'45 s', '12 min 05 s', '1 h 03 min' for the training clock."""
+    seconds = max(0, int(seconds))
+    h, rest = divmod(seconds, 3600)
+    m, s = divmod(rest, 60)
+    if h:
+        return f"{h} h {m:02d} min"
+    if m:
+        return f"{m} min {s:02d} s"
+    return f"{s} s"
 
 LEVEL_CHOICES = level_choices()
 
@@ -198,6 +246,10 @@ class AIboyGUI:
         self.train_progress_text = tk.StringVar(value="—")
         self._closing = False
         self._train_run_name = ""
+        self._train_preview_on = False          # the running/last run shows its best model live
+        self._evals: list[dict] = []            # the run's evaluations, from the trainer's output
+        self._activity = "none"                 # what Tracking follows (ACTIVITIES)
+        self._track_shown: dict[str, bool] = {}
         self._flash: tuple[str, float] | None = None
         self.intro: IntroVideo | None = None
         self.intro_stop = threading.Event()
@@ -527,6 +579,10 @@ class AIboyGUI:
         btn_tb = ttk.Button(btns, text="TensorBoard", command=self.open_tensorboard)
         btn_tb.pack(side="left", padx=(16, 4))
         tooltip(btn_tb, "Open the training curves of every run of this game in the browser.")
+        btn_log = ttk.Button(btns, text="Full log…", command=self.open_log)
+        btn_log.pack(side="left", padx=4)
+        tooltip(btn_log, "Everything the trainer printed, word for word, in its own window. "
+                         "Only needed when something went wrong.")
         # Housekeeping for the named run, on its own line so nothing is clipped.
         keep = ttk.Frame(controls)
         keep.grid(row=4, column=0, sticky="ew", pady=(4, 0))
@@ -547,18 +603,108 @@ class AIboyGUI:
         ttk.Label(pb_frame, textvariable=self.train_progress_text, width=32, anchor="e").grid(
             row=0, column=1, sticky="e")
 
-        # ---- Training log (full width, grows). Live stats are under Tracking. ----
+        # ---- This run: its evaluations and the trainer's messages, read
+        # out of the trainer's output. The live numbers are under Tracking;
+        # the raw output stays available behind "Full log…". ----
         parent.rowconfigure(3, weight=1)
-        log_frame = ttk.LabelFrame(parent, text="Training log", padding=4)
-        log_frame.grid(row=3, column=0, sticky="nsew")
+        details = ttk.Frame(parent)
+        details.grid(row=3, column=0, sticky="nsew")
+        details.columnconfigure(1, weight=1)
+        details.rowconfigure(0, weight=1)
+        eval_frame = ttk.LabelFrame(details, text="Evaluations", padding=4)
+        eval_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        self.eval_tree = make_table(eval_frame, [
+            ("n", "#", 30, "e", False), ("steps", "steps", 70, "e", False),
+            ("score", "score", 80, "e", False), ("length", "length", 60, "e", False),
+            ("note", "", 70, "w", True),
+        ], height=6)
+        tooltip(self.eval_tree, "Every evaluation of this run: after how many steps it was "
+                                "made, the score of the evaluation round, its length, and "
+                                "whether it set a new record (the best model is saved then).")
+        msg_frame = ttk.LabelFrame(details, text="Messages", padding=4)
+        msg_frame.grid(row=0, column=1, sticky="nsew")
+        msg_frame.columnconfigure(0, weight=1)
+        msg_frame.rowconfigure(0, weight=1)
+        self.messages_text = tk.Text(msg_frame, height=6, width=30, wrap="word", font=MONO,
+                                     relief="flat", highlightthickness=0,
+                                     background=THEME.panel[0], foreground=THEME.panel[1],
+                                     insertbackground=THEME.panel[1], state="disabled")
+        self.messages_text.grid(row=0, column=0, sticky="nsew")
+        msg_scroll = ttk.Scrollbar(msg_frame, command=self.messages_text.yview)
+        msg_scroll.grid(row=0, column=1, sticky="ns")
+        self.messages_text.config(yscrollcommand=msg_scroll.set)
+        tooltip(self.messages_text, "What the trainer, the search and the app report: how a "
+                                    "run was started, warnings, errors, finished rounds, "
+                                    "improved presets. The numbers it prints every few "
+                                    "seconds are left out; they are under Tracking.")
+
+        # The raw output, in a window of its own (see open_log).
+        self._log_win = tk.Toplevel(self.root)
+        self._log_win.title(f"{APP_NAME} — full log")
+        self._log_win.withdraw()
+        self._log_win.protocol("WM_DELETE_WINDOW", self._log_win.withdraw)
+        log_frame = ttk.Frame(self._log_win, padding=4)
+        log_frame.pack(fill="both", expand=True)
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
-        self.log_text = tk.Text(log_frame, height=8, width=40, wrap="none", font=MONO,
+        self.log_text = tk.Text(log_frame, height=30, width=110, wrap="none", font=MONO,
                                 background="#111", foreground="#ddd", insertbackground="#ddd")
         self.log_text.grid(row=0, column=0, sticky="nsew")
         yscroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
         yscroll.grid(row=0, column=1, sticky="ns")
         self.log_text.config(yscrollcommand=yscroll.set)
+
+    def open_log(self) -> None:
+        """Show the raw trainer output (kept for troubleshooting)."""
+        win = self._log_win
+        if not getattr(self, "_log_placed", False):
+            win.geometry(f"+{self.root.winfo_rootx() + 40}+{self.root.winfo_rooty() + 60}")
+            self._log_placed = True
+        win.deiconify()
+        win.lift()
+
+    def note(self, text: str) -> None:
+        """Add one line to the Messages box on the Train tab."""
+        box = self.messages_text
+        box.config(state="normal")
+        box.insert("end", text if text.endswith("\n") else text + "\n")
+        line_count = int(box.index("end-1c").split(".")[0])
+        if line_count > 500:
+            box.delete("1.0", "100.0")
+        box.see("end")
+        box.config(state="disabled")
+
+    def _clear_run_details(self) -> None:
+        """A new training run starts: forget the previous one's evaluations."""
+        self._evals.clear()
+        for row in self.eval_tree.get_children():
+            self.eval_tree.delete(row)
+        for key in ("count", "last", "best"):
+            self.eval_vars[key].set("—")
+
+    def _add_eval(self, step: int, reward: float, std: float) -> None:
+        ev = {"n": len(self._evals) + 1, "step": step, "reward": reward, "std": std,
+              "length": None, "best": False}
+        self._evals.append(ev)
+        self.eval_tree.insert("", "end", iid=str(ev["n"]),
+                              values=(ev["n"], tuning.format_steps(step), f"{reward:.1f}", "—", ""))
+        self.eval_tree.see(str(ev["n"]))
+        self.eval_vars["count"].set(str(ev["n"]))
+        self.eval_vars["last"].set(f"{reward:.1f}")
+
+    def _update_last_eval(self, *, length: float | None = None, best: bool = False) -> None:
+        if not self._evals:
+            return
+        ev = self._evals[-1]
+        if length is not None:
+            ev["length"] = length
+        if best:
+            ev["best"] = True
+            self.eval_vars["best"].set(f"{ev['reward']:.1f} at {tuning.format_steps(ev['step'])}")
+        self.eval_tree.item(str(ev["n"]), values=(
+            ev["n"], tuning.format_steps(ev["step"]), f"{ev['reward']:.1f}",
+            f"{ev['length']:.0f}" if ev["length"] is not None else "—",
+            "new best" if ev["best"] else ""), tags=("best",) if ev["best"] else ())
 
     # ---------- Preview and Tracking panels (always visible) ----------
 
@@ -582,70 +728,172 @@ class AIboyGUI:
                         "round ended.")
 
     def _build_tracking(self, parent: ttk.Frame) -> None:
-        """Live numbers next to the screen: the game being played, the
-        training run's progress, the controls to play a saved model, and
-        Play yourself."""
-        # Live game: two columns of label / value pairs. The wording follows
-        # who is playing (see set_live_mode): the agent's reward and steps
-        # are a person's score and time.
-        stats = ttk.LabelFrame(parent, text="Live game", padding=(6, 2))
-        stats.pack(fill="x", pady=(0, 6))
-        keys = ["episode", "world", "power", "lives", "coins", "reward", "x", "steps", "action"]
-        self.play_stat_vars = {k: tk.StringVar(value="—") for k in keys}
-        self._live_labels: dict[str, ttk.Label] = {}
-        self._live_help: dict[str, str] = {}
-        left = keys[:5]
-        for col, column_keys in enumerate((left, keys[5:])):
-            for row, key in enumerate(column_keys):
-                lbl = ttk.Label(stats, foreground=THEME.muted)
-                lbl.grid(row=row, column=col * 2, sticky="w", padx=(0 if col == 0 else 12, 4))
-                val = ttk.Label(stats, textvariable=self.play_stat_vars[key], font=MONO_BOLD,
-                                width=7 if col == 0 else 14, anchor="w")
-                val.grid(row=row, column=col * 2 + 1, sticky="w")
-                self._live_labels[key] = lbl
-                tooltip(lbl, lambda k=key: self._live_help.get(k, ""), val)
-        self.set_live_mode("agent")
+        """The panel follows what the app is doing (see `_layout_tracking`).
+        One header line names the activity; under it only the boxes that
+        matter for it: the live game while something plays, the finished
+        rounds of an agent, the training run's numbers, the search's
+        numbers, and the two ways to start something (watch an agent, play
+        yourself) whenever nothing is running."""
+        self.activity_var = tk.StringVar(value="Nothing running")
+        head = ttk.Label(parent, textvariable=self.activity_var, font=MONO_BOLD,
+                         wraplength=TRACK_W, anchor="w", justify="left")
+        head.pack(fill="x", pady=(0, 6))
+        tooltip(head, "What this panel is following right now. It changes by itself when a "
+                      "training, a search or a game starts, and keeps the last result until "
+                      "something else starts (Clear empties it).")
+        self._track_boxes = {
+            "live": self._build_live_box(parent),
+            "rounds": self._build_rounds_box(parent),
+            "train": self._build_train_box(parent),
+            "tune": self._build_search_box(parent),
+            "watch": self._build_watch_box(parent),
+            "you": self._build_you_box(parent),
+        }
+        # Advanced options live in a small dialog (see _open_play_advanced). The
+        # observation setup is normally filled in from the model's run.json.
+        self.play_max_steps_var = tk.IntVar(value=0)
+        self.play_stochastic_var = tk.BooleanVar(value=False)
+        self.play_action_repeat_var = tk.IntVar(value=4)
+        self.play_frame_stack_var = tk.IntVar(value=4)
+        self.play_obs_type_var = tk.StringVar(value="tiles")
+        self.play_level_var = tk.StringVar(value="default")
+        # Attempt limits follow the model's run.json (see sync_play_options).
+        self.play_time_budget = presets.PRESET_DEFAULTS["time_budget"]
+        self.play_stall_steps = presets.PRESET_DEFAULTS["stall_steps"]
+        self._play_adv_win: tk.Toplevel | None = None
+        self._layout_tracking()
 
-        # Training, always visible: status, key stats, progress + ETA.
-        train_box = ttk.LabelFrame(parent, text="Training", padding=(6, 2))
-        train_box.pack(fill="x", pady=(0, 6))
-        train_box.columnconfigure(1, weight=1)
-        train_box.columnconfigure(3, weight=1)
+    def _build_live_box(self, parent: ttk.Frame) -> ttk.LabelFrame:
+        """Live game: two columns of label / value pairs. The wording and the
+        cells follow who is playing (see set_live_mode)."""
+        stats = ttk.LabelFrame(parent, text="Live game", padding=(6, 2))
+        self.play_stat_vars = {k: tk.StringVar(value="—") for k in LIVE_KEYS}
+        self._live_labels: dict[str, ttk.Label] = {}
+        self._live_values: dict[str, ttk.Label] = {}
+        self._live_help: dict[str, str] = {}
+        for key in LIVE_KEYS:
+            lbl = ttk.Label(stats, foreground=THEME.muted)
+            val = ttk.Label(stats, textvariable=self.play_stat_vars[key], font=MONO_BOLD,
+                            anchor="w")
+            self._live_labels[key], self._live_values[key] = lbl, val
+            tooltip(lbl, lambda k=key: self._live_help.get(k, ""), val)
+        self.set_live_mode("agent")
+        return stats
+
+    def _build_rounds_box(self, parent: ttk.Frame) -> ttk.LabelFrame:
+        """Finished rounds of the agent being watched (or previewed)."""
+        box = ttk.LabelFrame(parent, text="Rounds", padding=(4, 2))
+        self.rounds_tree = make_table(box, [
+            ("round", "#", 34, "e", False), ("score", "score", 58, "e", False),
+            ("steps", "steps", 54, "e", False), ("end", "how it ended", 150, "w", True),
+        ], height=4)
+        tooltip(self.rounds_tree, "Every finished round of this playback: its score, how many "
+                                  "decisions the agent made, and how it ended.")
+        return box
+
+    def _build_train_box(self, parent: ttk.Frame) -> ttk.LabelFrame:
+        """The training run: name, state, progress, the key numbers from the
+        trainer's output, and its evaluations."""
+        box = ttk.LabelFrame(parent, text="Training", padding=(6, 2))
+        for c in (1, 3):
+            box.columnconfigure(c, weight=1)
         self.stat_vars: dict[str, tk.StringVar] = {
             k: tk.StringVar(value=v) for k, v in
             [("status", "idle"), ("total_timesteps", "—"), ("ep_rew_mean", "—"),
              ("ep_len_mean", "—"), ("fps", "—"), ("time_elapsed", "—")]}
-        status_lbl = ttk.Label(train_box, textvariable=self.stat_vars["status"], font=MONO_BOLD,
-                               anchor="w")
-        status_lbl.grid(row=0, column=0, columnspan=4, sticky="w")
-        tooltip(status_lbl, "State of the training run started on the Train tab or by the "
-                            "wizard: idle, running, stopping, finished, stopped or failed.")
-        train_help = {"ep_rew_mean": "Average score of the last 100 training rounds.",
-                      "fps": "Game steps per second across all parallel games.",
-                      "time_elapsed": "Seconds since the run started.",
-                      "ep_len_mean": "Average length (steps) of the last 100 training rounds."}
-        cells = (("ep_rew_mean", "reward"), ("fps", "fps"),
-                 ("time_elapsed", "elapsed"), ("ep_len_mean", "ep len"))
-        for i, (key, label) in enumerate(cells):
-            row, col = divmod(i, 2)
-            lbl = ttk.Label(train_box, text=f"{label}:", foreground=THEME.muted)
-            lbl.grid(row=1 + row, column=col * 2, sticky="w", padx=(0 if col == 0 else 12, 4))
-            val = ttk.Label(train_box, textvariable=self.stat_vars[key], font=MONO_BOLD,
-                            width=8, anchor="w")
-            val.grid(row=1 + row, column=col * 2 + 1, sticky="w")
-            tooltip(lbl, train_help[key], val)
-        ttk.Progressbar(train_box, mode="determinate", maximum=100,
-                        variable=self.train_progress_var).grid(row=3, column=0, columnspan=4,
-                                                               sticky="ew", pady=(4, 0))
-        prog = ttk.Label(train_box, textvariable=self.train_progress_text, font=MONO, anchor="w",
-                         wraplength=TRACK_W - 10)
-        prog.grid(row=4, column=0, columnspan=4, sticky="w", pady=(1, 2))
-        tooltip(prog, "Steps trained of the run's target, and the estimated time left from "
-                      "the speed of the last few updates.")
+        self.train_run_var = tk.StringVar(value="—")
+        self.train_elapsed_var = tk.StringVar(value="—")
+        self.eval_vars = {k: tk.StringVar(value="—") for k in ("count", "last", "best")}
 
-        # Play controls.
-        ctl = ttk.LabelFrame(parent, text="Play a model", padding=6)
-        ctl.pack(fill="x")
+        def cell(row: int, col: int, label: str, var: tk.StringVar, help_text: str,
+                 span: int = 1, width: int | None = 8, wrap: int = 0) -> None:
+            lbl = ttk.Label(box, text=f"{label}:", foreground=THEME.muted)
+            lbl.grid(row=row, column=col * 2, sticky="nw", padx=(0 if col == 0 else 12, 4))
+            val = ttk.Label(box, textvariable=var, font=MONO_BOLD, anchor="w", width=width,
+                            wraplength=wrap or 0, justify="left")
+            val.grid(row=row, column=col * 2 + 1, columnspan=span * 2 - 1, sticky="w")
+            tooltip(lbl, help_text, val)
+
+        cell(0, 0, "run", self.train_run_var, "Name of the run being trained; its models are "
+             "saved under models/<game>/<run>.", span=2, width=None, wrap=TRACK_W - 60)
+        cell(1, 0, "status", self.stat_vars["status"], "State of the run: running, stopping, "
+             "finished, stopped or failed.", span=2, width=None, wrap=TRACK_W - 60)
+        ttk.Progressbar(box, mode="determinate", maximum=100,
+                        variable=self.train_progress_var).grid(row=2, column=0, columnspan=4,
+                                                               sticky="ew", pady=(4, 0))
+        prog = ttk.Label(box, textvariable=self.train_progress_text, font=MONO, anchor="w",
+                         wraplength=TRACK_W - 10)
+        prog.grid(row=3, column=0, columnspan=4, sticky="w", pady=(1, 4))
+        tooltip(prog, "Steps trained of the run's target, and the time left estimated from "
+                      "the speed of the last few updates.")
+        cell(4, 0, "avg score", self.stat_vars["ep_rew_mean"],
+             "Average score of the last 100 training rounds. Rising is good.")
+        cell(4, 1, "round length", self.stat_vars["ep_len_mean"],
+             "Average length (decisions) of the last 100 training rounds.")
+        cell(5, 0, "speed", self.stat_vars["fps"],
+             "Game steps per second across all parallel games.")
+        cell(5, 1, "elapsed", self.train_elapsed_var, "Time since the run started.")
+        cell(6, 0, "evaluations", self.eval_vars["count"],
+             "How many times the agent has been evaluated so far: every evaluation plays a "
+             "test round with the current model (the table on the Train tab lists them).")
+        cell(6, 1, "last score", self.eval_vars["last"],
+             "Score of the most recent evaluation round.")
+        cell(7, 0, "best score", self.eval_vars["best"],
+             "Best evaluation score so far and after how many steps it was reached; the "
+             "model that scored it is the run's best model.", span=2, width=None,
+             wrap=TRACK_W - 90)
+        self.btn_track_train_stop = ttk.Button(box, text="■ Stop training",
+                                               command=self.stop_training)
+        self.btn_track_train_stop.grid(row=8, column=0, columnspan=4, sticky="w", pady=(6, 2))
+        tooltip(self.btn_track_train_stop, "End the run early. Its best model so far is kept "
+                                           "and the last state is saved.")
+        return box
+
+    def _build_search_box(self, parent: ttk.Frame) -> ttk.LabelFrame:
+        """A search for better settings (the wizard's search or a Tune sweep):
+        which variation is being tried, how far it is, and the best so far."""
+        box = ttk.LabelFrame(parent, text="Search", padding=(6, 2))
+        for c in (1, 3):
+            box.columnconfigure(c, weight=1)
+        self.tune_vars = {k: tk.StringVar(value="—") for k in
+                          ("trial", "trying", "steps", "reward", "fps", "ep_len", "best")}
+
+        def cell(row: int, col: int, label: str, key: str, help_text: str,
+                 span: int = 1, width: int | None = 8, wrap: int = 0) -> None:
+            lbl = ttk.Label(box, text=f"{label}:", foreground=THEME.muted)
+            lbl.grid(row=row, column=col * 2, sticky="nw", padx=(0 if col == 0 else 12, 4))
+            val = ttk.Label(box, textvariable=self.tune_vars[key], font=MONO_BOLD, anchor="w",
+                            width=width, wraplength=wrap or 0, justify="left")
+            val.grid(row=row, column=col * 2 + 1, columnspan=span * 2 - 1, sticky="w")
+            tooltip(lbl, help_text, val)
+
+        cell(0, 0, "trial", "trial", "Which short training run of the search this is, and how "
+             "many are already known from earlier searches (those are scored from memory).",
+             span=2, width=None, wrap=TRACK_W - 60)
+        cell(1, 0, "trying", "trying", "The settings of the variation being trained right now.",
+             span=2, width=None, wrap=TRACK_W - 70)
+        ttk.Progressbar(box, mode="determinate", maximum=100,
+                        variable=self.tune_progress_var).grid(row=2, column=0, columnspan=4,
+                                                              sticky="ew", pady=(4, 0))
+        prog = ttk.Label(box, textvariable=self.tune_progress_text, font=MONO, anchor="w",
+                         wraplength=TRACK_W - 10)
+        prog.grid(row=3, column=0, columnspan=4, sticky="w", pady=(1, 4))
+        tooltip(prog, "Trials finished of the whole search, and the estimated time left.")
+        cell(4, 0, "steps", "steps", "Steps trained of this trial's length.", span=2, width=None)
+        cell(5, 0, "avg score", "reward", "Average score of the trial's last 100 training rounds.")
+        cell(5, 1, "round length", "ep_len", "Average length of the trial's last 100 rounds.")
+        cell(6, 0, "speed", "fps", "Game steps per second across all parallel games.")
+        cell(7, 0, "best so far", "best", "The variation with the best score of this search, "
+             "and its score.", span=2, width=None, wrap=TRACK_W - 90)
+        self.btn_track_tune_stop = ttk.Button(box, text="■ Stop search", command=self.stop_tuning)
+        self.btn_track_tune_stop.grid(row=8, column=0, columnspan=4, sticky="w", pady=(6, 2))
+        tooltip(self.btn_track_tune_stop, "End the search after the current trial. The results "
+                                          "so far are kept.")
+        return box
+
+    def _build_watch_box(self, parent: ttk.Frame) -> ttk.LabelFrame:
+        """Pick a saved model and watch it play on the Game Boy."""
+        ctl = ttk.LabelFrame(parent, text="Watch an agent", padding=6)
         ctl.columnconfigure(1, weight=1)
         self.model_var = tk.StringVar(value="")
         self.model_combo = ttk.Combobox(ctl, textvariable=self.model_var, state="readonly")
@@ -654,8 +902,8 @@ class AIboyGUI:
         # Re-scan the model files whenever the list is opened; no Refresh button needed.
         self.model_combo.bind("<Button-1>", lambda e: self.refresh_models(), add="+")
         self.model_note_var = tk.StringVar(value="")
-        tooltip(self.model_combo, lambda: "Every saved model of this game (best and final model "
-                                          "of each run, and checkpoints). " + (
+        tooltip(self.model_combo, lambda: "Every trained agent of this game: the best and the "
+                                          "final model of each run, and its snapshots. " + (
                                           f"Selected: {self.model_note_var.get()}"
                                           if self.model_note_var.get() else ""))
         self.play_episodes_var = tk.IntVar(value=3)
@@ -664,8 +912,8 @@ class AIboyGUI:
         ep_lbl.grid(row=1, column=0, sticky="w", pady=(6, 0))
         ep_spin = ttk.Spinbox(ctl, from_=1, to=100, textvariable=self.play_episodes_var, width=5)
         ep_spin.grid(row=1, column=1, sticky="w", padx=(4, 0), pady=(6, 0))
-        tooltip(ep_lbl, "How many rounds (episodes) to play. A round ends when Mario dies, "
-                        "the marathon is complete, or the attempt limits are reached.", ep_spin)
+        tooltip(ep_lbl, "How many rounds to play. A round ends when the agent dies, "
+                        "completes the game, or runs out of time or progress.", ep_spin)
         sp_lbl = ttk.Label(ctl, text="Speed:")
         sp_lbl.grid(row=2, column=0, sticky="w", pady=(4, 0))
         speed_combo = ttk.Combobox(ctl, textvariable=self.play_speed_label_var, state="readonly",
@@ -686,18 +934,22 @@ class AIboyGUI:
         self.btn_play_stop.pack(side="left", padx=4)
         self.btn_screen_clear = ttk.Button(btns, text="Clear", command=self.clear_screen)
         self.btn_screen_clear.pack(side="left", padx=4)
-        tooltip(self.btn_play_start, "Play the selected model on the Preview screen.")
-        tooltip(self.btn_screen_clear, "Stop playback and blank the screen and the live numbers.")
+        tooltip(self.btn_play_start, "Let the selected agent play on the Game Boy.")
+        tooltip(self.btn_play_stop, "Stop the playback after the current step.")
+        tooltip(self.btn_screen_clear, "Stop the playback, blank the screen and empty this panel.")
+        self._play_widgets: list[tk.Widget] = [self.model_combo, ep_spin, speed_combo,
+                                               self.btn_play_start, self.btn_play_adv]
+        return ctl
 
-        # Play yourself: the plain game on the Game Boy, with the keyboard,
-        # the mouse on the picture, or a game controller.
+    def _build_you_box(self, parent: ttk.Frame) -> ttk.LabelFrame:
+        """Play yourself: the plain game on the Game Boy, with the keyboard,
+        the mouse on the picture, or a game controller."""
         head = ttk.Frame(parent)
         ttk.Label(head, text="Play yourself").pack(side="left")
         info_icon(head, lambda: self.controls.help_text(self.gamepad.pad_kind,
                                                         self.gamepad.pad_name)).pack(
             side="left", padx=(4, 0))
         you = ttk.LabelFrame(parent, labelwidget=head, padding=6)
-        you.pack(fill="x", pady=(6, 0))
         you.columnconfigure(1, weight=1)
         start_lbl = ttk.Label(you, text="Start:")
         start_lbl.grid(row=0, column=0, sticky="w")
@@ -725,22 +977,57 @@ class AIboyGUI:
         self.btn_controls.grid(row=2, column=1, sticky="e", pady=(8, 0))
         tooltip(self.btn_controls, "Choose which keys and which controller buttons press each "
                                    "Game Boy button. Remembered for next time.")
+        self._play_widgets.extend([self.human_start_combo, self.btn_human])
+        return you
 
-        # Advanced options live in a small dialog (see _open_play_advanced). The
-        # observation setup is normally filled in from the model's run.json.
-        self.play_max_steps_var = tk.IntVar(value=0)
-        self.play_stochastic_var = tk.BooleanVar(value=False)
-        self.play_action_repeat_var = tk.IntVar(value=4)
-        self.play_frame_stack_var = tk.IntVar(value=4)
-        self.play_obs_type_var = tk.StringVar(value="tiles")
-        self.play_level_var = tk.StringVar(value="default")
-        # Attempt limits follow the model's run.json (see sync_play_options).
-        self.play_time_budget = presets.PRESET_DEFAULTS["time_budget"]
-        self.play_stall_steps = presets.PRESET_DEFAULTS["stall_steps"]
-        self._play_adv_win: tk.Toplevel | None = None
-        self._play_widgets: list[tk.Widget] = [self.model_combo, ep_spin, speed_combo,
-                                               self.btn_play_start, self.btn_play_adv,
-                                               self.human_start_combo, self.btn_human]
+    # ---------- Tracking: what to show ----------
+
+    def tracking_layout(self) -> dict[str, bool]:
+        """Which Tracking boxes the current activity needs (see ACTIVITIES).
+        The last activity's boxes stay until another one starts; the two
+        start boxes come back as soon as nothing runs."""
+        act, running = self._activity, self.busy() or self.playing_active()
+        # The live preview matters while the run trains; afterwards its best
+        # model is selected under "Watch an agent".
+        preview = act == "train" and self._train_preview_on and self.training_active()
+        return {
+            "live": act in ("play", "human") or preview,
+            "rounds": act == "play" or preview,
+            "train": act == "train",
+            "tune": act == "tune",
+            "watch": act == "play" or not running,
+            "you": act == "human" or not running,
+        }
+
+    def _layout_tracking(self) -> None:
+        """Pack the boxes the activity needs, in panel order; called every
+        pump, but only repacks when the set changes (a repack redraws the
+        whole window on macOS)."""
+        show = self.tracking_layout()
+        if show == self._track_shown:
+            return
+        self._track_shown = show
+        for name, box in self._track_boxes.items():
+            box.pack_forget()
+        for name, box in self._track_boxes.items():
+            if show[name]:
+                box.pack(fill="x", pady=(0, 6))
+        # A Stop button only while there is something to stop.
+        for btn, active in ((self.btn_track_train_stop, self.training_active()),
+                            (self.btn_track_tune_stop, self.tuning_active())):
+            if active:
+                btn.grid()
+            else:
+                btn.grid_remove()
+
+    def set_activity(self, activity: str, header: str) -> None:
+        """Tracking now follows `activity` (one of ACTIVITIES); `header` is
+        its one-line title."""
+        assert activity in ACTIVITIES, activity
+        self._activity = activity
+        self.activity_var.set(header)
+        self._track_shown = {}          # force a repack (a Stop button may have changed)
+        self._layout_tracking()
 
     def _gamepad_help(self) -> str:
         """Hover text of the Controller line: which pads are in use and what
@@ -781,37 +1068,57 @@ class AIboyGUI:
         self.gamepad.remap()
 
     def set_live_mode(self, mode: str) -> None:
-        """Word the live panel for who is playing: "agent" or "human"."""
+        """Word the live panel for who is playing ("agent" or "human") and
+        show only the cells that mean something for them: a person has no
+        round counter and no position readout."""
         human = mode == "human"
-        names = {"episode": "game" if human else "round",
-                 "reward": "score" if human else "reward",
+        names = {"episode": "round", "reward": "score", "x": "position", "action": "pressing",
                  "steps": "time" if human else "steps"}
         spec = GAMES.get(self.game)
         if spec is not None:
             names.update(spec.stat_labels)      # e.g. Kirby's "power" cell is his health
         self._live_help = {
-            "episode": "Who is playing: you, or the round the agent is on, of how many.",
+            "episode": "The round the agent is on, of how many.",
             "world": "Level Mario is in (world-level).",
             "power": ("Kirby's health, out of 6." if names.get("power") == "health" else
                       "Mario's size: small, super (mushroom) or superball (flower)."),
             "lives": "Lives left.", "coins": "Coins collected in this game.",
             "reward": ("The game's score." if human else
-                       "Score the agent has earned in this round so far."),
-            "x": "How far right Mario is in the level" + (
-                "." if human else " (and the furthest he got)."),
+                       "Score the agent has earned in this round so far (its reward)."),
+            "x": "How far right Mario is in the level, and the furthest he got.",
             "steps": ("Time left on the game's clock, and how long you have been playing."
                       if human else "Decisions the agent has made in this round."),
             "action": ("What you are pressing right now (also lit on the buttons)." if human
                        else "What the agent is pressing right now (also lit on the buttons)."),
         }
-        for key, lbl in self._live_labels.items():
-            lbl.config(text=f"{names.get(key, key)}:")
+        shown = [k for k in LIVE_KEYS if not (human and k in HUMAN_HIDDEN_KEYS)]
+        for key in LIVE_KEYS:
+            self._live_labels[key].config(text=f"{names.get(key, key)}:")
+            self._live_labels[key].grid_forget()
+            self._live_values[key].grid_forget()
+        left = shown[:(len(shown) + 1) // 2]
+        for col, keys in enumerate((left, shown[len(left):])):
+            for row, key in enumerate(keys):
+                self._live_labels[key].grid(row=row, column=col * 2, sticky="w",
+                                            padx=(0 if col == 0 else 12, 4))
+                self._live_values[key].config(width=7 if col == 0 else 14)
+                self._live_values[key].grid(row=row, column=col * 2 + 1, sticky="w")
 
     def clear_rounds(self) -> None:
         self.play_rounds.clear()
+        for row in self.rounds_tree.get_children():
+            self.rounds_tree.delete(row)
+
+    def add_round(self, r: dict) -> None:
+        """A round of the agent finished: keep it and list it under Tracking."""
+        self.play_rounds.append(r)
+        iid = self.rounds_tree.insert("", "end", values=(
+            r["episode"], f"{r['reward']:.0f}", r["steps"], r["end"]))
+        self.rounds_tree.see(iid)
 
     def clear_screen(self) -> None:
-        """Blank the emulator view and the live-game panel (stops playback first)."""
+        """Blank the emulator view and empty the Tracking panel (stops
+        playback first). Training and searching are not touched."""
         if self.playing_active():
             self.play_stop.set()
         if self.preview_thread is not None and self.preview_thread.is_alive():
@@ -825,6 +1132,8 @@ class AIboyGUI:
         for v in self.play_stat_vars.values():
             v.set("—")
         self.play_status_var.set("idle")
+        if not self.busy():
+            self.set_activity("none", "Nothing running")
 
     def _open_play_advanced(self) -> None:
         """Rarely needed playback options, in a small window next to the screen."""
@@ -1240,6 +1549,11 @@ class AIboyGUI:
         self.tune_progress_var.set(0)
         self.tune_progress_text.set(f"0/{n_trials}")
         self.tune_live_var.set("starting…")
+        for v in self.tune_vars.values():
+            v.set("—")
+        self.tune_vars["trial"].set(f"starting {n_trials} trials…")
+        self.set_activity("tune", "Searching for better settings" if source == "wizard"
+                          else f"Tuning: sweep '{plan['prefix']}'")
         self.btn_tune_start.config(state="disabled")
         self.btn_tune_stop.config(state="normal")
         self.btn_train_start.config(state="disabled")
@@ -1287,10 +1601,13 @@ class AIboyGUI:
             frac = (done_trials + min(1.0, steps / trial_steps)) / total
             self.stats_queue.put(("tune_progress", frac, f"{done_trials}/{total}",
                                   eta.report(time.time(), steps)))
+            reward, ep_len, fps = (format_stat(stats.get(k, "—"))
+                                   for k in ("ep_rew_mean", "ep_len_mean", "fps"))
             self.stats_queue.put(("tune_live",
-                f"{label} · {steps:,}/{trial_steps:,} steps · "
-                f"ep_rew_mean {stats.get('ep_rew_mean', '—')} · "
-                f"ep_len_mean {stats.get('ep_len_mean', '—')} · {stats.get('fps', '—')} fps"))
+                f"{label} · {tuning.format_steps(steps)} / {tuning.format_steps(trial_steps)} "
+                f"steps · average score {reward} · {fps} steps/s",
+                {"steps": f"{tuning.format_steps(steps)} / {tuning.format_steps(trial_steps)}",
+                 "reward": reward, "ep_len": ep_len, "fps": fps}))
         rc = self.tune_proc.wait()
         self.tune_proc = None
         eta.trial_finished(time.time())
@@ -1334,6 +1651,7 @@ class AIboyGUI:
         to_train = sum(0 if _known(i, s) else 1
                        for i in range(1, len(combos) + 1) for s in range(n_seeds))
         eta = tuning.SweepEta(to_train, trial_steps)
+        self.stats_queue.put(("tune_known", total - to_train, total))
         if total - to_train:
             self.stats_queue.put(("tune_status", f"{total - to_train} of {total} trials are already "
                                                  f"known from earlier searches; not training them again"))
@@ -1363,6 +1681,7 @@ class AIboyGUI:
                                                checkpoint_freq=trial_steps, eval_freq=eval_freq,
                                                source=source)
                     self.stats_queue.put(("tune_status", f"{label}: {res.label}  →  {run_name}"))
+                    self.stats_queue.put(("tune_trial", label, tuning.plain_overrides(overrides)))
                     started = time.time()
                     rc = self._run_trial(cmd, label, trial_steps, done_trials, total, eta)
                     if self.tune_stop.is_set():
@@ -1831,6 +2150,11 @@ class AIboyGUI:
         self.stat_vars["status"].set("running")
         for k in TRACKED_STATS[1:]:
             self.stat_vars[k].set("—")
+        self.train_elapsed_var.set("—")
+        self.train_run_var.set(run_name)
+        self._clear_run_details()
+        self._train_preview_on = bool(self.preview_var.get())
+        self.set_activity("train", f"Training '{run_name}'")
         self._train_target_steps = max(1, cfg["timesteps"])
         # Baseline = the model's prior step count (0 unless resuming). The
         # first reported total_timesteps is baseline + one rollout.
@@ -1853,6 +2177,17 @@ class AIboyGUI:
             m = STAT_LINE.search(line)
             if m and m.group(1) in TRACKED_STATS:
                 self.stats_queue.put(("stat", m.group(1), m.group(2)))
+                continue
+            m = EVAL_LINE.search(line)
+            if m:
+                self.stats_queue.put(("eval", int(m.group(1)), float(m.group(2)),
+                                      float(m.group(3))))
+                continue
+            m = EVAL_LEN_LINE.search(line)
+            if m:
+                self.stats_queue.put(("eval_len", float(m.group(1))))
+            elif line.strip() == EVAL_BEST_LINE:
+                self.stats_queue.put(("eval_best",))
         rc = proc.wait()
         self.stats_queue.put(("train_done", rc))
 
@@ -1874,6 +2209,10 @@ class AIboyGUI:
         self.preview_stop.clear()
         self.gameboy.set_power(True)
         self.clear_rounds()
+        self.set_live_mode("agent")
+        self._pending_stats.clear()
+        for v in self.play_stat_vars.values():
+            v.set("—")
         raw_level = cfg["start_level"]
         self.sync_play_options(cfg)
         self.preview_thread = self.player.preview(
@@ -1929,6 +2268,7 @@ class AIboyGUI:
             return False
 
         self._begin_playback("agent")
+        self.set_activity("play", f"Agent playing: {label}")
         self.play_status_var.set(f"loading {model_path.name}…")
         self.play_thread = self.player.play(
             model_path=model_path, game=self.game, obs_type=self.play_obs_type_var.get(),
@@ -1993,6 +2333,7 @@ class AIboyGUI:
             w, l = choice.split("-")
             start_level = (int(w), int(l))
         self._begin_playback("human")
+        self.set_activity("human", f"You play {display_name(self.game)}")
         self.play_status_var.set("starting…")
         self.held.clear()
         self.gamepad.remap()          # a button already held on the pad counts from the start
@@ -2029,6 +2370,7 @@ class AIboyGUI:
             self.frames_painted += 1
 
         self._update_status_bar()
+        self._layout_tracking()
         try:
             self.root.after(PUMP_MS, self._pump)
         except tk.TclError:
@@ -2046,13 +2388,16 @@ class AIboyGUI:
             self._flash = None
         if self.training_active():
             text = (f"Training '{self._train_run_name}' · {self.train_progress_text.get()} · "
-                    f"{self.stat_vars['fps'].get()} fps · ep_rew_mean {self.stat_vars['ep_rew_mean'].get()}")
+                    f"average score {self.stat_vars['ep_rew_mean'].get()} · "
+                    f"{self.stat_vars['fps'].get()} steps/s")
         elif self.tuning_active():
-            text = f"Tuning · {self.tune_progress_text.get()} trials · {self.tune_live_var.get()}"
+            text = (f"Searching · {self.tune_progress_text.get()} trials · "
+                    f"{self.tune_vars['trial'].get()}: {self.tune_vars['trying'].get()}")
         elif self.playing_active():
-            text = f"Playing · {self.play_status_var.get()}"
+            who = "You play" if self.play_mode == "human" else "Agent playing"
+            text = f"{who} · {self.play_status_var.get()}"
         else:
-            text = "Idle"
+            text = "Nothing running"
         if self.status_bar_var.get() != text:
             self.status_bar_var.set(text)
 
@@ -2079,9 +2424,20 @@ class AIboyGUI:
         elif kind == "stat":
             _, key, val = item
             if key in self.stat_vars:
-                self.stat_vars[key].set(val)
+                self.stat_vars[key].set(val if key == "total_timesteps" else format_stat(val))
             if key == "total_timesteps":
                 self._update_train_progress(val)
+            elif key == "time_elapsed":
+                try:
+                    self.train_elapsed_var.set(format_elapsed(float(val)))
+                except ValueError:
+                    self.train_elapsed_var.set(val)
+        elif kind == "eval":
+            self._add_eval(item[1], item[2], item[3])
+        elif kind == "eval_len":
+            self._update_last_eval(length=item[1])
+        elif kind == "eval_best":
+            self._update_last_eval(best=True)
         elif kind == "train_done":
             self._on_train_done(item[1])
         elif kind == "play_status":
@@ -2103,8 +2459,8 @@ class AIboyGUI:
                 self.gameboy.show(item[1]["action"])
         elif kind == "play_episode":
             r = item[1]
-            self.play_rounds.append(r)
-            self.append_log(f"[play] round {r['episode']}: reward {r['reward']:.0f}, "
+            self.add_round(r)
+            self.append_log(f"[play] round {r['episode']}: score {r['reward']:.0f}, "
                             f"{r['steps']} steps, {r['end']}\n")
         elif kind == "play_done":
             # Keep the last report ("Round 2: … died in 1-2", "you played…") visible.
@@ -2115,6 +2471,9 @@ class AIboyGUI:
                 self.play_status_var.set("done")
             if self.play_mode == "human" and item[1]:
                 self.append_log(f"[play] you: {item[1][-1]['end']}\n")
+            head = self.activity_var.get()
+            self.activity_var.set(head.replace("Agent playing:", "Agent played:", 1)
+                                  .replace("You play ", "You played ", 1))
             self._play_finished()
             if self.wizard is not None and self.play_mode == "agent":
                 self.wizard.on_play_done(item[1])
@@ -2139,6 +2498,20 @@ class AIboyGUI:
             messagebox.showerror("Play error", item[1])
         elif kind == "tune_live":
             self.tune_live_var.set(item[1])
+            for key, val in item[2].items():
+                self.tune_vars[key].set(val)
+        elif kind == "tune_known":
+            _, known, total = item
+            self._tune_known = (known, total)
+            self.tune_vars["trial"].set(f"{total} trials" + (
+                f", {known} already known" if known else ""))
+        elif kind == "tune_trial":
+            _, label, settings_text = item
+            known = getattr(self, "_tune_known", (0, 0))[0]
+            self.tune_vars["trial"].set(label + (f" ({known} known)" if known else ""))
+            self.tune_vars["trying"].set(settings_text)
+            for key in ("steps", "reward", "ep_len", "fps"):
+                self.tune_vars[key].set("—")
         elif kind == "tune_progress":
             _, frac, label, eta = item
             self.tune_progress_var.set(100.0 * frac)
@@ -2149,6 +2522,10 @@ class AIboyGUI:
             self.render_tune_results()
             self.append_log(f"[tune] config {r.index} ({r.label}) → "
                             f"{r.score_text()}  {tuning.format_duration(r.duration)}\n")
+            best = tuning.best_result(self.tune_results())
+            if best is not None:
+                self.tune_vars["best"].set(
+                    f"{tuning.plain_overrides(best.overrides)} (score {best.score_text()})")
             if self.wizard is not None:
                 self.wizard.on_tune_result()
         elif kind == "tune_status":
@@ -2160,6 +2537,12 @@ class AIboyGUI:
             self._update_start_buttons()
             self.tune_proc = None
             self.tune_live_var.set(text)
+            self.tune_vars["trying"].set("—")
+            self.tune_vars["trial"].set("stopped" if cancelled else "all done")
+            head = self.activity_var.get()
+            self.activity_var.set(
+                ("Search stopped" if cancelled else "Search finished") if head.startswith("Search")
+                else head + (" — stopped" if cancelled else " — finished"))
             self.append_log(f"[tune] {text}\n")
             self.refresh_models()
             self.refresh_run_names()
@@ -2193,9 +2576,10 @@ class AIboyGUI:
             status = "stopped (final.zip saved)"
             self.train_progress_text.set("stopped")
         else:
-            status = f"failed (rc={rc}) — see log"
+            status = f"failed (rc={rc}) — see Messages on the Train tab"
             self.train_progress_text.set("failed")
         self.stat_vars["status"].set(status)
+        self.activity_var.set(f"Training '{self._train_run_name}' — {status.split(' (')[0]}")
         self.btn_train_stop.config(state="disabled")
         self.set_inputs_disabled(False)
         self.train_proc = None
@@ -2324,11 +2708,15 @@ class AIboyGUI:
             return ""
 
     def append_log(self, text: str) -> None:
+        """Keep `text` in the raw log; everything but the trainer's stats
+        tables and evaluation lines also goes to the Messages box."""
         self.log_text.insert("end", text)
         self.log_text.see("end")
         line_count = int(self.log_text.index("end-1c").split(".")[0])
         if line_count > 2000:
             self.log_text.delete("1.0", "500.0")
+        if not is_noise_line(text) and not text.startswith("$ "):     # the command line: log only
+            self.note(text)
 
     def _on_close(self) -> None:
         self._closing = True

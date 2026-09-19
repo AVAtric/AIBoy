@@ -17,8 +17,9 @@ learner, and a desktop app wraps the whole workflow in plain language.
 - **A real Game Boy on screen.** The emulator plays on the LCD of a photo of a
   Game Boy, the buttons light up as the agent presses them, and the live
   numbers sit next to it.
-- **Expert tabs for everything else.** Training runs with a full log, sweeps
-  with a best-first table, presets, and the complete experience.
+- **Expert tabs for everything else.** Training runs with their evaluations
+  and messages, sweeps with a best-first table, presets, and the complete
+  experience.
 - **Command line and a one-command build** for scripts, remote machines and a
   standalone app.
 
@@ -92,7 +93,7 @@ The window opens on the **Wizard** tab. Four steps, one Start button.
 |------|--------------|
 | **1 Set up** | Choose a **goal** (a preset such as `Campaign, recommended`). Decide whether AIboy should **look for better settings first**. The **Plan** line says what will happen and how long it takes. Press **▶ Start**. |
 | **2 Save** | The settings that won are shown, tuned values highlighted. Give them a name or continue without saving. |
-| **3 Train** | The real training run. Progress, reward, speed and ETA update live. **Stop** ends early and keeps the best model. |
+| **3 Train** | The real training run. Progress, score, speed and ETA update live under Tracking. **Stop** ends early and keeps the best model. |
 | **4 Watch** | The agent plays on the Game Boy with the exact settings it was trained with. |
 
 With **run everything by itself** ticked (the default) the wizard chains
@@ -169,14 +170,34 @@ folder next to the app (the shipped files stay inside the bundle). Those
 files are ignored by git and left out of release builds;
 `AIBOY_SHIPPED_ASSETS=1` ignores them for one start.
 
-**Tracking.**
+**Tracking.** The panel follows what the app is doing. Its first line
+names the activity, and only the boxes that matter for it are shown:
 
-- *Live game*: round, world, power-up, lives, coins, reward, position,
-  steps and the action being pressed; while you play, the score, the
-  game's clock and what you are pressing.
-- *Training*: status, reward, fps, elapsed time, episode length, progress
-  bar and ETA of the current run, from every tab.
-- *Play a model*: every saved model of the game (best and final model of
+- *Nothing running*: **Watch an agent** and **Play yourself**, the two
+  things you can start from here.
+- *Training* (from the Train tab or the wizard): the run's name and state,
+  the progress bar with the ETA, the average score and round length of the
+  last 100 training rounds, speed, elapsed time, how many evaluations were
+  made, the last and the best evaluation score, and a **Stop** button. With
+  *Live preview while training* the live game and its finished rounds show
+  above it. The box stays, with the final numbers, until something else
+  starts.
+- *Searching* (a wizard search or a Tune sweep): which trial is running and
+  how many are already known, the settings being tried, progress and ETA,
+  the trial's steps, score and speed, the best variation so far, and
+  **Stop**.
+- *Agent playing*: **Live game** (round, world, power-up, lives, coins,
+  score, position, steps and what it is pressing), a **Rounds** table with
+  every finished round (score, steps, how it ended), and the
+  **Watch an agent** box with **■ Stop** and **Clear**.
+- *You play*: the live game shows what matters to a person, the level,
+  power-up, lives, coins, score, the game's clock and what you are pressing,
+  plus the **Play yourself** box, whose button now stops the game.
+
+Rest the pointer on any number for what it means. The status bar at the
+bottom repeats the activity in one line.
+
+- *Watch an agent*: every saved model of the game (best and final model of
   each run, plus snapshots), rounds to play, speed from 0.5× to unlimited,
   **▶ Play**, **■ Stop**, **Clear**. Selecting a model applies the
   observation settings recorded in its `run.json`; **Advanced…** opens the
@@ -201,8 +222,7 @@ files are ignored by git and left out of release builds;
   quickest way to see whether the app hears the pad at all (hovering
   *Controller* shows the same). Without the app, `python main.py
   controller-test` prints the same for 20 seconds. Any ROM that boots can be
-  played, not only Super Mario Land. Each finished round of an agent's
-  playback is written to the Train log.
+  played, not only Super Mario Land.
 
 Speed is paced per emulator frame, so real time is real time even though a
 jump holds the button for 10 frames and a walk step for 4.
@@ -249,8 +269,15 @@ kept but never reused.
 Pick a **preset** or edit the fields (**Basic**, **PPO**, **Input &
 cadence**; each field explains itself on hover), type a **run name** (blank
 = `default`; pick an existing run to continue it) and **Start training**.
-The trainer is a subprocess, so the window stays responsive; its stats
-update under Tracking and the log scrolls below the fields.
+The trainer is a subprocess, so the window stays responsive. Its numbers
+update under Tracking; below the fields the tab keeps what the trainer
+reports about this run, read out of its output: an **Evaluations** table
+(after how many steps each evaluation was made, its score and length, and
+which ones set a new record, when the best model is saved) and a
+**Messages** box with the trainer's notes, warnings and errors, finished
+playback rounds and preset improvements. The stats tables the trainer
+prints every few seconds are left out; **Full log…** opens the complete raw
+output in its own window for troubleshooting.
 
 - **Resume if possible** (ticked by default) continues the named run when it
   has a checkpoint and starts fresh otherwise, so a reused name never
@@ -267,8 +294,8 @@ update under Tracking and the log scrolls below the fields.
   Game Boy as it is saved, at training speed (unthrottled, like the trainer;
   the play modes run at real time). It costs some training fps. When a run
   ends its best model is selected under Tracking.
-- **Stop** interrupts the trainer: it saves `checkpoints/final.zip` and
-  exits. `logs/best_model.zip` is always kept.
+- **Stop** (on the tab or under Tracking) interrupts the trainer: it saves
+  `checkpoints/final.zip` and exits. `logs/best_model.zip` is always kept.
 - **TensorBoard** serves `models/mario/` on port 6006 with the TensorBoard the
   app was installed or built with (the built app needs nothing extra). **Save as…** stores
   the fields as a preset; **Manage…** opens the Presets tab.

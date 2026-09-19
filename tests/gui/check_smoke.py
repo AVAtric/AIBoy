@@ -91,6 +91,37 @@ try:
     say("model note: " + app.model_note_var.get()[:60]); assert "older run" in app.model_note_var.get()
     app.play_stat_vars["reward"].set("1"); app.clear_screen(); assert app.play_stat_vars["reward"].get() == "—"
     assert "power" in app.play_stat_vars
+    # The panel follows the activity: nothing runs -> only the two start boxes.
+    shown = lambda: {k for k, v in app.tracking_layout().items() if v}
+    assert shown() == {"watch", "you"} and app.activity_var.get() == "Nothing running", shown()
+    assert app._track_boxes["watch"].winfo_manager() == "pack" and app._track_boxes["train"].winfo_manager() == ""
+    app.set_activity("train", "Training 'x'"); root.update()
+    assert shown() == {"train", "watch", "you"} and app._track_boxes["train"].winfo_manager() == "pack"
+    assert not app.btn_track_train_stop.winfo_ismapped()          # nothing to stop
+    app.set_live_mode("human"); root.update()
+    assert app._live_labels["reward"].cget("text") == "score:" and app._live_labels["steps"].cget("text") == "time:"
+    assert app._live_labels["x"].winfo_manager() == "" and app._live_labels["episode"].winfo_manager() == ""
+    app.set_live_mode("agent"); root.update()
+    assert app._live_labels["x"].cget("text") == "position:" and app._live_labels["x"].winfo_manager() == "grid"
+    assert app._live_labels["action"].cget("text") == "pressing:"
+    # The trainer's evaluation lines become table rows and the Tracking numbers.
+    app._clear_run_details()
+    app._handle_event(("eval", 100000, 12.5, 0.0)); app._handle_event(("eval_len", 300.0)); app._handle_event(("eval_best",))
+    app._handle_event(("eval", 200000, 9.0, 0.0)); app._handle_event(("eval_len", 250.0))
+    assert app.eval_vars["count"].get() == "2" and app.eval_vars["last"].get() == "9.0"
+    assert app.eval_vars["best"].get() == "12.5 at 100k", app.eval_vars["best"].get()
+    assert app.eval_tree.item("1")["values"][4] == "new best" and app.eval_tree.item("2")["values"][3] == 250
+    app._handle_event(("stat", "time_elapsed", "3725")); assert app.train_elapsed_var.get() == "1 h 02 min"
+    assert gui.format_elapsed(65) == "1 min 05 s" and gui.format_elapsed(9) == "9 s"
+    # Stats tables and eval lines stay out of Messages; notes go in.
+    assert gui.is_noise_line("|    ep_rew_mean    | 123     |") and gui.is_noise_line("Eval num_timesteps=1, episode_reward=1.00 +/- 0.00")
+    assert not gui.is_noise_line("[train] resuming from x")
+    app.append_log("[gui] hello smoke\n"); assert "hello smoke" in app.messages_text.get("1.0", "end")
+    # A finished round lands in the Rounds table.
+    app._handle_event(("play_episode", {"episode": 1, "reward": 42.0, "steps": 77, "end": "died in 1-1"}))
+    assert len(app.rounds_tree.get_children()) == 1 and app.play_rounds[0]["steps"] == 77
+    app.clear_screen(); assert not app.rounds_tree.get_children() and shown() == {"watch", "you"}
+    say("tracking panel ok")
 
     # ---- housekeeping ----
     for name in ("zzcheck-001", "zzcheck-002-s1"):

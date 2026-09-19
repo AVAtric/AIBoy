@@ -29,6 +29,28 @@ for name, tab in [("wizard", app.wizard_tab), ("train", app.train_tab), ("tune",
     rw, rh = tab.winfo_reqwidth(), tab.winfo_reqheight()
     fits = rw <= left_w and rh <= avail_h; ok &= fits
     say(f"{name:10s} {rw}x{rh} / {left_w}x{avail_h} {'ok' if fits else 'OVERFLOW'}")
+# Tracking follows the activity: every combination of boxes must fit the
+# smallest window too (1.5x: the panel gets 815 px), with the training box
+# holding a long run name and a two-line best-score line.
+small_limit = gui.window_size(1.5)[1] - 85
+app.train_run_var.set("campaign-recommended-ent0.03-lr0.0003-2")
+app.eval_vars["best"].set("1234.5 at 1.25M")
+app.tune_vars["trying"].set("curiosity 0.03 · learning speed 0.0003 · rollout 1024")
+app.tune_vars["best"].set("curiosity 0.03 · learning speed 0.0003 (score 1234 ± 12)")
+class _Live:                      # a "running" trainer, so the preview boxes are shown
+    def poll(self): return None
+for act, preview, human in (("none", False, False), ("train", False, False), ("train", True, False),
+                            ("tune", False, False), ("play", False, False), ("human", False, True)):
+    app._train_preview_on = preview
+    app.train_proc = _Live() if preview else None
+    app.set_live_mode("human" if human else "agent")
+    app.set_activity(act, f"Testing {act}"); root.update()
+    th = app.tracking_frame.winfo_reqheight()
+    shown = [k for k, v in app.tracking_layout().items() if v]
+    fits = th <= small_limit; ok &= fits
+    say(f"tracking {act:5s}{' +preview' if preview else ''}: {th} high / {small_limit} "
+        f"({', '.join(shown)}) {'ok' if fits else 'OVERFLOW'}")
+app.train_proc = None; app.set_live_mode("agent"); app.set_activity("none", "Nothing running"); root.update()
 # The buttons light up for the agent's actions and clear for none; the LED follows playback.
 app.gameboy.show("RIGHT+RUN+JUMP"); assert app.gameboy.pressed == {"right", "b", "a"}
 app.gameboy.show("NOOP"); assert not app.gameboy.pressed
