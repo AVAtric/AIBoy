@@ -13,7 +13,7 @@ settings.json
 
 gui_errors.log
 
-assets/orig_gb_*
+assets/orig_gb*
 
 # Release builds (build_release.py)
 build/

@@ -2,7 +2,10 @@
 emulator's picture inside its LCD, its buttons lit up as the agent presses
 them, and the battery LED on while something is playing.
 
-`assets/orig_gb.png` is the device photo. Its LCD is a 10:9 window of
+`assets/gb_interface.png` is the device photo (the repository's copy, with
+AIboy lettering, made by tools/make_interface.py; a local
+`assets/orig_gb_interface.png` is used instead when present, see
+aiboy.paths.local_or_shipped). Its LCD is a 10:9 window of
 242x218 px, so at the photo's native size it holds the 160x144 emulator
 frame at 1.5x; the photo is scaled so the frame lands on the LCD at the
 largest of LCD_SCALES the display has room for (`Geometry`; the window
@@ -25,9 +28,9 @@ from tkinter import ttk
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
 from aiboy.gui.widgets import Tooltip
-from aiboy.paths import BUNDLE_DIR
+from aiboy.paths import local_or_shipped
 
-PHOTO = BUNDLE_DIR / "assets" / "orig_gb.png"
+PHOTO = local_or_shipped("gb_interface.png")
 PHOTO_W, PHOTO_H = 446, 737
 
 GAME_W, GAME_H = 160, 144

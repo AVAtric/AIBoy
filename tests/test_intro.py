@@ -4,7 +4,8 @@ from pathlib import Path
 
 import numpy as np
 
-from aiboy.gui import player
+from aiboy import paths
+from aiboy.gui import gameboy, player
 
 
 class IntroAssetTests(unittest.TestCase):
@@ -17,6 +18,29 @@ class IntroAssetTests(unittest.TestCase):
             self.assertEqual(player.intro_asset("gb_intro.npz", assets), assets / "orig_gb_intro.npz")
             # each file is chosen on its own: no orig wav -> the shipped wav
             self.assertEqual(player.intro_asset("gb_intro.wav", assets), assets / "gb_intro.wav")
+
+    def test_photo_prefers_a_local_original(self):
+        with tempfile.TemporaryDirectory() as d:
+            assets = Path(d)
+            self.assertEqual(paths.local_or_shipped("gb_interface.png", assets), assets / "gb_interface.png")
+            (assets / "orig_gb_interface.png").write_bytes(b"x")
+            self.assertEqual(paths.local_or_shipped("gb_interface.png", assets), assets / "orig_gb_interface.png")
+        self.assertIn(gameboy.PHOTO.name, ("gb_interface.png", "orig_gb_interface.png"))
+
+    def test_shipped_photo_carries_no_maker_marks(self):
+        """The repository's photo has AIboy lettering and an empty LCD: the
+        label under the screen is the only print left in that band and the
+        screen holds no dark print at all."""
+        from PIL import Image
+        img = Image.open(Path("assets") / "gb_interface.png").convert("RGB")
+        self.assertEqual(img.size, (gameboy.PHOTO_W, gameboy.PHOTO_H))
+        a = np.asarray(img).astype(int)
+        x0, y0, x1, y1 = gameboy.LCD
+        self.assertFalse((a[y0 + 4:y1 - 4, x0 + 4:x1 - 4].sum(axis=2) < 250).any(), "print on the LCD")
+        band = a[354:392, 26:300]
+        ink = (band[..., 2] > band[..., 0] + 30) & (band[..., 2] > band[..., 1] + 20)
+        cols = np.flatnonzero(ink.any(axis=0))
+        self.assertLess(cols.max() - cols.min(), 160, "lettering wider than one short word")
 
     def test_shipped_assets_are_the_aiboy_clip(self):
         """The files in the repo are the generated ones, whichever copy the

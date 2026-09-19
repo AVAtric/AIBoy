@@ -134,11 +134,19 @@ hovering a button tells what it does, and the battery LED is on while the
 boot video, a playback or the live preview runs. Under the device a status
 line says what is playing and how each round ended.
 
-The photo (`assets/orig_gb.png`) is scaled so the 160 × 144 frame sits on
-the LCD at 2× when the display has room for the window, else 1.75× or 1.5×.
-At start-up the screen plays the boot video from `assets/` with its sound
-(`AIBOY_NO_INTRO=1` starts silently; `python tools/build_intro.py` makes the
-frames from `assets/gb_intro.mp4`, ffmpeg needed).
+The photo (`assets/gb_interface.png`) is scaled so the 160 × 144 frame sits
+on the LCD at 2× when the display has room for the window, else 1.75× or
+1.5×. At start-up the screen plays the boot video from `assets/` with its
+sound (`AIBOY_NO_INTRO=1` starts silently; `python tools/build_intro.py`
+makes the frames from `assets/gb_intro.mp4`, ffmpeg needed).
+
+The photo and the boot video in the repository carry AIboy lettering and no
+maker's marks (`tools/make_interface.py` and `tools/make_intro.py` produce
+them). If you own the real thing, put it next to the shipped file under the
+same name with an `orig_` prefix (`assets/orig_gb_interface.png`,
+`assets/orig_gb_intro.npz`, `.wav`) and AIboy uses it instead. Those files
+are ignored by git and left out of release builds; `AIBOY_SHIPPED_ASSETS=1`
+ignores them for one start.
 
 **Tracking.**
 
@@ -497,7 +505,7 @@ aiboy/
   gui/experience_tab.py Experience tab
   gui/widgets.py        Shared Tk pieces: parameter form, tables, tooltips, theme
   gui/player.py         Embedded playback / live preview engine, boot video
-tools/                  Boot-video generators (make_intro.py, build_intro.py)
+tools/                  Artwork generators: photo (make_interface.py), boot video (make_intro.py, build_intro.py), README screenshots (readme_shots.py)
 tests/                  Unit tests; tests/gui/ GUI checks
 ```
 

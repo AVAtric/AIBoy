@@ -140,6 +140,18 @@ def ensure_pyinstaller():
         sys.exit("[build] PyInstaller still not importable after installing it")
 
 
+def shipped_assets(sep: str) -> list[str]:
+    """`--add-data` pairs for assets/: the shipped files only. A local
+    `orig_*` original (the real device photo or boot video, see
+    aiboy.paths.local_or_shipped) is for the developer's own window and must
+    never travel in a release."""
+    args: list[str] = []
+    for f in sorted((ROOT / "assets").iterdir()):
+        if f.is_file() and not f.name.startswith("orig_") and not f.name.startswith("."):
+            args += ["--add-data", f"{f}{sep}assets"]
+    return args
+
+
 def run_pyinstaller(profile: dict) -> Path:
     pyi = ensure_pyinstaller()
     PROFILE_FILE.write_text(json.dumps(profile, indent=2))
@@ -148,7 +160,7 @@ def run_pyinstaller(profile: dict) -> Path:
         str(ROOT / "main.py"), "--name", APP_NAME, "--noconfirm", "--clean", "--onedir",
         "--distpath", str(BUILD_DIR / "dist"), "--workpath", str(BUILD_DIR / "work"),
         "--specpath", str(BUILD_DIR),
-        "--add-data", f"{ROOT / 'assets'}{sep}assets",
+        *shipped_assets(sep),
         "--add-data", f"{ROOT / 'builtin_presets.json'}{sep}.",
         "--add-data", f"{PROFILE_FILE}{sep}.",
         "--collect-all", "pyboy",             # Cython modules + the plugin folder PyBoy imports by name

@@ -39,23 +39,18 @@ from pathlib import Path
 import numpy as np
 
 from aiboy.games import DEFAULT_STALL_STEPS, DEFAULT_TIME_BUDGET, GAMES, ROM_DIR, prepare_level_states
-from aiboy.paths import BUNDLE_DIR
+from aiboy.paths import ASSET_DIR, local_or_shipped
 
 GB_FPS = 60.0
 PREVIEW_STEP_SLEEP = 0.02   # cap the preview at ~50 env-steps/s so training keeps the CPU
 RESYNC_AFTER = 0.25         # if pacing falls this far behind, drop the backlog instead of racing
 
 
-ASSET_DIR = BUNDLE_DIR / "assets"
-
-
 def intro_asset(name: str, assets: Path = ASSET_DIR) -> Path:
-    """Path of a boot-video asset. The repo ships `assets/<name>` (the "AIboy"
-    clip made by tools/make_intro.py); a file named `orig_<name>` next to it is
-    not distributed with the repo (see .gitignore) but is preferred when
-    someone has put one there."""
-    orig = assets / f"orig_{name}"
-    return orig if orig.exists() else assets / name
+    """Path of a boot-video asset: the shipped `assets/<name>` (the "AIboy"
+    clip made by tools/make_intro.py), or a local `orig_<name>` next to it
+    when there is one (see aiboy.paths.local_or_shipped)."""
+    return local_or_shipped(name, assets)
 
 
 INTRO_FRAMES = intro_asset("gb_intro.npz")
