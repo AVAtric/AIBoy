@@ -24,8 +24,9 @@ and the canvas would only ever show the last frame of each step.
 
 Three entry points share one engine:
   - `play()`        plays a fixed model for N episodes (Play tab, wizard step 4)
-  - `preview()`     follows a training run, reloading `best_model.zip` whenever
-                    it changes, until training ends (Train tab live preview)
+  - `preview()`     follows a training run at real time, reloading
+                    `best_model.zip` whenever it changes, until training
+                    ends (Train tab live preview)
   - `play_human()`  runs the plain game at real speed with the buttons the
                     person holds (keyboard / mouse / controller, see
                     controls.py) — no model, no environment, any ROM
@@ -47,8 +48,18 @@ from aiboy.gui.controls import BUTTONS, HeldButtons, action_name, diff_presses
 from aiboy.paths import ASSET_DIR, local_or_shipped
 
 GB_FPS = 60.0
-PREVIEW_STEP_SLEEP = 0.02   # cap the preview at ~50 env-steps/s so training keeps the CPU
 RESYNC_AFTER = 0.25         # if pacing falls this far behind, drop the backlog instead of racing
+
+
+def _single_threaded_torch() -> None:
+    """One thread for the policy's inference on the playback thread: the
+    models are tiny, and torch's default thread pool spins on every core,
+    which competes with the GUI's drawing and makes playback stutter."""
+    try:
+        import torch
+        torch.set_num_threads(1)
+    except Exception:
+        pass
 
 
 class FramePacer:
@@ -370,6 +381,7 @@ class EmbeddedPlayer:
                    episodes, max_steps, deterministic, speed_mult, stop,
                    time_budget=DEFAULT_TIME_BUDGET, stall_steps=DEFAULT_STALL_STEPS) -> None:
         from stable_baselines3 import PPO
+        _single_threaded_torch()
         session = None
         summary: list[dict] = []
         try:
@@ -427,6 +439,7 @@ class EmbeddedPlayer:
     def _preview_loop(self, model_path, game, obs_type, action_repeat, frame_stack, start_level,
                       stop, training_active) -> None:
         from stable_baselines3 import PPO
+        _single_threaded_torch()
         session = None
         model = None
         model_mtime = 0.0
@@ -443,11 +456,15 @@ class EmbeddedPlayer:
                     try:
                         if session is not None:
                             session.close()
+                        # Real time, like the Play controls at 1x: fluent to
+                        # watch, and it costs the trainer less CPU than the
+                        # old fast-forward-then-sleep pattern.
                         session = _Session(game, obs_type, action_repeat, frame_stack,
-                                           start_level, self.frames)
+                                           start_level, self.frames, speed_mult=1.0)
                         model = PPO.load(str(model_path), env=session.vec, device="cpu")
                         model_mtime = mtime
                         obs = session.vec.reset()
+                        session.pacer.reset()
                         ep_num, ep_reward, ep_steps = 1, 0.0, 0
                         self._emit("log", f"[preview] loaded {model_path.name}\n")
                         self._emit("play_status", f"preview — {model_path.name}")
@@ -469,10 +486,10 @@ class EmbeddedPlayer:
                                                 "steps": ep_steps,
                                                 "end": episode_end_reason(info, ep_steps, 0)})
                     obs = session.vec.reset()
+                    session.pacer.reset()
                     ep_num += 1
                     ep_reward, ep_steps = 0.0, 0
                     self._emit("play_stat", "episode", f"{ep_num} (preview)")
-                time.sleep(PREVIEW_STEP_SLEEP)
         except Exception:
             self._emit("log", f"[preview] error:\n{traceback.format_exc()}\n")
         finally:

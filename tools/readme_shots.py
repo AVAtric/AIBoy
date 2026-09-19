@@ -47,7 +47,9 @@ def main() -> None:
     if sys.platform != "darwin":
         sys.exit("screencapture is macOS only")
     root = tk.Tk(); app = gui.AIboyGUI(root)
-    root.lift(); root.attributes("-topmost", True)
+    # Raised, not "-topmost": on macOS a topmost main window hides the
+    # Game Boy's child windows (the screen and the pad), see gameboy.py.
+    root.lift(); root.focus_force()
 
     def shoot():
         if app.gameboy.power:                       # the boot video is still on

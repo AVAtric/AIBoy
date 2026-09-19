@@ -39,7 +39,7 @@ def tick():
         app.play_episodes_var.set(2); app.play_speed_label_var.set("1× (real time)")
         app.play_max_steps_var.set(150)
         if not app.start_playing(): fail("play did not start: " + str(rec["errors"]))
-        root.lift(); root.attributes("-topmost", True)          # so screenshots show the app
+        root.lift(); root.focus_force()      # so screenshots show the app (never "-topmost": it hides the child windows)
         state["s"] = "playing"; state["t_play"] = time.time(); state["frames0"] = app.frames_painted
     elif s == "playing":
         if app.gameboy.pressed:

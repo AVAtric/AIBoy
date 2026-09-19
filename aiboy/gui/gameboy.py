@@ -9,24 +9,26 @@ aiboy.paths.local_or_shipped). Its LCD is a 10:9 window of
 242x218 px, so at the photo's native size it holds the 160x144 emulator
 frame at 1.5x; the photo is scaled so the frame lands on the LCD at the
 largest of LCD_SCALES the display has room for (`Geometry`; the window
-picks the scale, see app.choose_lcd_scale). `GameBoyView` is a canvas
-holding the photo and, on top, the controls region, which is swapped for
-a version with a glow over the pressed buttons (composed with PIL once per
-action and cached). The screen sits over the LCD on a drawn, exactly even
-dark rim (the photo's own shadow around the window is uneven, so that area
-is repainted in the bezel colour).
+picks the scale, see app.choose_lcd_scale). `GameBoyView` is a frame of
+the photo's size holding three canvases: the device (the photo in bands,
+a drawn, exactly even dark rim around the LCD, the battery LED), the pad
+(the controls region, swapped for a version with a glow over the pressed
+buttons, composed with PIL once per action and cached) and the screen,
+each placed where it belongs. The photo's own shadow around the LCD
+window is uneven, so that area is repainted in the bezel colour under the
+drawn rim.
 
-On macOS the screen is its own borderless child window (`own_window`):
-Tk there redraws the whole window, every image in it, whenever anything
-in it changes, and the photo is big, so a new frame on the same window
-cost ~35 ms and the display fell to ~14 fps. A child window redraws only
-itself, follows the main window as it moves, and hides and shows with it;
-`_place_screen` keeps it on the LCD. On other systems the screen is a
-child canvas in place. Either way `screen_image` is the PhotoImage to
-paste frames into. The photo is cut into bands around the rim and the pad
-so nothing large overlaps what changes. Emulator frames arrive in PyBoy's
-four greys and are shown in the pale green of the boot video's idle
-screen, dark on light (`dmg_tint`). Hovering a button tells
+On macOS each of the three canvases lives in a borderless child window
+of its own (`own_windows`): Tk there redraws a whole window, every image
+in it, whenever anything in it changes, and the photo is big. With
+everything in the main window a new frame or a lit button cost ~35 ms
+(the display fell to ~14 fps) and every live-panel number did the same.
+A child window redraws only itself, follows the main window as it moves,
+and hides and shows with it; `_place_windows` keeps the three on the
+frame. Elsewhere the canvases are simply placed in the frame. Either way
+`screen_image` is the PhotoImage to paste frames into. Emulator frames
+arrive in PyBoy's four greys and are shown in the pale green of the boot
+video's idle screen, dark on light (`dmg_tint`). Hovering a button tells
 what it does; when a person plays, pressing a button with the mouse holds
 it (`on_buttons`) and a click gives the canvas the keyboard focus.
 
@@ -289,76 +291,138 @@ def glow_image(pad: Image.Image, pressed: frozenset[str], geo: Geometry) -> Imag
     return Image.alpha_composite(img, overlay).convert("RGB")
 
 
-class GameBoyView(tk.Canvas):
-    """The device on a canvas, at `lcd_scale` emulator pixels (see
-    `Geometry`). `screen_image` is the `screen_size` PhotoImage on the
-    LCD: paste each new frame into it. `show(action_name)` lights that
+class GameBoyView(tk.Frame):
+    """The device, at `lcd_scale` emulator pixels (see `Geometry`).
+    `screen_image` is the `screen_size` PhotoImage on the LCD: paste each
+    new frame into it (`set_screen`). `show(action_name)` lights that
     action's buttons (None or "NOOP" clears them); `set_power(on)` drives
     the battery LED; hovering a button shows its label (plus the keys that
     press it, see `set_key_hints`); `on_buttons(callback)` reports the
-    buttons held down with the mouse."""
+    buttons held down with the mouse. Click anywhere on it to give it the
+    keyboard focus."""
 
     def __init__(self, parent: tk.Misc, lcd_scale: float = 1.5, **kw):
         geo = self.geo = Geometry(lcd_scale)
         rgb = window_rgb(parent)
-        self.photo = load_photo(background=rgb, size=(geo.width, geo.height))
         bg = "#%02x%02x%02x" % rgb
-        super().__init__(parent, width=geo.width, height=geo.height, highlightthickness=0,
-                         bg=bg, **kw)
-        # The photo in bands that leave out the rim box and the pad box, so
-        # a new frame or a lit button never redraws a large image.
+        lcd_bg = "#%02x%02x%02x" % LCD_OFF
+        super().__init__(parent, width=geo.width, height=geo.height, bg=bg, **kw)
+        self.photo = load_photo(background=rgb, size=(geo.width, geo.height))
+        self.own_windows = self.tk.call("tk", "windowingsystem") == "aqua"
+        self._windows: list[tuple[tk.Toplevel, int, int, int, int]] = []
+        self._placed: dict[tk.Toplevel, str] = {}
+
+        px, py, px1, py1 = geo.pad_box
+        self.device = self._canvas(0, 0, geo.width, geo.height, bg)
+        # The pad and the screen lie over the device: on macOS their windows
+        # are children of the device's window (a sibling shown later would
+        # stay underneath, whatever `lift` says).
+        over = self.device.winfo_toplevel() if self.own_windows else None
+        self.pad = self._canvas(px, py, px1 - px, py1 - py, bg, over)
+        self.screen = self._canvas(geo.screen_x, geo.screen_y, geo.screen_w, geo.screen_h, lcd_bg,
+                                   over)
+
+        # The device: the photo in bands that leave out the rim box and the
+        # pad box (so nothing large sits under what changes), the rim, the LED.
         self._tiles: list[ImageTk.PhotoImage] = []
         for box in tiles(geo.width, geo.height, [geo.rim_box, geo.pad_box]):
             img = ImageTk.PhotoImage(self.photo.crop(box))
             self._tiles.append(img)
-            self.create_image(box[0], box[1], anchor="nw", image=img)
-        self.create_rectangle(*geo.rim_box, fill="#%02x%02x%02x" % LCD_OFF, outline="")
+            self.device.create_image(box[0], box[1], anchor="nw", image=img)
+        self.device.create_rectangle(*geo.rim_box, fill=lcd_bg, outline="")
+        x, y = geo.led
+        r = max(4, round(4 * geo.factor))
+        self._led_halo = self.device.create_oval(x - r - 3, y - r - 3, x + r + 3, y + r + 3,
+                                                 fill="#7a1010", outline="", state="hidden")
+        self._led = self.device.create_oval(x - r, y - r, x + r, y + r, fill="#ff3030",
+                                            outline="", state="hidden")
+        self._power = False
+
+        # The pad: the controls region, with a glow over the pressed buttons.
         self._pad = self.photo.crop(geo.pad_box)
         self._cache: dict[frozenset[str], ImageTk.PhotoImage] = {}
         self._pressed: frozenset[str] = frozenset()
-        self._pad_id = self.create_image(geo.pad_box[0], geo.pad_box[1], anchor="nw",
-                                         image=self._pad_image(frozenset()))
-        # The screen (see the module docstring for why it is a window of
-        # its own on macOS).
-        lcd_bg = "#%02x%02x%02x" % LCD_OFF
-        self.own_window = self.tk.call("tk", "windowingsystem") == "aqua"
-        self._screen_geometry = ""
-        if self.own_window:
-            self.screen_window = tk.Toplevel(self, bg=lcd_bg)
-            self.screen_window.withdraw()
-            self.screen_window.overrideredirect(True)
-            self.screen_window.transient(self.winfo_toplevel())
-            self.screen = tk.Canvas(self.screen_window, width=geo.screen_w, height=geo.screen_h,
-                                    highlightthickness=0, bd=0, bg=lcd_bg)
-            self.screen.pack()
-            # Any move, resize, hide or show of the window or of this canvas.
-            for widget in (self, self.winfo_toplevel()):
-                for event in ("<Configure>", "<Map>", "<Unmap>", "<Visibility>"):
-                    widget.bind(event, self._place_screen, add="+")
-        else:
-            self.screen_window = None
-            self.screen = tk.Canvas(self, width=geo.screen_w, height=geo.screen_h,
-                                    highlightthickness=0, bd=0, bg=lcd_bg)
-            self.screen.place(x=geo.screen_x, y=geo.screen_y)
-        self.screen_image = ImageTk.PhotoImage("RGB", geo.screen_size)
-        self.screen.create_image(0, 0, anchor="nw", image=self.screen_image)
-        self.screen.bind("<ButtonPress-1>", lambda e: self.focus_set(), add="+")
-        x, y = geo.led
-        r = max(4, round(4 * geo.factor))
-        self._led_halo = self.create_oval(x - r - 3, y - r - 3, x + r + 3, y + r + 3,
-                                          fill="#7a1010", outline="", state="hidden")
-        self._led = self.create_oval(x - r, y - r, x + r, y + r, fill="#ff3030", outline="",
-                                     state="hidden")
-        self._power = False
+        self._pad_id = self.pad.create_image(0, 0, anchor="nw", image=self._pad_image(frozenset()))
         self._hover: str | None = None
         self._key_hints: dict[str, str] = {}
-        self._tip = Tooltip(self, self._hover_text)
+        self._tip = Tooltip(self.pad, self._hover_text)
         self._on_buttons = None
         self._mouse_held: frozenset[str] = frozenset()
-        self.bind("<Motion>", self._on_motion, add="+")
-        self.bind("<ButtonPress-1>", self._on_mouse_down, add="+")
-        self.bind("<ButtonRelease-1>", self._on_mouse_up, add="+")
-        self.bind("<Leave>", self._on_mouse_up, add="+")
+        self.pad.bind("<Motion>", self._on_motion, add="+")
+        self.pad.bind("<ButtonPress-1>", self._on_mouse_down, add="+")
+        self.pad.bind("<ButtonRelease-1>", self._on_mouse_up, add="+")
+        self.pad.bind("<Leave>", self._on_mouse_up, add="+")
+
+        # The screen.
+        self.screen_image = ImageTk.PhotoImage("RGB", geo.screen_size)
+        self.screen.create_image(0, 0, anchor="nw", image=self.screen_image)
+        for widget in (self, self.device, self.screen):
+            widget.bind("<ButtonPress-1>", lambda e: self.focus_set(), add="+")
+
+        if self.own_windows:
+            # Any move, resize, hide or show of the main window or of this frame.
+            for widget in (self, self.winfo_toplevel()):
+                for event in ("<Configure>", "<Map>", "<Unmap>", "<Visibility>"):
+                    widget.bind(event, self._place_windows, add="+")
+
+    # ----- the three canvases -----
+
+    def _canvas(self, x: int, y: int, w: int, h: int, bg: str,
+                over: tk.Toplevel | None = None) -> tk.Canvas:
+        """A canvas at (x, y) of this frame: in a child window of its own
+        on macOS (see the module docstring; a child of `over`, or of the
+        main window), placed in the frame elsewhere."""
+        if self.own_windows:
+            win = tk.Toplevel(self, bg=bg)
+            win.withdraw()
+            win.overrideredirect(True)
+            win.transient(over if over is not None else self.winfo_toplevel())
+            # No drop shadow: it draws a dark edge that shows as a seam on
+            # the photo. Tk sets the window's style each time it maps it,
+            # so ours goes on top of that, on every <Map>.
+            win.bind("<Map>", lambda e, w=win: self._no_shadow(w), add="+")
+            canvas = tk.Canvas(win, width=w, height=h, highlightthickness=0, bd=0, bg=bg)
+            canvas.pack()
+            self._windows.append((win, x, y, w, h))
+            return canvas
+        canvas = tk.Canvas(self, width=w, height=h, highlightthickness=0, bd=0, bg=bg)
+        canvas.place(x=x, y=y)
+        return canvas
+
+    @staticmethod
+    def _no_shadow(win: tk.Toplevel) -> None:
+        try:
+            win.tk.call("::tk::unsupported::MacWindowStyle", "style", win._w, "simple",
+                        ["noActivates", "noShadow"])
+        except tk.TclError:
+            pass
+
+    def _place_windows(self, _event=None) -> None:
+        """Keep the child windows on this frame: shown and positioned while
+        the frame is viewable, hidden otherwise (a withdrawn or iconified
+        main window, or a test that never shows one). Shown in creation
+        order, so the pad and the screen lie over the device."""
+        try:
+            viewable = self.winfo_viewable()
+            ox, oy = self.winfo_rootx(), self.winfo_rooty()
+            shown = False
+            for win, x, y, w, h in self._windows:
+                if not viewable:
+                    if win.state() != "withdrawn":
+                        win.withdraw()
+                    continue
+                wanted = f"{w}x{h}+{ox + x}+{oy + y}"
+                if self._placed.get(win) != wanted:
+                    self._placed[win] = wanted
+                    win.geometry(wanted)
+                if win.state() != "normal":
+                    win.deiconify()
+                    shown = True
+            if shown:
+                for win, *_ in self._windows:      # device, then the pad and the screen over it
+                    win.lift()
+        except tk.TclError:                 # the window is going away
+            pass
 
     # ----- screen -----
 
@@ -369,29 +433,6 @@ class GameBoyView(tk.Canvas):
     def set_screen(self, image: Image.Image) -> None:
         """Show a PIL `image` (`screen_size`) on the LCD, in place."""
         self.screen_image.paste(image)
-
-    def _place_screen(self, _event=None) -> None:
-        """Keep the screen window on the LCD: shown and positioned while
-        this canvas is viewable, hidden otherwise (a withdrawn or iconified
-        main window, or a test that never shows one)."""
-        win = self.screen_window
-        if win is None:
-            return
-        try:
-            if not self.winfo_viewable():
-                if win.state() != "withdrawn":
-                    win.withdraw()
-                return
-            geo = self.geo
-            wanted = (f"{geo.screen_w}x{geo.screen_h}+{self.winfo_rootx() + geo.screen_x}"
-                      f"+{self.winfo_rooty() + geo.screen_y}")
-            if wanted != self._screen_geometry:
-                self._screen_geometry = wanted
-                win.geometry(wanted)
-            if win.state() != "normal":
-                win.deiconify()
-        except tk.TclError:                 # the window is going away
-            pass
 
     # ----- battery LED -----
 
@@ -404,8 +445,8 @@ class GameBoyView(tk.Canvas):
             return
         self._power = on
         state = "normal" if on else "hidden"
-        self.itemconfig(self._led_halo, state=state)
-        self.itemconfig(self._led, state=state)
+        self.device.itemconfig(self._led_halo, state=state)
+        self.device.itemconfig(self._led, state=state)
 
     # ----- buttons -----
 
@@ -425,24 +466,18 @@ class GameBoyView(tk.Canvas):
         if pressed == self._pressed:
             return
         self._pressed = pressed
-        self.itemconfig(self._pad_id, image=self._pad_image(pressed))
+        self.pad.itemconfig(self._pad_id, image=self._pad_image(pressed))
 
     def button_at(self, x: int, y: int) -> str | None:
-        """The button under canvas position (x, y), if any."""
+        """The button under device position (x, y), if any."""
         for key, (_kind, (x0, y0, x1, y1)) in self.geo.regions.items():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 return key
         return None
 
-    def _on_motion(self, event) -> None:
-        key = self.button_at(event.x, event.y)
-        if key == self._hover:
-            return
-        self._hover = key
-        self.config(cursor="hand2" if key else "")
-        self._tip.hide()
-        if key:
-            self._tip.schedule()
+    def _button_under(self, event) -> str | None:
+        """The button under a pad-canvas event."""
+        return self.button_at(event.x + self.geo.pad_box[0], event.y + self.geo.pad_box[1])
 
     def set_key_hints(self, hints: dict[str, str]) -> None:
         """Button -> the keys that press it ("↑ or W"), added to the hover labels."""
@@ -455,6 +490,16 @@ class GameBoyView(tk.Canvas):
         if text and hint and hint != "—":
             text += f" — key {hint}"
         return text
+
+    def _on_motion(self, event) -> None:
+        key = self._button_under(event)
+        if key == self._hover:
+            return
+        self._hover = key
+        self.pad.config(cursor="hand2" if key else "")
+        self._tip.hide()
+        if key:
+            self._tip.schedule()
 
     # ----- mouse input -----
 
@@ -472,7 +517,7 @@ class GameBoyView(tk.Canvas):
 
     def _on_mouse_down(self, event) -> None:
         self.focus_set()                        # so the keyboard reaches the game
-        key = self.button_at(event.x, event.y)
+        key = self._button_under(event)
         self._report_mouse(frozenset({key}) if key else frozenset())
 
     def _on_mouse_up(self, _event=None) -> None:
