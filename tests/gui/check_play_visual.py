@@ -1,7 +1,7 @@
 """Play through the GUI and watch the Game Boy react: train a tiny model,
 play it at real speed, and check mid-play that frames reach the LCD, the
-pressed buttons light up, the battery LED is on, and finished rounds land
-in the Rounds table. With a directory as first argument, screenshots of
+pressed buttons light up, the battery LED is on, and finished rounds are
+kept (app.play_rounds). With a directory as first argument, screenshots of
 the whole window are written there (macOS). ~60 s."""
 import subprocess, sys, time, tkinter as tk
 from _common import say, silence_dialogs, cleanup
@@ -49,14 +49,14 @@ def tick():
         state["frames"].add(id(app._tk_img))
         if app.gameboy.power: state["led"] = state.get("led", 0) + 1
         if app.play_status_var.get().startswith("done"):
-            rows = app.rounds_tree.get_children()
-            played = [app.rounds_tree.item(r)["values"] for r in rows]
+            rows = app.play_rounds
+            played = [(r["episode"], round(r["reward"]), r["steps"], r["end"]) for r in rows]
             say(f"lit ticks: {state['lit']}, LED-on ticks: {state.get('led', 0)}, distinct frames: "
                 f"{len(state['frames'])}, rounds: {played}, {time.time() - state['t_play']:.1f} s")
             if not state.get("led"): fail("LED never on during play")
             if state["lit"] < 5: fail("buttons never lit up during play")
             if len(state["frames"]) < 30: fail("too few frames reached the LCD")
-            if len(rows) != 2: fail("rounds table incomplete")
+            if len(rows) != 2: fail("rounds incomplete")
             if app.gameboy.pressed or app.gameboy.power: fail("pad or LED still on after play")
             shot("done")
             say("PLAY_VISUAL_OK"); app._on_close(); cleanup([RUN]); return

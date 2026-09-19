@@ -23,11 +23,12 @@ DEFAULTS: dict = {
 }
 
 
-def load(path: Path = SETTINGS_FILE) -> dict:
-    """Every setting, defaults filled in."""
+def load(path: Path | None = None) -> dict:
+    """Every setting, defaults filled in. `path` defaults to SETTINGS_FILE
+    as it is *now*, so tests can point the module elsewhere."""
     data: dict = {}
     try:
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        raw = json.loads(Path(path or SETTINGS_FILE).read_text(encoding="utf-8"))
         if isinstance(raw, dict):
             data = raw
     except (OSError, ValueError):
@@ -35,13 +36,13 @@ def load(path: Path = SETTINGS_FILE) -> dict:
     return {**DEFAULTS, **data}
 
 
-def get(key: str, path: Path = SETTINGS_FILE):
+def get(key: str, path: Path | None = None):
     return load(path).get(key, DEFAULTS.get(key))
 
 
-def put(key: str, value, path: Path = SETTINGS_FILE) -> None:
+def put(key: str, value, path: Path | None = None) -> None:
+    path = Path(path or SETTINGS_FILE)
     data = load(path)
     data[key] = value
-    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")

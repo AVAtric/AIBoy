@@ -76,6 +76,15 @@ ADDR_SUPERBALL = 0xFFB5
 POWER_SMALL, POWER_SUPER, POWER_SUPERBALL = 0, 1, 2
 POWER_NAMES = ("small", "super", "superball")
 
+
+def power_state(pyboy) -> int:
+    """POWER_SMALL / POWER_SUPER / POWER_SUPERBALL from Super Mario Land's RAM.
+    Transitions count as their destination: growing -> super, hit -> small."""
+    state = pyboy.get_memory_value(ADDR_POWERUP_STATE)
+    if state in (1, 2):
+        return POWER_SUPERBALL if pyboy.get_memory_value(ADDR_SUPERBALL) else POWER_SUPER
+    return POWER_SMALL
+
 # Observation types. "tiles" is the 16x20 tile grid with seven HUD scalars
 # (lives, coins, timer, x, world, level, power-up) in the top-left cells;
 # "pixels" is the raw screen (CNN).
@@ -219,12 +228,19 @@ class GameSpec:
     # modes. The other titles run through PyBoy's generic openai_gym
     # wrapper (pixels only) and are experimental CLI-only extras.
     supported: bool = False
+    name: str = ""                  # how the game is called in the window
+
+
+def display_name(game: str) -> str:
+    """'Super Mario Land' for 'mario'; the ROM name for anything unknown."""
+    spec = GAMES.get(game)
+    return spec.name if spec is not None and spec.name else game
 
 
 GAMES = {
-    "mario": GameSpec("mario.gb", "SUPER MARIOLAN", supported=True),
-    "kirby": GameSpec("kirby.gb", "KIRBY DREAM LA"),
-    "wario": GameSpec("wario.gb", "SUPERMARIOLAND"),   # Super Mario Land 3: Wario Land
+    "mario": GameSpec("mario.gb", "SUPER MARIOLAN", supported=True, name="Super Mario Land"),
+    "kirby": GameSpec("kirby.gb", "KIRBY DREAM LA", name="Kirby's Dream Land"),
+    "wario": GameSpec("wario.gb", "SUPERMARIOLAND", name="Wario Land"),   # Super Mario Land 3
 }
 SUPPORTED_GAMES = tuple(name for name, spec in GAMES.items() if spec.supported)
 ROM_SUFFIXES = (".gb", ".gbc")

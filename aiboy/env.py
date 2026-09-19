@@ -20,7 +20,7 @@ from aiboy.games import (  # noqa: F401
     ROM_DIR, ROM_SUFFIXES, SML_ALL_LEVELS, SML_BROKEN_LEVELS, SML_CLEAR_STATES,
     SML_DEATH_STATES, SUPPORTED_GAMES, GameSpec, RomInfo, _level_state_path,
     discover_roms, ensure_level_states, level_choices, level_targets, parse_start_level,
-    prepare_level_states, probe_rom,
+    power_state, prepare_level_states, probe_rom,
 )
 
 
@@ -310,12 +310,8 @@ class MarioEnv(gym.Env):
         return arr[..., np.newaxis]
 
     def power_state(self) -> int:
-        """POWER_SMALL / POWER_SUPER / POWER_SUPERBALL from the game's RAM.
-        Transitions count as their destination: growing -> super, hit -> small."""
-        state = self.pyboy.get_memory_value(ADDR_POWERUP_STATE)
-        if state in (1, 2):
-            return POWER_SUPERBALL if self.pyboy.get_memory_value(ADDR_SUPERBALL) else POWER_SUPER
-        return POWER_SMALL
+        """POWER_SMALL / POWER_SUPER / POWER_SUPERBALL (see games.power_state)."""
+        return power_state(self.pyboy)
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)

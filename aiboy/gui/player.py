@@ -8,7 +8,7 @@ using the GUI's `_pump` protocol:
 
     ("log", text)                 training-log line
     ("play_status", text)         screen-panel status line
-    ("play_stat", key, value)     one screen-panel live-episode stat
+    ("play_stat", key, value)     one live-game stat
     ("play_stats", {key: value})  the per-step stats, one event per step
     ("play_episode", {...})       a round finished: {"episode", "reward",
                                   "steps", "end"} (playback and preview)
@@ -22,10 +22,13 @@ per-step) pacing matters: a jump step holds the button for 10 frames while
 a walk step takes 4, so pacing per step would make jumps run 2.5x too fast
 and the canvas would only ever show the last frame of each step.
 
-Two entry points share one engine:
-  - `play()`     plays a fixed model for N episodes (Play tab, wizard step 4)
-  - `preview()`  follows a training run, reloading `best_model.zip` whenever
-                 it changes, until training ends (Train tab live preview)
+Three entry points share one engine:
+  - `play()`        plays a fixed model for N episodes (Play tab, wizard step 4)
+  - `preview()`     follows a training run, reloading `best_model.zip` whenever
+                    it changes, until training ends (Train tab live preview)
+  - `play_human()`  runs the plain game at real speed with the buttons the
+                    person holds (keyboard / mouse / controller, see
+                    controls.py) — no model, no environment, any ROM
 """
 from __future__ import annotations
 
@@ -38,12 +41,49 @@ from pathlib import Path
 
 import numpy as np
 
-from aiboy.games import DEFAULT_STALL_STEPS, DEFAULT_TIME_BUDGET, GAMES, ROM_DIR, prepare_level_states
+from aiboy.games import (DEFAULT_STALL_STEPS, DEFAULT_TIME_BUDGET, GAMES, POWER_NAMES, ROM_DIR,
+                         _level_state_path, display_name, power_state, prepare_level_states)
+from aiboy.gui.controls import BUTTONS, HeldButtons, action_name, diff_presses
 from aiboy.paths import ASSET_DIR, local_or_shipped
 
 GB_FPS = 60.0
 PREVIEW_STEP_SLEEP = 0.02   # cap the preview at ~50 env-steps/s so training keeps the CPU
 RESYNC_AFTER = 0.25         # if pacing falls this far behind, drop the backlog instead of racing
+
+
+class FramePacer:
+    """Holds every emulator frame to its wall-clock slot: `period` seconds
+    per frame (1/60 for real time), 0 = unthrottled. `reset()` after a
+    pause (a reset, a model load) so the time spent there is not caught up
+    by racing ahead."""
+
+    def __init__(self, period: float):
+        self.period = period
+        self.reset()
+
+    @classmethod
+    def for_speed(cls, speed_mult: float) -> FramePacer:
+        """A pacer at `speed_mult` times a real Game Boy (0 = unlimited)."""
+        return cls((1.0 / GB_FPS) / speed_mult if speed_mult > 0 else 0.0)
+
+    def reset(self) -> None:
+        self._deadline = time.perf_counter()
+
+    def wait(self) -> None:
+        if self.period <= 0:
+            return
+        self._deadline += self.period
+        now = time.perf_counter()
+        if self._deadline > now:
+            time.sleep(self._deadline - now)
+        elif now - self._deadline > RESYNC_AFTER:
+            self._deadline = now
+
+
+def screen_frame(pyboy) -> np.ndarray:
+    """The emulator's screen as an owned (144, 160, 3) uint8 array."""
+    arr = pyboy.botsupport_manager().screen().screen_ndarray()
+    return np.array(arr, dtype=np.uint8, copy=True)
 
 
 def intro_asset(name: str, assets: Path = ASSET_DIR) -> Path:
@@ -160,6 +200,23 @@ GAME_W, GAME_H = 160, 144
 SPEED_CHOICES = [("0.5×", 0.5), ("1× (real time)", 1.0), ("2×", 2.0),
                  ("4×", 4.0), ("Unlimited", 0.0)]
 
+HUMAN_STATS_EVERY = 6           # frames between two live-panel updates while a person plays (10 Hz)
+
+
+def _button_events():
+    """Game Boy button -> (press, release) PyBoy WindowEvents."""
+    from pyboy import WindowEvent as W
+    return {
+        "up": (W.PRESS_ARROW_UP, W.RELEASE_ARROW_UP),
+        "down": (W.PRESS_ARROW_DOWN, W.RELEASE_ARROW_DOWN),
+        "left": (W.PRESS_ARROW_LEFT, W.RELEASE_ARROW_LEFT),
+        "right": (W.PRESS_ARROW_RIGHT, W.RELEASE_ARROW_RIGHT),
+        "a": (W.PRESS_BUTTON_A, W.RELEASE_BUTTON_A),
+        "b": (W.PRESS_BUTTON_B, W.RELEASE_BUTTON_B),
+        "select": (W.PRESS_BUTTON_SELECT, W.RELEASE_BUTTON_SELECT),
+        "start": (W.PRESS_BUTTON_START, W.RELEASE_BUTTON_START),
+    }
+
 
 def episode_end_reason(info, steps: int, max_steps: int) -> str:
     """Human-readable reason an episode ended, from the env's last info dict."""
@@ -186,12 +243,12 @@ def episode_end_reason(info, steps: int, max_steps: int) -> str:
 class _Session:
     """One emulator + wrapped vec-env for a given observation setup.
 
-    `tick_period` > 0 paces every emulator frame to that many seconds
-    (1/60 for real time); 0 runs unthrottled.
+    `speed_mult` paces every emulator frame to that multiple of a real
+    Game Boy's speed; 0 runs unthrottled.
     """
 
     def __init__(self, game: str, obs_type: str, action_repeat: int, frame_stack: int,
-                 start_level, frames: LatestFrame, tick_period: float = 0.0,
+                 start_level, frames: LatestFrame, speed_mult: float = 0.0,
                  time_budget: int = DEFAULT_TIME_BUDGET, stall_steps: int = DEFAULT_STALL_STEPS):
         # Heavy imports (PyBoy, SB3 / torch) happen here, on the playback
         # thread, so the GUI window opens without loading them.
@@ -211,8 +268,7 @@ class _Session:
                            disable_renderer=False)
         self.pyboy.set_emulation_speed(0)
         self._frames = frames
-        self.tick_period = tick_period
-        self._deadline = time.perf_counter()
+        self.pacer = FramePacer.for_speed(speed_mult)
 
         if game == "mario":
             base = MarioEnv(self.pyboy, frame_skip=action_repeat, obs_type=obs_type,
@@ -230,26 +286,13 @@ class _Session:
                                 obs_type, frame_stack)
 
     def push_frame(self) -> None:
-        arr = self.pyboy.botsupport_manager().screen().screen_ndarray()
-        self._frames.set(np.array(arr, dtype=np.uint8, copy=True))
-
-    def start_pacing(self) -> None:
-        """Reset the frame clock (call after a reset or a model load so the
-        time spent there is not 'caught up' by racing ahead)."""
-        self._deadline = time.perf_counter()
+        self._frames.set(screen_frame(self.pyboy))
 
     def on_tick(self) -> None:
         """Called by the env after every emulator frame: publish it, then hold
         the frame until its wall-clock slot so playback runs at game speed."""
         self.push_frame()
-        if self.tick_period <= 0:
-            return
-        self._deadline += self.tick_period
-        now = time.perf_counter()
-        if self._deadline > now:
-            time.sleep(self._deadline - now)
-        elif now - self._deadline > RESYNC_AFTER:
-            self._deadline = now
+        self.pacer.wait()
 
     def close(self) -> None:
         try:
@@ -291,6 +334,14 @@ class EmbeddedPlayer:
         t.start()
         return t
 
+    def play_human(self, *, game: str, rom_path: Path, held: HeldButtons,
+                   stop: threading.Event, start_level: tuple[int, int] | None = None,
+                   speed_mult: float = 1.0) -> threading.Thread:
+        t = threading.Thread(target=self._human_loop, daemon=True,
+                             args=(game, rom_path, held, stop, start_level, speed_mult))
+        t.start()
+        return t
+
     # ---------- shared helpers ----------
 
     def _emit(self, *item) -> None:
@@ -326,9 +377,8 @@ class EmbeddedPlayer:
                 # Subprocess with timeout, so a level that cannot boot cannot
                 # wedge the GUI thread.
                 prepare_level_states(start_level)
-            tick_period = (1.0 / GB_FPS) / speed_mult if speed_mult > 0 else 0.0
             session = _Session(game, obs_type, action_repeat, frame_stack, start_level,
-                               self.frames, tick_period, time_budget, stall_steps)
+                               self.frames, speed_mult, time_budget, stall_steps)
             self._emit("play_status", f"loaded {model_path.name}")
             model = PPO.load(str(model_path), env=session.vec, device="cpu")
 
@@ -337,7 +387,7 @@ class EmbeddedPlayer:
                     break
                 obs = session.vec.reset()
                 session.push_frame()
-                session.start_pacing()
+                session.pacer.reset()
                 total, steps, done, clears = 0.0, 0, [False], 0
                 self._emit("play_stat", "episode", f"{ep + 1}/{episodes}")
                 while not done[0] and not stop.is_set():
@@ -430,3 +480,109 @@ class EmbeddedPlayer:
                 session.close()
             self._emit("log", "[preview] stopped\n")
             self._emit("play_status", "idle")
+
+
+    # ---------- a person plays ----------
+
+    def _human_loop(self, game, rom_path, held: HeldButtons, stop, start_level,
+                    speed_mult) -> None:
+        """The plain game, paced per frame like `play()`, pressing whatever
+        `held` says. Mario's HUD numbers go to the live panel; other ROMs
+        only show the buttons. Ends when `stop` is set."""
+        from pyboy import PyBoy
+        pyboy = None
+        events = _button_events()
+        pressed: frozenset[str] = frozenset()
+        pacer = FramePacer.for_speed(speed_mult)
+        summary: list[dict] = []
+        try:
+            rom_path = Path(rom_path)
+            if not rom_path.exists():
+                raise FileNotFoundError(f"ROM not found: {rom_path}")
+            title = display_name(game)
+            pyboy = PyBoy(str(rom_path), window_type="null", game_wrapper=True,
+                          disable_renderer=False)
+            pyboy.set_emulation_speed(0)
+            gw = pyboy.game_wrapper() if game == "mario" else None
+            if gw is not None and start_level is not None:
+                # The same save-states the agent trains from (made once, in
+                # a subprocess with a timeout).
+                missing = prepare_level_states(start_level, rom_path)
+                if missing:
+                    raise RuntimeError(f"Level {start_level[0]}-{start_level[1]} cannot be loaded.")
+                gw.start_game()
+                with open(_level_state_path(*start_level), "rb") as f:
+                    pyboy.load_state(f)
+            self._emit("play_status", f"you play {title}")
+            self._emit("play_stat", "episode", "you")
+
+            frame = 0
+            best = {"world": None, "score": 0, "coins": 0}
+            game_over_seen = False
+            pacer.reset()
+            while not stop.is_set():
+                now_held = held.held()
+                if now_held != pressed:
+                    press, release = diff_presses(pressed, now_held)
+                    for b in release:
+                        pyboy.send_input(events[b][1])
+                    for b in press:
+                        pyboy.send_input(events[b][0])
+                    pressed = now_held
+                    self._emit("play_stat", "action", action_name(pressed))
+                pyboy.tick()
+                self.frames.set(screen_frame(pyboy))
+                frame += 1
+                if gw is not None and frame % HUMAN_STATS_EVERY == 0:
+                    self._emit("play_stats", self._human_stats(pyboy, gw, frame, best))
+                    over = bool(gw.game_over())
+                    if over and not game_over_seen:
+                        self._emit("play_status", "game over — press START to play again")
+                    elif not over and game_over_seen:
+                        self._emit("play_status", f"you play {title}")
+                    game_over_seen = over
+                pacer.wait()
+            if gw is not None and best["world"] is not None:
+                w = best["world"]
+                summary.append({"reward": float(best["score"]), "steps": frame,
+                                "end": f"reached {w[0]}-{w[1]}, score {best['score']}"})
+                self._emit("play_status", f"you played {frame / GB_FPS:.0f} s: reached "
+                                          f"{w[0]}-{w[1]}, score {best['score']}, "
+                                          f"{best['coins']} coins")
+            else:
+                self._emit("play_status", f"you played {frame / GB_FPS:.0f} s")
+            self._emit("play_done", summary)
+        except Exception:
+            self._emit("play_error", traceback.format_exc())
+        finally:
+            if pyboy is not None:
+                for b in BUTTONS:
+                    try:
+                        pyboy.send_input(events[b][1])
+                    except Exception:
+                        pass
+                try:
+                    pyboy.stop(save=False)
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _human_stats(pyboy, gw, frame: int, best: dict) -> dict:
+        """Live-panel numbers for Super Mario Land while a person plays.
+        Also keeps `best` (furthest world, highest score / coins) for the
+        closing line."""
+        world = tuple(int(v) for v in gw.world)
+        score, coins = int(gw.score), int(gw.coins)
+        if world != (0, 0) and (best["world"] is None or world > best["world"]):
+            best["world"] = world
+        best["score"] = max(best["score"], score)
+        best["coins"] = max(best["coins"], coins)
+        return {
+            "world": f"{world[0]}-{world[1]}" if world != (0, 0) else "—",
+            "power": POWER_NAMES[power_state(pyboy)],
+            "lives": str(int(gw.lives_left)),
+            "coins": str(coins),
+            "reward": str(score),
+            "x": str(int(gw.level_progress)),
+            "steps": f"{int(gw.time_left)} left · {frame / GB_FPS:.0f} s",
+        }

@@ -10,10 +10,15 @@ aiboy.paths.local_or_shipped). Its LCD is a 10:9 window of
 frame at 1.5x; the photo is scaled so the frame lands on the LCD at the
 largest of LCD_SCALES the display has room for (`Geometry`; the window
 picks the scale, see app.choose_lcd_scale). `GameBoyView` is one canvas
-with three image items: the photo, the screen and the controls region,
-which is swapped for a version with a glow over the pressed buttons
-(composed with PIL once per action and cached). Hovering a button tells
-what it does.
+with three image items: the photo, the screen (on a drawn, exactly even
+dark rim: the photo's own shadow around the window is uneven, so that area
+is repainted in the bezel colour) and the controls region, which is
+swapped for a version with a glow over the pressed buttons (composed with
+PIL once per action and cached). Emulator frames arrive in PyBoy's four
+greys and are shown in the original Game Boy's four green shades
+(`dmg_tint`). Hovering a button tells
+what it does; when a person plays, pressing a button with the mouse holds
+it (`on_buttons`) and a click gives the canvas the keyboard focus.
 
 Without the photo (a bundle built without the asset) a plain drawn device
 with the same geometry is used.
@@ -25,6 +30,7 @@ from pathlib import Path
 
 from tkinter import ttk
 
+import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
 from aiboy.gui.widgets import Tooltip
@@ -37,7 +43,31 @@ GAME_W, GAME_H = 160, 144
 LCD_SCALES = (2.0, 1.75, 1.5)                  # emulator pixel scales, largest first
 
 # Everything below is in the photo's own pixels (measured from the image).
-LCD = (109, 99, 351, 317)                      # the blue window behind the glass
+LCD = (109, 99, 351, 317)                      # the window behind the glass (blue in the photo)
+LCD_PATCH = (104, 95, 354, 321)                # the window plus the photo's uneven shadow round it
+BEZEL = (86, 78, 89)                           # the glass bezel's colour next to the window
+LCD_OFF = (12, 14, 24)                         # the drawn rim between bezel and screen
+RIM = 2.5                                      # its width, in photo pixels
+
+# The DMG's four shades, from PyBoy's four greys (255, 153, 85, 0).
+DMG_SHADES = ((155, 188, 15), (139, 172, 15), (48, 98, 48), (15, 56, 15))
+_DMG_LUT = np.zeros((256, 3), dtype=np.uint8)
+for _g, _rgb in zip((255, 153, 85, 0), DMG_SHADES):
+    _DMG_LUT[_g] = _rgb
+for _v in range(256):                          # anything in between: the nearest shade
+    _DMG_LUT[_v] = _DMG_LUT[min((255, 153, 85, 0), key=lambda g: abs(g - _v))]
+
+
+def dmg_tint(frame: np.ndarray) -> np.ndarray:
+    """A grey emulator frame in the Game Boy's green shades; a coloured
+    frame (the boot video) unchanged."""
+    if frame.ndim != 3 or frame.shape[2] != 3:
+        return frame
+    sample = frame[::8, ::8]
+    if not (np.array_equal(sample[..., 0], sample[..., 1])
+            and np.array_equal(sample[..., 1], sample[..., 2])):
+        return frame
+    return _DMG_LUT[frame[..., 0]]
 LED = (64, 178)                                # battery LED centre
 PAD_BOX = (28, 440, 420, 650)                  # region that holds every button
 
@@ -86,9 +116,13 @@ class Geometry:
         self.lcd_scale = lcd_scale
         self.width, self.height = photo_size(lcd_scale)
         self.screen_w, self.screen_h = round(GAME_W * lcd_scale), round(GAME_H * lcd_scale)
-        lcd = self.box(LCD)
-        self.screen_x = (lcd[0] + lcd[2] - self.screen_w) // 2
-        self.screen_y = (lcd[1] + lcd[3] - self.screen_h) // 2
+        patch = self.box(LCD_PATCH)
+        self.screen_x = (patch[0] + patch[2] - self.screen_w) // 2
+        self.screen_y = (patch[1] + patch[3] - self.screen_h) // 2
+        self.rim = max(2, round(RIM * f))
+        self.rim_box = (self.screen_x - self.rim, self.screen_y - self.rim,
+                        self.screen_x + self.screen_w + self.rim,
+                        self.screen_y + self.screen_h + self.rim)
         self.led = (round(LED[0] * f), round(LED[1] * f))
         self.pad_box = self.box(PAD_BOX)
         self.regions = {key: (kind, self.box(b)) for key, (kind, b) in REGIONS.items()}
@@ -121,7 +155,7 @@ def _draw_fallback() -> Image.Image:
     d.rounded_rectangle((6, 6, PHOTO_W - 7, PHOTO_H - 7), radius=24, outline=(120, 120, 116),
                         width=2)
     d.rounded_rectangle((40, 62, 410, 350), radius=10, fill=(96, 92, 104))
-    d.rectangle(LCD, fill=(80, 120, 170))
+    d.rectangle(LCD_PATCH, fill=BEZEL)
     d.ellipse((LED[0] - 3, LED[1] - 3, LED[0] + 3, LED[1] + 3), fill=(90, 20, 20))
     d.text((40, 372), "GAME BOY", fill=(40, 40, 140))
     dark = (40, 40, 44)
@@ -172,6 +206,9 @@ def load_photo(path: Path = PHOTO, background: tuple[int, int, int] = (34, 34, 3
         img = _draw_fallback()
     if img.size != (PHOTO_W, PHOTO_H):
         img = img.resize((PHOTO_W, PHOTO_H), Image.LANCZOS)
+    # The window and the uneven shadow the photo has around it become plain
+    # bezel; the view draws its own, even rim under the screen.
+    ImageDraw.Draw(img).rectangle(LCD_PATCH, fill=BEZEL)
     img = Image.composite(img, Image.new("RGB", img.size, background), device_mask(img))
     if img.size != tuple(size):
         img = img.resize(size, Image.LANCZOS)
@@ -217,7 +254,9 @@ class GameBoyView(tk.Canvas):
     `Geometry`). `set_screen(photo_image)` puts a `screen_size` PhotoImage
     on the LCD; `show(action_name)` lights that action's buttons (None or
     "NOOP" clears them); `set_power(on)` drives the battery LED; hovering
-    a button shows its label."""
+    a button shows its label (plus the keys that press it, see
+    `set_key_hints`); `on_buttons(callback)` reports the buttons held down
+    with the mouse."""
 
     def __init__(self, parent: tk.Misc, lcd_scale: float = 1.5, **kw):
         geo = self.geo = Geometry(lcd_scale)
@@ -227,6 +266,7 @@ class GameBoyView(tk.Canvas):
                          bg="#%02x%02x%02x" % rgb, **kw)
         self._photo_img = ImageTk.PhotoImage(self.photo)
         self.create_image(0, 0, anchor="nw", image=self._photo_img)
+        self.create_rectangle(*geo.rim_box, fill="#%02x%02x%02x" % LCD_OFF, outline="")
         self._pad = self.photo.crop(geo.pad_box)
         self._cache: dict[frozenset[str], ImageTk.PhotoImage] = {}
         self._pressed: frozenset[str] = frozenset()
@@ -242,8 +282,14 @@ class GameBoyView(tk.Canvas):
                                      state="hidden")
         self._power = False
         self._hover: str | None = None
-        self._tip = Tooltip(self, lambda: LABELS.get(self._hover or "", ""))
+        self._key_hints: dict[str, str] = {}
+        self._tip = Tooltip(self, self._hover_text)
+        self._on_buttons = None
+        self._mouse_held: frozenset[str] = frozenset()
         self.bind("<Motion>", self._on_motion, add="+")
+        self.bind("<ButtonPress-1>", self._on_mouse_down, add="+")
+        self.bind("<ButtonRelease-1>", self._on_mouse_up, add="+")
+        self.bind("<Leave>", self._on_mouse_up, add="+")
 
     # ----- screen -----
 
@@ -306,3 +352,37 @@ class GameBoyView(tk.Canvas):
         self._tip.hide()
         if key:
             self._tip.schedule()
+
+    def set_key_hints(self, hints: dict[str, str]) -> None:
+        """Button -> the keys that press it ("↑ or W"), added to the hover labels."""
+        self._key_hints = dict(hints)
+
+    def _hover_text(self) -> str:
+        key = self._hover or ""
+        text = LABELS.get(key, "")
+        hint = self._key_hints.get(key)
+        if text and hint and hint != "—":
+            text += f" — key {hint}"
+        return text
+
+    # ----- mouse input -----
+
+    def on_buttons(self, callback) -> None:
+        """`callback(frozenset)` is called with the buttons held with the
+        mouse whenever that changes (a press on a button, then the release)."""
+        self._on_buttons = callback
+
+    def _report_mouse(self, held: frozenset[str]) -> None:
+        if held == self._mouse_held:
+            return
+        self._mouse_held = held
+        if self._on_buttons is not None:
+            self._on_buttons(held)
+
+    def _on_mouse_down(self, event) -> None:
+        self.focus_set()                        # so the keyboard reaches the game
+        key = self.button_at(event.x, event.y)
+        self._report_mouse(frozenset({key}) if key else frozenset())
+
+    def _on_mouse_up(self, _event=None) -> None:
+        self._report_mouse(frozenset())

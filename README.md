@@ -127,12 +127,14 @@ away: rest the pointer on a field, a checkbox or a ⓘ.
 <img src="assets/screenshot_play.png" width="300" align="right" alt="The Game Boy playing, with RIGHT, B and A lit">
 
 **Preview.** A photo of a real Game Boy with the emulator's picture on its
-LCD. Whatever produces something to watch shows here without switching
-tabs: a finished model, the live preview of a training run, the wizard's
-Watch step. The D-pad, A and B light up with every action the agent takes,
-hovering a button tells what it does, and the battery LED is on while the
-boot video, a playback or the live preview runs. Under the device a status
-line says what is playing and how each round ended.
+LCD, in the original's four green shades behind an even dark rim. Whatever
+produces something to watch shows here without switching tabs: a finished
+model, the live preview of a training run, the wizard's Watch step, your
+own game. The D-pad, A and B light up with every button
+pressed, hovering a button tells what it does (and which key it is), and
+the battery LED is on while the boot video, a playback or the live preview
+runs. Under the device a status line says what is playing and how each
+round ended.
 
 The photo (`assets/gb_interface.png`) is scaled so the 160 × 144 frame sits
 on the LCD at 2× when the display has room for the window, else 1.75× or
@@ -150,8 +152,9 @@ ignores them for one start.
 
 **Tracking.**
 
-- *Live episode*: round, world, power-up, lives, coins, reward, position,
-  steps and the action being pressed.
+- *Live game*: round, world, power-up, lives, coins, reward, position,
+  steps and the action being pressed; while you play, the score, the
+  game's clock and what you are pressing.
 - *Training*: status, reward, fps, elapsed time, episode length, progress
   bar and ETA of the current run, from every tab.
 - *Play a model*: every saved model of the game (best and final model of
@@ -159,8 +162,22 @@ ignores them for one start.
   **▶ Play**, **■ Stop**, **Clear**. Selecting a model applies the
   observation settings recorded in its `run.json`; **Advanced…** opens the
   step cap, random actions and the observation setup for older runs.
-- *Rounds played*: every finished round of the current playback or preview
-  with its reward, steps and how it ended.
+- *Play yourself*: the plain game on the Game Boy, at real speed, with the
+  keyboard, the mouse or a game controller. **Start** boots the game normally
+  (title screen, press START) or drops you straight into a level of Super
+  Mario Land; **🎮 Play yourself** starts, the same button stops. Standard
+  keys: arrows or W A S D move, X (or K, space) is A, Z (or J) is B, Enter
+  is START, Shift is SELECT; the buttons on the picture can be clicked. A
+  controller connected by USB or Bluetooth is picked up while the app runs
+  and shown next to *Controller* (a Switch Pro, Xbox or PlayStation pad, or
+  anything else SDL2 knows); as standard the D-pad or left stick move, A / X
+  = A, B / Y = B, + = START, − = SELECT. **Controls…** changes all of this:
+  click a cell, press the key or the controller button you want (right-click
+  adds a second one or clears), and it is saved in `settings.json` under
+  `controls` for next time. The window names the buttons the way your
+  controller does (a PlayStation ✕, a Switch −). Any ROM that boots can be
+  played, not only Super Mario Land. Each finished round of an agent's
+  playback is written to the Train log.
 
 Speed is paced per emulator frame, so real time is real time even though a
 jump holds the button for 10 frames and a walk step for 4.
@@ -521,14 +538,15 @@ python tests/gui/check_e2e_auto.py               # the same with "run everything
 python tests/gui/check_marathon.py               # train a marathon, play one life from 1-1
 python tests/gui/check_experience.py             # reuse, borrowing and preset improvement
 python tests/gui/check_play_visual.py            # play on the Game Boy: LCD, lit buttons, LED, rounds
+python tests/gui/check_human_play.py             # play yourself: keys reach the game, stats, stop
 python tests/gui/check_intro.py                  # boot video and sound (plays once)
 ```
 
 The unit tests cover the emulator-free modules: sweep expansion, the
 experience file and its rules, scoring and the winner rule, run discovery
-and clean-up, presets, level parsing, ROM discovery, and a guard that no GUI
-module imports PyBoy or Stable-Baselines3 at module level so the window
-keeps opening instantly.
+and clean-up, presets, level parsing, ROM discovery, the key and controller
+maps, and a guard that no GUI module imports PyBoy or Stable-Baselines3 at
+module level so the window keeps opening instantly.
 
 The GUI checks open the real window, answer their own dialogs, use a
 separate trial prefix (`e2etest`), their own experience and settings files,

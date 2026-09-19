@@ -7,8 +7,10 @@ Tabs, in workflow order:
   Presets     browse / edit / organise presets (see presets_tab.py)
   Experience  everything AIboy has tried so far (see experience_tab.py)
 then the Preview (a photo of a Game Boy with the emulator on its LCD and
-its buttons lit per action, see gameboy.py) and the Tracking panel (live episode, training progress, and the controls to
-play any saved model) to its right.
+its buttons lit per action, see gameboy.py) and the Tracking panel to its
+right: the live game, the training run's progress, the controls to play any
+saved model, and "Play yourself" (the plain game with the keyboard, the
+mouse or a game controller, see controls.py).
 
 Training and tuning run `main.py train` as subprocesses so the window stays
 responsive; playback runs on a background thread (player.py). All
@@ -38,9 +40,12 @@ from PIL import Image, ImageTk
 
 from aiboy import APP_NAME, presets, runs, settings, tuning
 from aiboy.experience import Experience, Record
-from aiboy.games import OBS_TYPES, RomInfo, discover_roms, level_choices, probe_rom
+from aiboy.games import (OBS_TYPES, SML_ALL_LEVELS, RomInfo, discover_roms, level_choices,
+                         probe_rom)
+from aiboy.gui.controls import ControlMap, Gamepad, HeldButtons, KeyboardInput
+from aiboy.gui.controls_dialog import ControlsDialog
 from aiboy.gui.experience_tab import ExperienceTab
-from aiboy.gui.gameboy import LCD_SCALES, GameBoyView, photo_size
+from aiboy.gui.gameboy import LCD_SCALES, GameBoyView, dmg_tint, photo_size
 from aiboy.gui.player import GAME_H, GAME_W, SPEED_CHOICES, EmbeddedPlayer, IntroVideo, LatestFrame
 from aiboy.gui.presets_tab import PresetsTab
 from aiboy.paths import DATA_DIR, FROZEN
@@ -73,6 +78,8 @@ FLASH_SECONDS = 6           # transient status-bar messages
 
 
 IDLE_SCREEN_TEXT = "No video"
+HUMAN_FROM_START = "from the start"     # the "Start:" choice that boots the game normally
+NO_GAMEPAD = "none — keyboard"
 INTRO_DISABLED = os.environ.get("AIBOY_NO_INTRO") == "1"      # tests: silent, no video
 
 
@@ -149,12 +156,22 @@ class AIboyGUI:
         self.stats_queue: queue.Queue = queue.Queue()
         self.frames = LatestFrame()
         self.player = EmbeddedPlayer(self.frames, self.stats_queue)
+        # What the person is holding (keyboard, mouse, controller) while
+        # playing, mapped by the remembered control scheme; the controller
+        # thread watches for a pad all the time.
+        self.held = HeldButtons()
+        self.controls = ControlMap.load()
+        self.gamepad = Gamepad(self.held, self.controls,
+                               on_change=lambda name: self.stats_queue.put(("gamepad", name)))
+        self._controls_dialog: ControlsDialog | None = None
 
         # Subprocess / thread state
         self.train_proc: subprocess.Popen | None = None
         self._train_stop_requested = False
         self.play_stop = threading.Event()
         self.play_thread: threading.Thread | None = None
+        self.play_mode = "agent"                # "agent" (a model plays) or "human"
+        self.play_rounds: list[dict] = []       # finished rounds of the current playback
         self.preview_stop = threading.Event()
         self.preview_thread: threading.Thread | None = None
         self.tune_stop = threading.Event()
@@ -190,6 +207,7 @@ class AIboyGUI:
         self._input_lock = WidgetLock()
 
         self._build_ui()
+        self.gamepad.start()
         self.rescan_roms()
         self.refresh_run_names()
         self.refresh_models()
@@ -267,6 +285,12 @@ class AIboyGUI:
         self.btn_tune_start.config(state=state)
         if not self.playing_active():
             self.btn_play_start.config(state=state)
+            # Anyone can play a ROM that boots, wrapper or not.
+            info = self.current_rom()
+            can_play = info is not None and not info.error and not self.busy()
+            self.btn_human.config(state="normal" if can_play else "disabled")
+            self.human_start_combo.config(
+                state="readonly" if self.game == DEFAULT_GAME else "disabled")
         if self.wizard is not None:
             self.wizard.on_game_changed(ok)
 
@@ -538,41 +562,41 @@ class AIboyGUI:
         self.gameboy = GameBoyView(parent, self.lcd_scale)
         self.gameboy.pack()
         self._init_canvas()
+        self.keyboard = KeyboardInput(self.gameboy, self.held, self.controls)
+        self.gameboy.on_buttons(lambda pressed: self.held.set("mouse", pressed))
+        self.gameboy.set_key_hints(self.controls.key_hints())
         self.play_status_var = tk.StringVar(value="idle")
         status = ttk.Label(parent, textvariable=self.play_status_var, font=MONO,
                            wraplength=self.gameboy.geo.width, anchor="center", justify="center")
         status.pack(fill="x", pady=(4, 0))
         tooltip(status, "What the screen is showing right now: the model being played, the "
-                        "live preview of a training run, or the last round's result.")
+                        "live preview of a training run, your own game, or how the last "
+                        "round ended.")
 
     def _build_tracking(self, parent: ttk.Frame) -> None:
-        """Live numbers next to the screen: the episode being played, the
-        training run's progress, and the controls to play a saved model."""
-        # Live episode: two columns of label / value pairs.
-        stats = ttk.LabelFrame(parent, text="Live episode", padding=(6, 2))
+        """Live numbers next to the screen: the game being played, the
+        training run's progress, the controls to play a saved model, and
+        Play yourself."""
+        # Live game: two columns of label / value pairs. The wording follows
+        # who is playing (see set_live_mode): the agent's reward and steps
+        # are a person's score and time.
+        stats = ttk.LabelFrame(parent, text="Live game", padding=(6, 2))
         stats.pack(fill="x", pady=(0, 6))
         keys = ["episode", "world", "power", "lives", "coins", "reward", "x", "steps", "action"]
-        names = {"episode": "round"}           # the player's "episode" is a round to the user
-        help_texts = {
-            "episode": "Round being played, of how many.",
-            "world": "Level Mario is in (world-level).",
-            "power": "Mario's size: 0 small, 1 big, 2 flower.",
-            "lives": "Lives left.", "coins": "Coins collected in this round.",
-            "reward": "Score the agent has earned in this round so far.",
-            "x": "How far right Mario is in the level (and the furthest he got).",
-            "steps": "Decisions the agent has made in this round.",
-            "action": "What the agent is pressing right now (also lit on the buttons).",
-        }
         self.play_stat_vars = {k: tk.StringVar(value="—") for k in keys}
+        self._live_labels: dict[str, ttk.Label] = {}
+        self._live_help: dict[str, str] = {}
         left = keys[:5]
         for col, column_keys in enumerate((left, keys[5:])):
             for row, key in enumerate(column_keys):
-                lbl = ttk.Label(stats, text=f"{names.get(key, key)}:", foreground=THEME.muted)
+                lbl = ttk.Label(stats, foreground=THEME.muted)
                 lbl.grid(row=row, column=col * 2, sticky="w", padx=(0 if col == 0 else 12, 4))
                 val = ttk.Label(stats, textvariable=self.play_stat_vars[key], font=MONO_BOLD,
                                 width=7 if col == 0 else 14, anchor="w")
                 val.grid(row=row, column=col * 2 + 1, sticky="w")
-                tooltip(lbl, help_texts[key], val)
+                self._live_labels[key] = lbl
+                tooltip(lbl, lambda k=key: self._live_help.get(k, ""), val)
+        self.set_live_mode("agent")
 
         # Training, always visible: status, key stats, progress + ETA.
         train_box = ttk.LabelFrame(parent, text="Training", padding=(6, 2))
@@ -657,16 +681,48 @@ class AIboyGUI:
         tooltip(self.btn_play_start, "Play the selected model on the Preview screen.")
         tooltip(self.btn_screen_clear, "Stop playback and blank the screen and the live numbers.")
 
-        # Every finished round of the current playback or preview, newest last.
-        rounds = ttk.LabelFrame(parent, text="Rounds played", padding=4)
-        rounds.pack(fill="both", expand=True, pady=(6, 0))
-        self.rounds_tree = make_table(rounds, [
-            ("round", "#", 30, "e", False), ("reward", "reward", 58, "e", False),
-            ("steps", "steps", 52, "e", False), ("end", "ended", 150, "w", True),
-        ], height=6)
-        tooltip(self.rounds_tree, "One line per finished round: the reward it earned, how many "
-                                  "decisions it took, and how it ended (died, cleared, time "
-                                  "budget, stalled…). Cleared when a new playback starts.")
+        # Play yourself: the plain game on the Game Boy, with the keyboard,
+        # the mouse on the picture, or a game controller.
+        head = ttk.Frame(parent)
+        ttk.Label(head, text="Play yourself").pack(side="left")
+        info_icon(head, lambda: self.controls.help_text(self.gamepad.pad_kind,
+                                                        self.gamepad.pad_name)).pack(
+            side="left", padx=(4, 0))
+        you = ttk.LabelFrame(parent, labelwidget=head, padding=6)
+        you.pack(fill="x", pady=(6, 0))
+        you.columnconfigure(1, weight=1)
+        start_lbl = ttk.Label(you, text="Start:")
+        start_lbl.grid(row=0, column=0, sticky="w")
+        self.human_start_var = tk.StringVar(value=HUMAN_FROM_START)
+        self.human_start_combo = ttk.Combobox(
+            you, textvariable=self.human_start_var, state="readonly", width=13,
+            values=[HUMAN_FROM_START] + [f"{w}-{l}" for (w, l) in SML_ALL_LEVELS])
+        self.human_start_combo.grid(row=0, column=1, sticky="w", padx=(4, 0))
+        tooltip(start_lbl, "Boot the game normally (title screen, press START), or jump "
+                           "straight into a level of Super Mario Land.", self.human_start_combo)
+        pad_lbl = ttk.Label(you, text="Controller:")
+        pad_lbl.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.gamepad_var = tk.StringVar(value=NO_GAMEPAD)
+        self.gamepad_label = ttk.Label(you, textvariable=self.gamepad_var, font=MONO,
+                                       foreground=THEME.muted, wraplength=TRACK_W - 90)
+        self.gamepad_label.grid(row=1, column=1, sticky="w", padx=(4, 0), pady=(4, 0))
+        tooltip(pad_lbl, lambda: (f"Game controller in use: {self.gamepad_var.get()}. "
+                                  if self.gamepad.pad_name else
+                                  "No game controller found. ") + (
+                                  f"Controllers are off: {self.gamepad.error}."
+                                  if self.gamepad.error else
+                                  "Plug one in by USB or pair it by Bluetooth; it is picked "
+                                  "up while the app runs."), self.gamepad_label)
+        self.btn_human = ttk.Button(you, text="🎮 Play yourself", command=self.toggle_human_play)
+        self.btn_human.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        tooltip(self.btn_human, lambda: (
+            "Stop your game." if self.play_mode == "human" and self.playing_active() else
+            "Play the game yourself on the Game Boy, at real speed: keyboard, controller, or "
+            "clicks on the picture's buttons. Hover the ⓘ for the keys."))
+        self.btn_controls = ttk.Button(you, text="Controls…", command=self.open_controls)
+        self.btn_controls.grid(row=2, column=1, sticky="e", pady=(8, 0))
+        tooltip(self.btn_controls, "Choose which keys and which controller buttons press each "
+                                   "Game Boy button. Remembered for next time.")
 
         # Advanced options live in a small dialog (see _open_play_advanced). The
         # observation setup is normally filled in from the model's run.json.
@@ -681,14 +737,59 @@ class AIboyGUI:
         self.play_stall_steps = presets.PRESET_DEFAULTS["stall_steps"]
         self._play_adv_win: tk.Toplevel | None = None
         self._play_widgets: list[tk.Widget] = [self.model_combo, ep_spin, speed_combo,
-                                               self.btn_play_start, self.btn_play_adv]
+                                               self.btn_play_start, self.btn_play_adv,
+                                               self.human_start_combo, self.btn_human]
+
+    def open_controls(self) -> None:
+        """The key / controller mapping window (one at a time)."""
+        if self._controls_dialog is not None and self._controls_dialog.win.winfo_exists():
+            self._controls_dialog.win.lift()
+            return
+
+        def closed():
+            self._controls_dialog = None
+            if self.playing_active() and self.play_mode == "human":
+                self.gamepad.active = True
+                self.gameboy.focus_set()
+
+        self._controls_dialog = ControlsDialog(self.gameboy, self.controls, self.gamepad,
+                                               on_change=self.on_controls_changed,
+                                               on_close=closed)
+
+    def on_controls_changed(self) -> None:
+        """A key or controller button was re-bound (already saved)."""
+        self.gameboy.set_key_hints(self.controls.key_hints())
+        self.keyboard.release_all()
+        self.gamepad.remap()
+
+    def set_live_mode(self, mode: str) -> None:
+        """Word the live panel for who is playing: "agent" or "human"."""
+        human = mode == "human"
+        names = {"episode": "game" if human else "round",
+                 "reward": "score" if human else "reward",
+                 "steps": "time" if human else "steps"}
+        self._live_help = {
+            "episode": "Who is playing: you, or the round the agent is on, of how many.",
+            "world": "Level Mario is in (world-level).",
+            "power": "Mario's size: small, super (mushroom) or superball (flower).",
+            "lives": "Lives left.", "coins": "Coins collected in this game.",
+            "reward": ("The game's score." if human else
+                       "Score the agent has earned in this round so far."),
+            "x": "How far right Mario is in the level" + (
+                "." if human else " (and the furthest he got)."),
+            "steps": ("Time left on the game's clock, and how long you have been playing."
+                      if human else "Decisions the agent has made in this round."),
+            "action": ("What you are pressing right now (also lit on the buttons)." if human
+                       else "What the agent is pressing right now (also lit on the buttons)."),
+        }
+        for key, lbl in self._live_labels.items():
+            lbl.config(text=f"{names.get(key, key)}:")
 
     def clear_rounds(self) -> None:
-        for row in self.rounds_tree.get_children():
-            self.rounds_tree.delete(row)
+        self.play_rounds.clear()
 
     def clear_screen(self) -> None:
-        """Blank the emulator view and the live-episode panel (stops playback first)."""
+        """Blank the emulator view and the live-game panel (stops playback first)."""
         if self.playing_active():
             self.play_stop.set()
         if self.preview_thread is not None and self.preview_thread.is_alive():
@@ -1791,15 +1892,8 @@ class AIboyGUI:
             return False
         raw_level = self.play_level_var.get()
 
-        self.intro_stop.set()
-        self.play_stop.clear()
-        self.gameboy.set_power(True)
-        self.btn_play_start.config(state="disabled")
-        self.btn_play_stop.config(state="normal")
+        self._begin_playback("agent")
         self.play_status_var.set(f"loading {model_path.name}…")
-        self.clear_rounds()
-        for v in self.play_stat_vars.values():
-            v.set("—")
         self.play_thread = self.player.play(
             model_path=model_path, game=self.game, obs_type=self.play_obs_type_var.get(),
             action_repeat=action_repeat, frame_stack=frame_stack,
@@ -1815,6 +1909,63 @@ class AIboyGUI:
     def stop_playing(self) -> None:
         self.play_stop.set()
 
+    def _begin_playback(self, mode: str) -> None:
+        """Take the screen for a playback of `mode` ("agent" / "human")."""
+        self.intro_stop.set()
+        self.play_stop.clear()
+        self.play_mode = mode
+        self.set_live_mode(mode)
+        self.gameboy.set_power(True)
+        self.btn_play_start.config(state="disabled")
+        self.btn_play_stop.config(state="normal")
+        self.btn_human.config(state="disabled" if mode == "agent" else "normal",
+                              text="■ Stop playing" if mode == "human" else "🎮 Play yourself")
+        self.clear_rounds()
+        for v in self.play_stat_vars.values():
+            v.set("—")
+
+    # ---------- Playing yourself ----------
+
+    def toggle_human_play(self) -> None:
+        if self.playing_active() and self.play_mode == "human":
+            self.stop_playing()
+        else:
+            self.start_human_play()
+
+    def start_human_play(self) -> bool:
+        """Run the plain game on the Game Boy with the person's own input
+        (keyboard on the picture, clicks on its buttons, a game controller).
+        True if started."""
+        if self.playing_active():
+            messagebox.showwarning("Play", "Playback already running. Stop it first.")
+            return False
+        if self.busy():
+            messagebox.showwarning(
+                "Play", "Training or tuning is running. Stop it first, or wait for it to finish.")
+            return False
+        info = self.current_rom()
+        if info is None:
+            messagebox.showerror("Play", f"No ROM for '{self.game}' in ROMs/.")
+            return False
+        if info.error:
+            messagebox.showerror("Play", f"'{self.game}' cannot boot: {info.error}")
+            return False
+        start_level = None
+        choice = self.human_start_var.get()
+        if self.game == DEFAULT_GAME and choice != HUMAN_FROM_START:
+            w, l = choice.split("-")
+            start_level = (int(w), int(l))
+        self._begin_playback("human")
+        self.play_status_var.set("starting…")
+        self.held.clear()
+        self.keyboard.set_enabled(True)
+        self.gamepad.active = True
+        self.gameboy.focus_set()
+        self.play_thread = self.player.play_human(
+            game=self.game, rom_path=info.path, held=self.held, stop=self.play_stop,
+            start_level=start_level)
+        return True
+
     # ---------- Event loop ----------
 
     def _pump(self) -> None:
@@ -1828,7 +1979,7 @@ class AIboyGUI:
 
         latest = self.frames.take()
         if latest is not None:
-            img = Image.fromarray(latest).resize(self.gameboy.screen_size, Image.NEAREST)
+            img = Image.fromarray(dmg_tint(latest)).resize(self.gameboy.screen_size, Image.NEAREST)
             self._tk_img = ImageTk.PhotoImage(img)
             self.gameboy.set_screen(self._tk_img)
 
@@ -1897,27 +2048,43 @@ class AIboyGUI:
             _, key, val = item
             if key in self.play_stat_vars:
                 self.play_stat_vars[key].set(val)
+            if key == "action":
+                self.gameboy.show(val)
         elif kind == "play_stats":
             for key, val in item[1].items():
                 if key in self.play_stat_vars:
                     self.play_stat_vars[key].set(val)
-            self.gameboy.show(item[1].get("action"))
+            if "action" in item[1]:
+                self.gameboy.show(item[1]["action"])
         elif kind == "play_episode":
             r = item[1]
-            self.rounds_tree.insert("", "end", values=(r["episode"], f"{r['reward']:.0f}",
-                                                       r["steps"], r["end"]))
-            self.rounds_tree.see(self.rounds_tree.get_children()[-1])
+            self.play_rounds.append(r)
+            self.append_log(f"[play] round {r['episode']}: reward {r['reward']:.0f}, "
+                            f"{r['steps']} steps, {r['end']}\n")
         elif kind == "play_done":
-            # Keep the last round's report ("Round 2: … died in 1-2") visible.
+            # Keep the last report ("Round 2: … died in 1-2", "you played…") visible.
             last = self.play_status_var.get()
-            self.play_status_var.set(f"done · {last}" if last.startswith("Round") else "done")
+            if last.startswith("Round"):
+                self.play_status_var.set(f"done · {last}")
+            elif not last.startswith("you played"):
+                self.play_status_var.set("done")
+            if self.play_mode == "human" and item[1]:
+                self.append_log(f"[play] you: {item[1][-1]['end']}\n")
             self._play_finished()
-            if self.wizard is not None:
+            if self.wizard is not None and self.play_mode == "agent":
                 self.wizard.on_play_done(item[1])
+        elif kind == "gamepad":
+            name = item[1]
+            self.gamepad_var.set(name or NO_GAMEPAD)
+            self.gamepad_label.config(foreground=THEME.ok if name else THEME.muted)
+            self.flash(f"Game controller connected: {name}" if name
+                       else "Game controller disconnected.")
+            if self._controls_dialog is not None:
+                self._controls_dialog.refresh()
         elif kind == "play_error":
             self.play_status_var.set("error")
             self._play_finished()
-            if self.wizard is not None:
+            if self.wizard is not None and self.play_mode == "agent":
                 self.wizard.on_play_error(item[1])
             messagebox.showerror("Play error", item[1])
         elif kind == "tune_live":
@@ -1998,6 +2165,10 @@ class AIboyGUI:
         self.gameboy.show(None)
         self.gameboy.set_power(self.preview_thread is not None and self.preview_thread.is_alive())
         self.btn_play_stop.config(state="disabled")
+        self.keyboard.set_enabled(False)
+        self.gamepad.active = False
+        self.held.clear()
+        self.btn_human.config(text="🎮 Play yourself")
         self._update_start_buttons()
 
     def set_inputs_disabled(self, disabled: bool) -> None:
@@ -2060,6 +2231,7 @@ class AIboyGUI:
         self.play_stop.set()
         self.preview_stop.set()
         self.tune_stop.set()
+        self.gamepad.stop()
         for proc in (self.tune_proc, self.train_proc):
             if proc is not None and proc.poll() is None:
                 interrupt(proc)
