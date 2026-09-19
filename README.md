@@ -161,11 +161,13 @@ makes the frames from `assets/gb_intro.mp4`, ffmpeg needed).
 
 The photo and the boot video in the repository carry AIboy lettering and no
 maker's marks (`tools/make_interface.py` and `tools/make_intro.py` produce
-them). If you own the real thing, put it next to the shipped file under the
+them). If you own the real thing, put it into the `assets/` folder under the
 same name with an `orig_` prefix (`assets/orig_gb_interface.png`,
-`assets/orig_gb_intro.npz`, `.wav`) and AIboy uses it instead. Those files
-are ignored by git and left out of release builds; `AIBOY_SHIPPED_ASSETS=1`
-ignores them for one start.
+`assets/orig_gb_intro.npz`, `.wav`) and AIboy uses it instead. In the source
+tree that is the repository's `assets/`; for a built app it is the `assets/`
+folder next to the app (the shipped files stay inside the bundle). Those
+files are ignored by git and left out of release builds;
+`AIBOY_SHIPPED_ASSETS=1` ignores them for one start.
 
 **Tracking.**
 

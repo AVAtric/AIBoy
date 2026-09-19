@@ -1,6 +1,8 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -13,19 +15,43 @@ class IntroAssetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             assets = Path(d)
             (assets / "gb_intro.npz").write_bytes(b"x")
-            self.assertEqual(player.intro_asset("gb_intro.npz", assets), assets / "gb_intro.npz")
+            self.assertEqual(player.intro_asset("gb_intro.npz", assets, assets), assets / "gb_intro.npz")
             (assets / "orig_gb_intro.npz").write_bytes(b"x")
-            self.assertEqual(player.intro_asset("gb_intro.npz", assets), assets / "orig_gb_intro.npz")
+            self.assertEqual(player.intro_asset("gb_intro.npz", assets, assets), assets / "orig_gb_intro.npz")
             # each file is chosen on its own: no orig wav -> the shipped wav
-            self.assertEqual(player.intro_asset("gb_intro.wav", assets), assets / "gb_intro.wav")
+            self.assertEqual(player.intro_asset("gb_intro.wav", assets, assets), assets / "gb_intro.wav")
 
     def test_photo_prefers_a_local_original(self):
         with tempfile.TemporaryDirectory() as d:
             assets = Path(d)
-            self.assertEqual(paths.local_or_shipped("gb_interface.png", assets), assets / "gb_interface.png")
+            self.assertEqual(paths.local_or_shipped("gb_interface.png", assets, assets), assets / "gb_interface.png")
             (assets / "orig_gb_interface.png").write_bytes(b"x")
-            self.assertEqual(paths.local_or_shipped("gb_interface.png", assets), assets / "orig_gb_interface.png")
+            self.assertEqual(paths.local_or_shipped("gb_interface.png", assets, assets),
+                             assets / "orig_gb_interface.png")
         self.assertIn(gameboy.PHOTO.name, ("gb_interface.png", "orig_gb_interface.png"))
+
+    def test_original_next_to_the_app_wins_over_the_bundle(self):
+        """A built app ships its artwork inside the bundle; the user's original
+        lives in the assets folder next to the app and must be found there.
+        AIBOY_SHIPPED_ASSETS=1 ignores originals wherever they are."""
+        with tempfile.TemporaryDirectory() as d:
+            bundle, local = Path(d) / "bundle", Path(d) / "local"
+            bundle.mkdir(); local.mkdir()
+            (bundle / "gb_interface.png").write_bytes(b"x")
+            self.assertEqual(paths.local_or_shipped("gb_interface.png", bundle, local), bundle / "gb_interface.png")
+            (bundle / "orig_gb_interface.png").write_bytes(b"x")
+            self.assertEqual(paths.local_or_shipped("gb_interface.png", bundle, local),
+                             bundle / "orig_gb_interface.png")
+            (local / "orig_gb_interface.png").write_bytes(b"x")
+            self.assertEqual(paths.local_or_shipped("gb_interface.png", bundle, local),
+                             local / "orig_gb_interface.png")
+            self.assertEqual(player.intro_asset("gb_interface.png", bundle, local),
+                             local / "orig_gb_interface.png")
+            with mock.patch.dict(os.environ, {"AIBOY_SHIPPED_ASSETS": "1"}):
+                self.assertEqual(paths.local_or_shipped("gb_interface.png", bundle, local),
+                                 bundle / "gb_interface.png")
+        # the source tree keeps both folders in one place
+        self.assertEqual(paths.LOCAL_ASSET_DIR, paths.ASSET_DIR)
 
     def test_shipped_photo_carries_no_maker_marks(self):
         """The repository's photo has AIboy lettering and an empty LCD: the

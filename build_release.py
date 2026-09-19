@@ -21,9 +21,10 @@ What it does
      it shadows the `sdl2` Python package on a case-insensitive disk, which
      left the built app without game-controller support.
   3. Assembles release/AIboy/: the app, a ROMs/ folder (your ROM files are
-     copied in unless --no-roms), an empty models/ folder and a README.txt.
-     The app keeps its own files (models, presets, experience.jsonl) next to
-     itself, never inside, so a newer build can replace it in place.
+     copied in unless --no-roms), empty models/ and assets/ folders and a
+     README.txt. The app keeps its own files (models, presets,
+     experience.jsonl, original artwork in assets/) next to itself, never
+     inside, so a newer build can replace it in place.
   4. Self-test: the built app probes a ROM and trains for a few hundred steps
      with two emulator processes, which exercises the frozen-app process
      spawning that training depends on.
@@ -147,7 +148,8 @@ def shipped_assets(sep: str) -> list[str]:
     """`--add-data` pairs for assets/: the shipped files only. A local
     `orig_*` original (the real device photo or boot video, see
     aiboy.paths.local_or_shipped) is for the developer's own window and must
-    never travel in a release."""
+    never travel in a release; whoever owns one puts it into the assets/
+    folder next to the built app."""
     args: list[str] = []
     for f in sorted((ROOT / "assets").iterdir()):
         if f.is_file() and not f.name.startswith("orig_") and not f.name.startswith("."):
@@ -232,6 +234,10 @@ README = """AIboy — teach an AI to play Super Mario Land
    the next search skips what it already knows and explores what it doesn't,
    and the Experience tab shows everything it has learned so far.
 4. The other tabs (Train, Tune, Presets) show and control the same runs in full.
+5. The Game Boy on the screen carries AIboy lettering and plays an AIboy boot
+   video. If you own the real artwork, put it into the assets folder next to
+   the app as orig_gb_interface.png (the photo), orig_gb_intro.npz and
+   orig_gb_intro.wav (the boot video and its chime); AIboy shows those instead.
 
 Built {built_at} on {chip}: {cores} cores, {memory_gb} GB memory.
 This build runs {n_envs} game emulators in parallel while training. It is made
@@ -249,6 +255,7 @@ def assemble_release(built: Path, profile: dict, with_roms: bool) -> Path:
     RELEASE_DIR.mkdir(parents=True)
     shutil.copytree(built, RELEASE_DIR / built.name, symlinks=True)
     (RELEASE_DIR / "models").mkdir()
+    (RELEASE_DIR / "assets").mkdir()          # for the user's own artwork (paths.LOCAL_ASSET_DIR)
     roms = RELEASE_DIR / "ROMs"
     roms.mkdir()
     if with_roms and (ROOT / "ROMs").exists():

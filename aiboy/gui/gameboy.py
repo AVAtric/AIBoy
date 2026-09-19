@@ -4,8 +4,9 @@ them, and the battery LED on while something is playing.
 
 `assets/gb_interface.png` is the device photo (the repository's copy, with
 AIboy lettering, made by tools/make_interface.py; a local
-`assets/orig_gb_interface.png` is used instead when present, see
-aiboy.paths.local_or_shipped). Its LCD is a 10:9 window of
+`orig_gb_interface.png` in the assets folder next to the app is used
+instead when present, see aiboy.paths.local_or_shipped). Its LCD is a
+10:9 window of
 242x218 px, so at the photo's native size it holds the 160x144 emulator
 frame at 1.5x; the photo is scaled so the frame lands on the LCD at the
 largest of LCD_SCALES the display has room for (`Geometry`; the window

@@ -45,7 +45,7 @@ import numpy as np
 from aiboy.games import (DEFAULT_STALL_STEPS, DEFAULT_TIME_BUDGET, GAMES, POWER_NAMES, ROM_DIR,
                          _level_state_path, display_name, power_state, prepare_level_states)
 from aiboy.gui.controls import BUTTONS, HeldButtons, action_name, diff_presses
-from aiboy.paths import ASSET_DIR, local_or_shipped
+from aiboy.paths import ASSET_DIR, LOCAL_ASSET_DIR, local_or_shipped
 
 GB_FPS = 60.0
 RESYNC_AFTER = 0.25         # if pacing falls this far behind, drop the backlog instead of racing
@@ -97,11 +97,12 @@ def screen_frame(pyboy) -> np.ndarray:
     return np.array(arr, dtype=np.uint8, copy=True)
 
 
-def intro_asset(name: str, assets: Path = ASSET_DIR) -> Path:
+def intro_asset(name: str, assets: Path = ASSET_DIR, local: Path = LOCAL_ASSET_DIR) -> Path:
     """Path of a boot-video asset: the shipped `assets/<name>` (the "AIboy"
-    clip made by tools/make_intro.py), or a local `orig_<name>` next to it
-    when there is one (see aiboy.paths.local_or_shipped)."""
-    return local_or_shipped(name, assets)
+    clip made by tools/make_intro.py), or a local `orig_<name>` when there
+    is one, next to the app or next to the shipped file (see
+    aiboy.paths.local_or_shipped)."""
+    return local_or_shipped(name, assets, local)
 
 
 INTRO_FRAMES = intro_asset("gb_intro.npz")
@@ -146,7 +147,7 @@ def play_sound(path: Path):
 
 class IntroVideo:
     """The start-up boot video: frames from assets/gb_intro.npz (or a local
-    assets/orig_gb_intro.npz, see `intro_asset`) shown on the canvas in step
+    orig_gb_intro.npz, see `intro_asset`) shown on the canvas in step
     with the wall clock while the WAV plays. `idle_frame()` is the last frame
     with the logo visible, used as the "No video" screen."""
 

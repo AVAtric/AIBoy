@@ -36,20 +36,26 @@ else:
     DATA_DIR = BUNDLE_DIR
 
 PROFILE_FILE = BUNDLE_DIR / "system_profile.json"
-ASSET_DIR = BUNDLE_DIR / "assets"
+ASSET_DIR = BUNDLE_DIR / "assets"            # the shipped artwork (inside the bundle when frozen)
+LOCAL_ASSET_DIR = DATA_DIR / "assets"        # the user's own artwork, next to the app
 
 
-def local_or_shipped(name: str, assets: Path = ASSET_DIR) -> Path:
+def local_or_shipped(name: str, assets: Path = ASSET_DIR, local: Path = LOCAL_ASSET_DIR) -> Path:
     """Path of an asset that exists in two versions: the one the repository
     ships as `assets/<name>` (the AIboy artwork: the photo made by
     tools/make_interface.py, the boot video by tools/make_intro.py) and an
-    original, `assets/orig_<name>`, that is never distributed (.gitignore,
-    build_release.py) but is used instead when someone has put one there.
-    AIBOY_SHIPPED_ASSETS=1 ignores the originals (README screenshots, tests)."""
-    orig = assets / f"orig_{name}"
-    if os.environ.get("AIBOY_SHIPPED_ASSETS") or not orig.exists():
-        return assets / name
-    return orig
+    original, `orig_<name>`, that is never distributed (.gitignore,
+    build_release.py) but is used instead when someone has put one there:
+    in `local` (the assets folder next to the app, where a release's user
+    can reach it) or in `assets` (the shipped folder; in the source tree the
+    two are the same folder). AIBOY_SHIPPED_ASSETS=1 ignores the originals
+    (README screenshots, tests)."""
+    if not os.environ.get("AIBOY_SHIPPED_ASSETS"):
+        for folder in (local, assets):
+            orig = folder / f"orig_{name}"
+            if orig.exists():
+                return orig
+    return assets / name
 
 # Everything AIboy has learned from its trials and runs (see experience.py).
 # Tests point this at a scratch file so they never touch the real memory.
