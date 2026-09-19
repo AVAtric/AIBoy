@@ -25,15 +25,39 @@ class LevelSpecTests(unittest.TestCase):
         self.assertEqual(env.level_targets("1-2"), [(1, 2)])
         self.assertEqual(env.level_targets("marathon"), list(env.SML_ALL_LEVELS))
 
-    def test_mario_action_table_is_consistent(self):
-        self.assertEqual(len(env.MarioEnv.ACTIONS), len(env.MarioEnv.RELEASES))
-        self.assertEqual(len(env.MarioEnv.ACTIONS), len(env.MarioEnv.ACTION_NAMES))
-        self.assertEqual(env.MarioEnv.ACTION_NAMES[0], "NOOP")
+    def test_action_tables_are_consistent(self):
+        for game, cls in env.ENV_CLASSES.items():
+            self.assertEqual(len(cls.ACTIONS), len(cls.ACTION_NAMES), game)
+            self.assertEqual(cls.ACTION_NAMES[0], "NOOP")
+            self.assertEqual(cls.ACTIONS[0], ())
+            for i, presses in enumerate(cls.ACTIONS):
+                releases = cls.releases(i)
+                self.assertEqual(len(releases), len(presses), (game, i))
+                for press, release in zip(presses, releases):
+                    self.assertEqual(env.RELEASE_OF[press], release)
+            self.assertTrue(issubclass(cls, env.GameBoyEnv))
 
     def test_game_registry(self):
-        self.assertEqual(env.SUPPORTED_GAMES, ("mario",))
-        self.assertIn("kirby", env.GAMES)
+        self.assertEqual(env.SUPPORTED_GAMES, ("mario", "kirby"))
+        self.assertEqual(set(env.ENV_CLASSES), set(env.SUPPORTED_GAMES))
+        self.assertIn("wario", env.GAMES)
         self.assertIs(env.GAMES, games.GAMES)          # env re-exports games.py
+        self.assertTrue(games.GAMES["mario"].levels)
+        self.assertFalse(games.GAMES["kirby"].levels)
+        self.assertEqual(games.env_version("mario"), games.ENV_VERSION)
+        self.assertNotEqual(games.env_version("kirby"), games.env_version("mario"))
+        self.assertEqual(games.env_version("tetris"), "generic-1")
+
+    def test_level_modes_are_mario_only(self):
+        self.assertIsNone(games.check_start_level("mario", "marathon"))
+        self.assertIsNone(games.check_start_level("kirby", "default"))
+        self.assertIsNone(games.check_start_level("kirby", None))
+        self.assertIn("Kirby", games.check_start_level("kirby", "1-1"))
+        self.assertIn("level", games.check_start_level("wario", "random"))
+        with self.assertRaises(ValueError):
+            env.make_env("kirby", None, start_level="2-1")
+        with self.assertRaises(ValueError):
+            env.make_env("tetris", None)
 
     def test_light_modules_have_no_heavy_top_level_imports(self):
         """The GUI must open without loading PyBoy / SB3 / torch, and the
@@ -172,6 +196,57 @@ class ObservationTests(unittest.TestCase):
                 return None
         with self.assertRaises(ValueError):
             env.MarioEnv(FakePyBoy(), obs_type="voxels")
+        with self.assertRaises(ValueError):                    # no wrapper at all
+            env.KirbyEnv(FakePyBoy(), obs_type="tiles")
+
+    @unittest.skipUnless((games.ROM_DIR / "kirby.gb").exists(), "needs ROMs/kirby.gb")
+    def test_kirby_env_plays_and_rewards_progress(self):
+        import numpy as np
+        from pyboy import PyBoy
+        pb = PyBoy(str(games.ROM_DIR / "kirby.gb"), window_type="null", game_wrapper=True,
+                   disable_renderer=True)
+        try:
+            e = env.make_env("kirby", pb, obs_type="tiles", stall_steps=30)
+            self.assertIsInstance(e, env.KirbyEnv)
+            obs, _ = e.reset()
+            self.assertEqual(obs.shape, (16, 20, 1))
+            self.assertTrue(np.isfinite(obs).all() and obs.min() >= 0.0 and obs.max() <= 1.0)
+            self.assertEqual(obs[0, 0, 0], 1.0)                    # full health
+            total, furthest = 0.0, 0
+            right = e.ACTION_NAMES.index("RIGHT")
+            for _ in range(40):                                    # walk right: progress pays
+                _, r, term, trunc, info = e.step(right)
+                total += r
+                furthest = max(furthest, info["x"])
+                if term or trunc:
+                    break
+            self.assertGreater(furthest, 50, info)
+            self.assertGreater(total, 0.0)
+            self.assertIn("health", info)
+            self.assertEqual(info["lives"], 4)
+            # standing still trips the stall rule (no timer in this game)
+            for _ in range(200):
+                _, r, term, trunc, info = e.step(0)
+                if term or trunc:
+                    break
+            self.assertTrue(trunc and info["stalled"], info)
+            obs, _ = e.reset()                                     # back to the start
+            self.assertEqual(e.progress(), int(obs[0, 2, 0] * 8192))
+            self.assertLess(e.progress(), 100)
+        finally:
+            pb.stop(save=False)
+
+    @unittest.skipUnless((games.ROM_DIR / "kirby.gb").exists(), "needs ROMs/kirby.gb")
+    def test_make_pyboy_env_builds_kirby_with_pixels(self):
+        e = env.make_pyboy_env("kirby", obs_type="pixels", action_repeat=2)
+        try:
+            obs, _ = e.reset()
+            self.assertEqual(obs.shape, (144, 160, 3))
+            obs, r, term, trunc, info = e.step(1)
+            self.assertEqual(obs.shape, (144, 160, 3))
+            self.assertIn("score", info)
+        finally:
+            e.close()
 
 
 class FormFieldTests(unittest.TestCase):
@@ -212,10 +287,15 @@ class RomDiscoveryTests(unittest.TestCase):
         self.assertFalse(mario.runnable)
         self.assertTrue(mario.playable)
         kirby = env.RomInfo("kirby", Path("ROMs/kirby.gb"))
-        self.assertEqual(kirby.status()[0], "checking")
-        self.assertTrue(kirby.playable)
+        self.assertEqual(kirby.status()[0], "ok")            # supported like Mario
+        self.assertTrue(kirby.playable and kirby.runnable)
         kirby.probed, kirby.title, kirby.has_wrapper = True, "KIRBY DREAM LA", True
-        self.assertEqual(kirby.status()[0], "experimental")
+        self.assertEqual(kirby.status()[0], "ok")
+        wario = env.RomInfo("wario", Path("ROMs/wario.gb"))
+        self.assertEqual(wario.status()[0], "checking")
+        self.assertTrue(wario.playable)
+        wario.probed, wario.title, wario.has_wrapper = True, "SUPERMARIOLAND", True
+        self.assertEqual(wario.status()[0], "experimental")
         other = env.RomInfo("tetris", Path("ROMs/tetris.gb"), probed=True, title="TETRIS",
                             has_wrapper=False)
         self.assertEqual(other.status()[0], "playable")      # any ROM that boots: play it
@@ -223,7 +303,7 @@ class RomDiscoveryTests(unittest.TestCase):
         broken = env.RomInfo("bad", Path("ROMs/bad.gb"), probed=True, error="boom")
         self.assertEqual(broken.status()[0], "unsupported")
         self.assertFalse(broken.playable)
-        self.assertFalse(kirby.runnable)
+        self.assertFalse(wario.runnable)
 
     @unittest.skipUnless((env.ROM_DIR / "mario.gb").exists(), "needs ROMs/mario.gb")
     def test_probe_real_rom(self):

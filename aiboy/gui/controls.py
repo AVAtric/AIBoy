@@ -393,15 +393,17 @@ class KeyboardInput:
 
 
 def _load_sdl():
-    """PySDL2, or None when it is not installed / its library is missing.
-    Imported lazily and quietly (pysdl2-dll announces itself with a warning)."""
+    """(PySDL2, None), or (None, why) when it is not installed or its library
+    cannot be loaded. Imported lazily and quietly (pysdl2-dll announces
+    itself with a warning); the reason is kept because a built app can have
+    the module and still fail to find the library."""
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             import sdl2
-        return sdl2
-    except Exception:
-        return None
+        return sdl2, None
+    except Exception as e:
+        return None, f"PySDL2 could not be loaded: {e}"
 
 
 class _Pads:
@@ -561,9 +563,9 @@ class Gamepad(threading.Thread):
     # ----- the thread -----
 
     def run(self) -> None:
-        sdl2 = _load_sdl()
+        sdl2, why = _load_sdl()
         if sdl2 is None:
-            self._fail("PySDL2 is not installed")
+            self._fail(why or "PySDL2 is not installed")
             return
         try:
             # Without this SDL drops pad input while no SDL window has the

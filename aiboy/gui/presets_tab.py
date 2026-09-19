@@ -238,7 +238,7 @@ class PresetsTab:
         """Starting values for a new preset: the selected one, else the recommended."""
         if self._current in self._all:
             return dict(self._all[self._current])
-        return dict(self._all.get(presets.RECOMMENDED_PRESET)
+        return dict(self._all.get(presets.recommended_for(self.app.game))
                     or next(iter(self._all.values()), {"game": self.app.game}))
 
     def new(self) -> None:

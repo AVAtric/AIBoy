@@ -50,7 +50,7 @@ try:
 
     # ---- presets tab ----
     pt = app.presets_tab
-    rows = pt.tree.get_children(); assert len(rows) == len(presets.load_all())
+    rows = pt.tree.get_children(); assert len(rows) == len(presets.sorted_names(presets.load_all(), app.game))
     app.preset_var.set(presets.RECOMMENDED_PRESET); app.apply_preset()   # Train tab follows edits below
     pt.tree.selection_set(presets.RECOMMENDED_PRESET); pt._on_select(); root.update()
     assert pt.kind_var.get() == "(built-in)" and str(pt.form.widgets[0].cget("state")) == "normal"

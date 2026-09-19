@@ -65,7 +65,7 @@ def insight_text(exp: experience.Experience, record: experience.Record | None,
     cfg = record.config
     task_name = (f"{mode_label(cfg)} · {cfg.get('obs_type')} · "
                  f"{tuning.format_steps(int(cfg.get('timesteps', 0)))}-step tests")
-    if record.env_version != experience.ENV_VERSION:
+    if record.env_version != experience.current_env_version(record.config):
         return (f"{task_name}: recorded with an older version of the game logic "
                 f"({record.env_version}); kept for reference, never reused.")
     know = exp.best_for_task(cfg, metric)

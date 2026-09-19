@@ -17,13 +17,20 @@ class PresetTests(unittest.TestCase):
         self._patch.stop()
         self._tmp.cleanup()
 
-    def test_builtins_are_complete_and_mario_only(self):
+    def test_builtins_are_complete_and_for_supported_games(self):
+        from aiboy.games import SUPPORTED_GAMES
+        games_seen = set()
         for name, cfg in presets.BUILTIN_PRESETS.items():
             missing = set(presets.PRESET_FIELDS) - set(cfg) - set(presets.PRESET_DEFAULTS)
             self.assertFalse(missing, f"{name} lacks {missing}")
-            self.assertEqual(cfg["game"], "mario", name)
+            self.assertIn(cfg["game"], SUPPORTED_GAMES, name)
+            self.assertTrue(name.startswith(("Mario — ", "Kirby — ")), name)
+            games_seen.add(cfg["game"])
+        self.assertEqual(games_seen, set(SUPPORTED_GAMES))      # every trainable game ships presets
         self.assertIn(presets.RECOMMENDED_PRESET, presets.BUILTIN_PRESETS)
         self.assertIn(presets.SMOKE_TEST_PRESET, presets.BUILTIN_PRESETS)
+        for game in SUPPORTED_GAMES:
+            self.assertIn(presets.recommended_for(game), presets.BUILTIN_PRESETS)
 
     def test_user_presets_roundtrip(self):
         self.assertEqual(presets.load_user(), {})
@@ -110,3 +117,18 @@ class PresetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KirbyPresetTests(unittest.TestCase):
+    def test_every_game_has_a_recommended_preset_that_leads_its_list(self):
+        from aiboy import presets
+        allp = presets.load_all()
+        for game in ("mario", "kirby"):
+            names = presets.sorted_names(allp, game)
+            self.assertTrue(names, game)
+            self.assertEqual(names[0], presets.recommended_for(game))
+            for n in names:
+                self.assertEqual(allp[n]["game"], game)
+        kirby = allp[presets.recommended_for("kirby")]
+        self.assertEqual(kirby["start_level"], "default")      # no level modes
+        self.assertGreater(kirby["stall_steps"], 0)              # no timer: the stall rule ends attempts

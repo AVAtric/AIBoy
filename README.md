@@ -22,7 +22,9 @@ learner, and a desktop app wraps the whole workflow in plain language.
 - **Command line and a one-command build** for scripts, remote machines and a
   standalone app.
 
-Only Super Mario Land is supported in this version (see [Roadmap](#roadmap)).
+Two games can be trained in this version: Super Mario Land and Kirby's
+Dream Land (see [Roadmap](#roadmap) for the rest). Any ROM that boots can
+be played by hand.
 
 ---
 
@@ -370,10 +372,34 @@ the model was trained with.
 
 ## How it works
 
-### The Mario environment
+### The game environments
 
-`MarioEnv` (`aiboy/env.py`) wraps PyBoy's Super Mario Land wrapper as a
-Gymnasium env.
+`aiboy/env.py` holds one base class and one environment per game:
+
+- **`GameBoyEnv`**, the base every game builds on: held-button actions,
+  pixel or tile observations, the frame loop (the GUI's per-frame callback
+  paints and paces there), start / reset through PyBoy's game wrapper, and
+  the furthest-point tracker behind the stall rule. A game adds its action
+  table, its tile grid and its reward, nothing else.
+- **`MarioEnv`** for Super Mario Land (below) and **`KirbyEnv`** for
+  Kirby's Dream Land. `ENV_CLASSES` maps a game to its class; a ROM
+  without one still runs through PyBoy's generic env from the command
+  line (pixels only, no shaping).
+
+**Kirby's Dream Land** has no position counter, so progress is the
+screen's scroll to the right (accumulated, with the 256-pixel wrap
+unwound) plus Kirby's own place on the screen (RAM `D05C`). Eleven actions:
+NOOP, RIGHT, LEFT, JUMP, RIGHT+JUMP, LEFT+JUMP, INHALE, RIGHT+INHALE,
+LEFT+INHALE, UP, DOWN. Reward per step: `1 × new progress` `+ 0.05 × score
+gained` `− 50` per point of health lost `− 0.03`; a death is `− 500` and
+ends the attempt, which always starts at the beginning of the game. The
+game has no timer, so the *time budget* does nothing for Kirby; the Kirby
+presets set a **stall limit** of 400 steps instead, and a hard cap of 6 000
+steps per attempt makes sure an evaluation always ends. Tiles: PyBoy's
+`game_area()` scaled into [0, 1], with health, lives and progress in the
+first three cells.
+
+**Super Mario Land** (`MarioEnv`):
 
 - **Held-button actions.** Buttons stay pressed for the whole
   `action_repeat` window; jump actions hold A for extra frames so Mario
@@ -398,8 +424,8 @@ Gymnasium env.
   steps); after that it is truncated without a death penalty. An optional
   **stall limit** (steps without a new furthest x) is off by default.
 
-Any change here changes what a score means: bump `ENV_VERSION` in
-`aiboy/games.py`.
+Any change here changes what a score means: bump the game's entry in
+`ENV_VERSIONS` in `aiboy/games.py`.
 
 ### Level modes
 
@@ -567,7 +593,7 @@ and writes screenshots of the window mid-play into it (macOS).
 | Symptom | What to do |
 |---------|------------|
 | `ROM not found: ROMs/mario.gb` | Place your ROM there (see Install). |
-| Game shows amber | You can play it yourself; only Super Mario Land can be trained. If it *is* Super Mario Land, check that `mario.gb` is the original cartridge. |
+| Game shows amber | You can play it yourself; only Super Mario Land and Kirby's Dream Land can be trained. If it *is* one of those, check that `mario.gb` / `kirby.gb` is the original cartridge. |
 | Game shows red | The ROM does not boot in PyBoy; the text says why. |
 | The wizard says every variation is already known | Raise *Effort* (longer trials are a new task), pick a fixed set under *Vary*, or **Forget all…** on the Experience tab. |
 | Training plateaus | Raise `ent_coef` to 0.02–0.05, sweep `ent_coef × learning_rate` on Tune, or try `pixels`. |
@@ -578,9 +604,11 @@ and writes screenshots of the window mid-play into it (macOS).
 
 ## Roadmap
 
-- **Kirby's Dream Land and Wario Land.** A generic path exists (PyBoy's
-  default wrapper, pixel observations, CLI only) but is untested and has no
-  level modes or reward shaping.
+- **Kirby's Dream Land: stages.** The environment rewards getting further,
+  score and health; stage clears and boss fights are not yet recognised as
+  events, and there are no level modes like Mario's.
+- **Wario Land.** Only the generic path (PyBoy's default wrapper, pixel
+  observations, CLI only), untested, no reward shaping.
 - Curriculum training across level modes from inside the wizard.
 - Sharing experience between computers automatically.
 

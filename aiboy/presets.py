@@ -93,18 +93,29 @@ DEFAULT_CONFIG: dict = {
 #   - "1-1", "2-1"…  → FIXED level. Same level every episode; death or
 #                       clear terminates and next episode replays the same
 #                       state. Best for drilling one hard level.
-def _mario(start_level: str, timesteps: int, *, checkpoint_freq: int, eval_freq: int,
-           ent_coef: float = 0.01, n_envs: int = 10, n_steps: int = 512, batch_size: int = 256,
-           n_eval_episodes: int = 3, obs_type: str = "tiles") -> dict:
-    """A shipped Mario preset: the common PPO settings plus what differs."""
+def _preset(game: str, start_level: str, timesteps: int, *, checkpoint_freq: int,
+            eval_freq: int, ent_coef: float = 0.01, n_envs: int = 10, n_steps: int = 512,
+            batch_size: int = 256, n_eval_episodes: int = 3, obs_type: str = "tiles",
+            **extra) -> dict:
+    """A shipped preset: the common PPO settings plus what differs."""
     return {
-        "game": "mario", "obs_type": obs_type, "start_level": start_level,
+        "game": game, "obs_type": obs_type, "start_level": start_level,
         "timesteps": timesteps, "n_envs": n_envs, "ent_coef": ent_coef,
         "learning_rate": 2.5e-4, "n_steps": n_steps, "batch_size": batch_size, "n_epochs": 4,
         "action_repeat": 4, "frame_stack": 4, "seed": 0,
         "checkpoint_freq": checkpoint_freq, "eval_freq": eval_freq,
-        "n_eval_episodes": n_eval_episodes, "device": "cpu",
+        "n_eval_episodes": n_eval_episodes, "device": "cpu", **extra,
     }
+
+
+def _mario(start_level: str, timesteps: int, **kw) -> dict:
+    return _preset("mario", start_level, timesteps, **kw)
+
+
+def _kirby(timesteps: int, **kw) -> dict:
+    """A Kirby preset: no level modes, no timer, so the stall rule ends an
+    attempt that stops getting further (see env.KirbyEnv)."""
+    return _preset("kirby", "default", timesteps, stall_steps=400, ent_coef=0.02, **kw)
 
 
 _HARDCODED_BUILTINS: dict[str, dict] = {
@@ -146,10 +157,24 @@ _HARDCODED_BUILTINS: dict[str, dict] = {
     "Mario — Pixels CNN (~2 h for 500k)": _mario(
         "default", 500_000, checkpoint_freq=25_000, eval_freq=10_000, ent_coef=0.02,
         obs_type="pixels", n_envs=4, n_steps=256),
+    # ---- Kirby's Dream Land: from the start of the game, every attempt
+    #      ends on a death; reward for getting further, score and health. ----
+    "Kirby — Quick smoke test (30 s)": _kirby(
+        4_000, checkpoint_freq=4_000, eval_freq=4_000, n_envs=2, n_steps=128, batch_size=128,
+        n_eval_episodes=1),
+    "Kirby — Dream Land, recommended (~15 min)": _kirby(
+        2_000_000, checkpoint_freq=100_000, eval_freq=25_000),
+    "Kirby — Dream Land, extended (~1 h)": _kirby(
+        8_000_000, checkpoint_freq=250_000, eval_freq=100_000),
+    "Kirby — Dream Land, overnight (~8 h)": _kirby(
+        60_000_000, checkpoint_freq=500_000, eval_freq=250_000),
 }
 
 RECOMMENDED_PRESET = "Mario — Campaign, recommended (~15 min)"
 SMOKE_TEST_PRESET = "Mario — Quick smoke test (30 s)"
+# The preset a game's list opens on (the first sorted built-in otherwise).
+RECOMMENDED_BY_GAME = {"mario": RECOMMENDED_PRESET,
+                       "kirby": "Kirby — Dream Land, recommended (~15 min)"}
 
 
 def _load_builtin_from_file() -> dict[str, dict] | None:
@@ -322,13 +347,19 @@ def is_user(name: str) -> bool:
     return name in load_user()
 
 
+def recommended_for(game: str) -> str:
+    """The recommended preset of `game` (Mario's for a game without one)."""
+    return RECOMMENDED_BY_GAME.get(game, RECOMMENDED_PRESET)
+
+
 def sorted_names(all_presets: dict[str, dict], game: str | None = None) -> list[str]:
-    """Preset names in display order: the recommended one first, then the
-    other built-ins, then user presets, each group alphabetical. `game`
+    """Preset names in display order: the game's recommended one first, then
+    the other built-ins, then user presets, each group alphabetical. `game`
     restricts the list to presets for that game."""
     names = [n for n, cfg in all_presets.items()
              if game is None or cfg.get("game", "mario") == game]
-    return sorted(names, key=lambda n: (n != RECOMMENDED_PRESET, not is_builtin(n), n.lower()))
+    top = set(RECOMMENDED_BY_GAME.values())
+    return sorted(names, key=lambda n: (n not in top, not is_builtin(n), n.lower()))
 
 
 def normalize(cfg: dict) -> dict:

@@ -32,7 +32,8 @@ from functools import partial
 from pathlib import Path
 
 from aiboy.games import (DEFAULT_STALL_STEPS, DEFAULT_TIME_BUDGET, GAMES, OBS_TYPES, SUPPORTED_GAMES,
-                   level_choices, level_state_worker, prepare_level_states, probe_rom_worker)
+                   check_start_level, level_choices, level_state_worker, prepare_level_states,
+                   probe_rom_worker)
 from aiboy.paths import DATA_DIR, FROZEN, recommended_n_envs
 from aiboy.runs import (KEEP_CHECKPOINTS, cpu_count, latest_checkpoint, prune_checkpoints,
                   read_run_config, resolve_model_path, run_paths, write_run_config)
@@ -112,6 +113,9 @@ def _start_level(args: argparse.Namespace) -> str | None:
     """The env's start_level spec: None for the campaign. For Mario the
     save-states it needs are created here, once, so workers only load them."""
     start_level = args.start_level if args.start_level != "default" else None
+    why = check_start_level(args.game, start_level)
+    if why:
+        sys.exit(f"[{args.mode}] {why}")
     if args.game == "mario":
         failed = prepare_level_states(start_level)
         if failed:
@@ -182,8 +186,12 @@ def cmd_train(args: argparse.Namespace) -> None:
                         args.action_repeat, args.frame_stack, args.obs_type,
                         start_level=start_level,
                         time_budget=args.time_budget, stall_steps=args.stall_steps)
-    print(f"[train] attempt limits: time budget {args.time_budget or 'full timer'} of 400 units, "
-          f"stall limit {args.stall_steps or 'off'}")
+    if GAMES[args.game].levels:
+        print(f"[train] attempt limits: time budget {args.time_budget or 'full timer'} of 400 "
+              f"units, stall limit {args.stall_steps or 'off'}")
+    else:
+        print(f"[train] attempt limits: stall limit {args.stall_steps or 'off'} (this game has "
+              f"no timer; the time budget does not apply)")
     if start_level == "marathon":
         print("[train] marathon: every episode is one life from 1-1 through all levels; "
               "a death starts the next episode at 1-1 again")
@@ -344,8 +352,8 @@ def cmd_play(args: argparse.Namespace) -> None:
 
 def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--game", default="mario", choices=sorted(GAMES),
-                   help=f"Supported: {', '.join(SUPPORTED_GAMES)}. Other titles are "
-                        f"experimental (PyBoy's generic wrapper, pixels only, no level modes).")
+                   help=f"Supported (own environment, presets): {', '.join(SUPPORTED_GAMES)}. "
+                        f"Other titles are experimental (PyBoy's generic wrapper, pixels only).")
     p.add_argument("--action-repeat", type=int, default=4, help="Frames each action is held")
     p.add_argument("--frame-stack", type=int, default=4, help="Consecutive frames stacked as obs")
     p.add_argument("--obs-type", default="tiles", choices=list(OBS_TYPES),
@@ -361,7 +369,8 @@ def _add_common(p: argparse.ArgumentParser) -> None:
                         "'random' (new random level per episode), "
                         "'sequential' (advance level on clear, retry on death), "
                         "'marathon' (one episode = all 10 levels), "
-                        "or a specific level 'W-L' (fixed).")
+                        "or a specific level 'W-L' (fixed). Super Mario Land only; other "
+                        "games start from the beginning.")
 
 
 def build_parser() -> argparse.ArgumentParser:

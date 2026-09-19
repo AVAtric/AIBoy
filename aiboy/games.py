@@ -1,4 +1,5 @@
-"""Game registry, ROM discovery and Super Mario Land level facts.
+"""Game registry, ROM discovery, and the level facts of Super Mario Land
+and the memory facts of Kirby's Dream Land the environments read.
 
 Deliberately free of PyBoy / Stable-Baselines3 / torch imports so the GUI can
 start instantly; the emulator only gets imported when something actually
@@ -14,14 +15,21 @@ from aiboy.paths import app_command
 
 ROM_DIR = Path("ROMs")
 
-# Version of the learning task itself: reward shaping, observation layout,
-# level logic. Bump it whenever one of those changes (MarioEnv, the HUD
+# Version of each game's learning task: reward shaping, observation layout,
+# level logic. Bump it whenever one of those changes (the env class, the HUD
 # cells, the level modes): scores recorded under an older version stay in
 # the experience file for reading but are never reused or compared, because
 # they would measure a different game.
 #   mario-1  first version
 #   mario-2  marathon training episodes start at 1-1 (were: a random level)
-ENV_VERSION = "mario-2"
+#   kirby-1  first version: scroll progress, score, health, lives
+ENV_VERSIONS = {"mario": "mario-2", "kirby": "kirby-1"}
+ENV_VERSION = ENV_VERSIONS["mario"]          # the first game's; prefer env_version(game)
+
+
+def env_version(game: str) -> str:
+    """The task version of `game` ("generic-1" for a ROM without an AIboy env)."""
+    return ENV_VERSIONS.get(str(game), "generic-1")
 
 # Super Mario Land has 4 worlds × 3 levels = 12 total levels. PyBoy's
 # `set_world_level(w, l)` docstring is wrong — it says args are 0-indexed
@@ -84,6 +92,14 @@ def power_state(pyboy) -> int:
     if state in (1, 2):
         return POWER_SUPERBALL if pyboy.get_memory_value(ADDR_SUPERBALL) else POWER_SUPER
     return POWER_SMALL
+
+# Kirby's Dream Land (PyBoy's wrapper reads score, health and lives; the
+# rest was mapped by watching RAM while playing):
+#   0xD05C  Kirby's x on the screen (8..~150; the camera keeps him near 76)
+#   0xD05D  Kirby's y on the screen
+ADDR_KIRBY_X = 0xD05C
+KIRBY_MAX_HEALTH = 6
+KIRBY_ATTEMPT_STEPS = 6000     # hard cap per attempt: the game has no timer to end one
 
 # Observation types. "tiles" is the 16x20 tile grid with seven HUD scalars
 # (lives, coins, timer, x, world, level, power-up) in the top-left cells;
@@ -224,11 +240,28 @@ def parse_start_level(spec):
 class GameSpec:
     rom_file: str
     cartridge_title: str
-    # Only Super Mario Land has a custom env, reward shaping and level
-    # modes. The other titles run through PyBoy's generic openai_gym
-    # wrapper (pixels only) and are experimental CLI-only extras.
+    # A supported game has an AIboy environment (env.ENV_CLASSES): shaped
+    # reward, pixel or tile observations, presets. Other titles run through
+    # PyBoy's generic openai_gym wrapper (pixels only) from the CLI only.
     supported: bool = False
     name: str = ""                  # how the game is called in the window
+    levels: bool = False            # has Super Mario Land's level modes (start_level)
+    # Live-panel labels that differ from Mario's wording, e.g. ("power", "health").
+    stat_labels: tuple[tuple[str, str], ...] = ()
+
+
+def check_start_level(game: str, start_level) -> str | None:
+    """Why `start_level` cannot be used with `game`, or None when it can: only
+    Super Mario Land has level modes; every other game starts from its
+    beginning ("default")."""
+    if start_level in (None, "default"):
+        return None
+    spec = GAMES.get(game)
+    if spec is not None and spec.levels:
+        return None
+    name = spec.name if spec is not None and spec.name else game
+    return (f"{name} has no level modes: Start level must be 'default' "
+            f"(got {start_level!r}). Level modes are for Super Mario Land.")
 
 
 def display_name(game: str) -> str:
@@ -238,8 +271,10 @@ def display_name(game: str) -> str:
 
 
 GAMES = {
-    "mario": GameSpec("mario.gb", "SUPER MARIOLAN", supported=True, name="Super Mario Land"),
-    "kirby": GameSpec("kirby.gb", "KIRBY DREAM LA", name="Kirby's Dream Land"),
+    "mario": GameSpec("mario.gb", "SUPER MARIOLAN", supported=True, name="Super Mario Land",
+                      levels=True),
+    "kirby": GameSpec("kirby.gb", "KIRBY DREAM LA", supported=True, name="Kirby's Dream Land",
+                      stat_labels=(("power", "health"),)),
     "wario": GameSpec("wario.gb", "SUPERMARIOLAND", name="Wario Land"),   # Super Mario Land 3
 }
 SUPPORTED_GAMES = tuple(name for name, spec in GAMES.items() if spec.supported)
@@ -266,8 +301,8 @@ class RomInfo:
 
     def status(self) -> tuple[str, str]:
         """(level, text) where level is one of
-        "ok"            fully supported: train it and play it (custom env,
-                        presets, level modes)
+        "ok"            fully supported: train it and play it (its own env,
+                        presets; level modes for Super Mario Land)
         "experimental"  play it yourself; PyBoy has a wrapper, so the CLI
                         can train a generic pixel agent
         "playable"      play it yourself; no training (no wrapper, or an

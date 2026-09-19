@@ -266,7 +266,7 @@ class _Session:
         from pyboy import PyBoy
         from stable_baselines3.common.monitor import Monitor
         from stable_baselines3.common.vec_env import DummyVecEnv
-        from aiboy.env import MarioEnv, wrap_vec_env
+        from aiboy.env import ENV_CLASSES, make_env, wrap_vec_env
 
         spec = GAMES[game]
         rom_path = ROM_DIR / spec.rom_file
@@ -281,17 +281,18 @@ class _Session:
         self._frames = frames
         self.pacer = FramePacer.for_speed(speed_mult)
 
-        if game == "mario":
-            base = MarioEnv(self.pyboy, frame_skip=action_repeat, obs_type=obs_type,
+        if game in ENV_CLASSES:
+            base = make_env(game, self.pyboy, frame_skip=action_repeat, obs_type=obs_type,
                             tick_callback=self.on_tick, start_level=start_level,
-                            time_budget=time_budget, stuck_steps=stall_steps)
+                            time_budget=time_budget, stall_steps=stall_steps)
         else:
             if self.pyboy.game_wrapper() is None:
                 self.pyboy.stop(save=False)
                 raise RuntimeError(f"Game '{game}' has no PyBoy game_wrapper and cannot be played.")
             if obs_type != "pixels":
                 self.pyboy.stop(save=False)
-                raise RuntimeError(f"obs_type={obs_type!r} is only supported for mario")
+                raise RuntimeError(f"obs_type={obs_type!r} is only supported for "
+                                   f"{', '.join(ENV_CLASSES)}")
             base = self.pyboy.openai_gym(observation_type="raw", action_type="press")
         self.vec = wrap_vec_env(DummyVecEnv([lambda env=Monitor(base): env]),
                                 obs_type, frame_stack)
@@ -307,7 +308,7 @@ class _Session:
 
     def close(self) -> None:
         try:
-            self.vec.close()   # closes MarioEnv -> pyboy.stop()
+            self.vec.close()   # closes the env -> pyboy.stop()
         except Exception:
             pass
         try:
@@ -359,10 +360,11 @@ class EmbeddedPlayer:
         self.events.put(item)
 
     def _report_step(self, game: str, action, info, ep_reward: float, ep_steps: int) -> None:
-        from aiboy.env import MarioEnv
+        from aiboy.env import ENV_CLASSES
         act_id = int(np.asarray(action).flat[0])
-        names = MarioEnv.ACTION_NAMES
-        action_name = names[act_id] if game == "mario" and act_id < len(names) else str(act_id)
+        cls = ENV_CLASSES.get(game)
+        names = cls.ACTION_NAMES if cls is not None else ()
+        action_name = names[act_id] if act_id < len(names) else str(act_id)
         stats = {"action": action_name, "reward": f"{ep_reward:.1f}", "steps": str(ep_steps)}
         i0 = info[0] if info and isinstance(info[0], dict) else {}
         if "x" in i0:
@@ -373,6 +375,8 @@ class EmbeddedPlayer:
         for key in ("lives", "coins", "power"):
             if key in i0:
                 stats[key] = str(i0[key])
+        if "health" in i0:                       # Kirby: the "power" cell shows health
+            stats["power"] = str(i0["health"])
         self._emit("play_stats", stats)
 
     # ---------- play ----------
@@ -504,8 +508,8 @@ class EmbeddedPlayer:
     def _human_loop(self, game, rom_path, held: HeldButtons, stop, start_level,
                     speed_mult) -> None:
         """The plain game, paced per frame like `play()`, pressing whatever
-        `held` says. Mario's HUD numbers go to the live panel; other ROMs
-        only show the buttons. Ends when `stop` is set."""
+        `held` says. The HUD numbers of a supported game go to the live
+        panel; other ROMs only show the buttons. Ends when `stop` is set."""
         from pyboy import PyBoy
         pyboy = None
         events = _button_events()
@@ -520,8 +524,8 @@ class EmbeddedPlayer:
             pyboy = PyBoy(str(rom_path), window_type="null", game_wrapper=True,
                           disable_renderer=False)
             pyboy.set_emulation_speed(0)
-            gw = pyboy.game_wrapper() if game == "mario" else None
-            if gw is not None and start_level is not None:
+            gw = pyboy.game_wrapper() if GAMES.get(game) and GAMES[game].supported else None
+            if game == "mario" and gw is not None and start_level is not None:
                 # The same save-states the agent trains from (made once, in
                 # a subprocess with a timeout).
                 missing = prepare_level_states(start_level, rom_path)
@@ -535,6 +539,7 @@ class EmbeddedPlayer:
 
             frame = 0
             best = {"world": None, "score": 0, "coins": 0}
+            stats_of = self._human_stats if game == "mario" else self._kirby_human_stats
             game_over_seen = False
             pacer.reset()
             while not stop.is_set():
@@ -551,7 +556,7 @@ class EmbeddedPlayer:
                 self.frames.set(screen_frame(pyboy))
                 frame += 1
                 if gw is not None and frame % HUMAN_STATS_EVERY == 0:
-                    self._emit("play_stats", self._human_stats(pyboy, gw, frame, best))
+                    self._emit("play_stats", stats_of(pyboy, gw, frame, best))
                     over = bool(gw.game_over())
                     if over and not game_over_seen:
                         self._emit("play_status", "game over — press START to play again")
@@ -566,6 +571,11 @@ class EmbeddedPlayer:
                 self._emit("play_status", f"you played {frame / GB_FPS:.0f} s: reached "
                                           f"{w[0]}-{w[1]}, score {best['score']}, "
                                           f"{best['coins']} coins")
+            elif gw is not None and best["score"]:
+                summary.append({"reward": float(best["score"]), "steps": frame,
+                                "end": f"score {best['score']}"})
+                self._emit("play_status", f"you played {frame / GB_FPS:.0f} s: "
+                                          f"score {best['score']}")
             else:
                 self._emit("play_status", f"you played {frame / GB_FPS:.0f} s")
             self._emit("play_done", summary)
@@ -582,6 +592,17 @@ class EmbeddedPlayer:
                     pyboy.stop(save=False)
                 except Exception:
                     pass
+
+    @staticmethod
+    def _kirby_human_stats(pyboy, gw, frame: int, best: dict) -> dict:
+        """Live-panel numbers for Kirby's Dream Land while a person plays
+        (health in the "power" cell; nothing before the game has started)."""
+        score, health, lives = int(gw.score), int(gw.health), int(gw.lives_left)
+        if health <= 0 and score <= 0:
+            return {"steps": f"{frame / GB_FPS:.0f} s"}
+        best["score"] = max(best["score"], score)
+        return {"power": str(health), "lives": str(max(lives, 0)), "reward": str(score),
+                "steps": f"{frame / GB_FPS:.0f} s"}
 
     @staticmethod
     def _human_stats(pyboy, gw, frame: int, best: dict) -> dict:

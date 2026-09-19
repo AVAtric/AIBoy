@@ -52,7 +52,7 @@ AUTO = "auto"                   # the template name that stands for the experien
 SUGGESTIONS = 6                 # untested variations per "Let AIboy choose" search
 # One explanation per step, shown on hover over the ⓘ next to the step title.
 INTRO = {
-    0: "Train your own Super Mario Land player. Choose what it should learn, decide whether "
+    0: "Train your own player for the game chosen at the top. Choose what it should learn, decide whether "
        "AIboy should look for better settings first, and press Start. AIboy remembers every "
        "setting it has ever tried, so it never tests the same thing twice.",
     1: "These are the settings that will be trained. Give them a name so you can find them "
@@ -64,7 +64,7 @@ INTRO = {
        "update while it plays.",
 }
 MODE_PLAIN = {
-    "default": "plays through the game from 1-1, lives and all, like a person would",
+    "default": "plays through the game from the start, lives and all, like a person would",
     "random": "practises a different level every time",
     "sequential": "works through the levels in order, repeating a level until it beats it",
     "marathon": "tries to beat every level in one go",
@@ -72,13 +72,14 @@ MODE_PLAIN = {
 STAT_LABELS = (("status", "status"), ("total_timesteps", "steps trained"),
                ("ep_rew_mean", "average score"), ("ep_len_mean", "episode length"),
                ("fps", "speed (steps/s)"), ("time_elapsed", "elapsed (s)"))
-ROM_HINT = ("Put your Super Mario Land ROM file, named mario.gb, into the ROMs folder next to "
-            "the app, then click 'Rescan ROMs' at the top.")
+ROM_HINT = ("Put your Super Mario Land ROM file, named mario.gb (or Kirby's Dream Land as "
+            "kirby.gb), into the ROMs folder next to the app, then click 'Rescan ROMs' at the top.")
 
 
 def short_goal(preset_name: str) -> str:
-    """'Mario — Campaign, recommended (~15 min)' -> 'Campaign, recommended'."""
-    name = re.sub(r"^\s*Mario\s*[—-]\s*", "", preset_name)
+    """'Mario — Campaign, recommended (~15 min)' -> 'Campaign, recommended'
+    (the game's name in front and the duration behind are dropped)."""
+    name = re.sub(r"^\s*[A-Za-z']+\s*[—-]\s*", "", preset_name)
     name = re.sub(r"\s*\([^)]*\)\s*$", "", name)
     return name.strip() or preset_name
 
@@ -551,8 +552,8 @@ class WizardTab:
         self._presets = self.app.presets_by_name()
         self.goal_combo["values"] = names
         if self.goal_var.get() not in names:
-            self.goal_var.set(presets.RECOMMENDED_PRESET if presets.RECOMMENDED_PRESET in names
-                              else (names[0] if names else ""))
+            wanted = presets.recommended_for(self.app.game)
+            self.goal_var.set(wanted if wanted in names else (names[0] if names else ""))
         self._on_goal_changed()
 
     def set_goal(self, preset_name: str) -> None:

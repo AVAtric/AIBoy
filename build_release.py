@@ -17,6 +17,9 @@ What it does
   2. Runs PyInstaller (one-folder build; a windowed AIboy.app on macOS, an
      AIboy/ folder with AIboy.exe on Windows, AIboy/AIboy on Linux) with the
      boot video, the built-in presets and the profile inside.
+     On macOS the bundle-root symlink `SDL2` PyInstaller makes is removed:
+     it shadows the `sdl2` Python package on a case-insensitive disk, which
+     left the built app without game-controller support.
   3. Assembles release/AIboy/: the app, a ROMs/ folder (your ROM files are
      copied in unless --no-roms), an empty models/ folder and a README.txt.
      The app keeps its own files (models, presets, experience.jsonl) next to
@@ -172,6 +175,7 @@ def run_pyinstaller(profile: dict) -> Path:
         "--collect-submodules", PACKAGE,      # the tabs are imported lazily; include every module
         "--paths", str(ROOT),
         "--exclude-module", "pytest",
+        "--exclude-module", "pygame",         # pulled in by PySDL2's examples; never used
     ]
     if sys.platform in ("darwin", "win32"):
         args.append("--windowed")
@@ -183,8 +187,35 @@ def run_pyinstaller(profile: dict) -> Path:
     print(f"[build] pyinstaller {' '.join(args)}")
     pyi.run(args)
     if sys.platform == "darwin":
-        return BUILD_DIR / "dist" / f"{APP_NAME}.app"
+        built = BUILD_DIR / "dist" / f"{APP_NAME}.app"
+        remove_package_shadows(built)
+        return built
     return BUILD_DIR / "dist" / APP_NAME
+
+
+# Python packages whose name, on a case-insensitive file system, a top-level
+# file in the bundle may shadow. PyInstaller symlinks every macOS framework
+# binary to the bundle's root (`SDL2` -> sdl2dll/dll/SDL2.framework/…/SDL2);
+# with that file in place `import sdl2.dll` fails inside the app ("No module
+# named 'sdl2.dll'") and the game controller is silently off. PySDL2 loads
+# the library through pysdl2-dll's own path, so the symlink is not needed.
+SHADOWED_PACKAGES = ("sdl2",)
+
+
+def remove_package_shadows(app: Path) -> list[Path]:
+    """Delete bundle-root entries that collide with SHADOWED_PACKAGES by
+    case-insensitive name. Returns what was removed."""
+    removed: list[Path] = []
+    for folder in (app / "Contents" / "Frameworks", app / "Contents" / "Resources"):
+        if not folder.is_dir():
+            continue
+        for entry in folder.iterdir():
+            if entry.name.lower() in SHADOWED_PACKAGES and not entry.is_dir():
+                entry.unlink()
+                removed.append(entry)
+    for entry in removed:
+        print(f"[build] removed {entry.relative_to(app)}: it would shadow the Python package")
+    return removed
 
 
 # ------------------------- 3. release folder -------------------------
@@ -275,6 +306,12 @@ def selftest(release: Path) -> None:
         sys.exit(f"[selftest] training failed (rc={out.returncode}):\n{out.stdout[-3000:]}\n"
                  f"{out.stderr[-3000:]}")
     print("[selftest] OK — the built app trains with parallel emulators")
+    print("[selftest] checking game-controller support in the built app…")
+    out = subprocess.run([str(exe), "controller-test", "--seconds", "1"], capture_output=True,
+                         text=True, timeout=60)
+    if "controllers are off" in out.stdout:
+        sys.exit(f"[selftest] the built app cannot load SDL2:\n{out.stdout}")
+    print("[selftest] OK — SDL2 loads in the built app (a pad is picked up when connected)")
 
 
 def main() -> None:

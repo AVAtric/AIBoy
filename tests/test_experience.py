@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from aiboy import experience, presets, tuning
-from aiboy.games import ENV_VERSION
+from aiboy.games import ENV_VERSION, env_version
 
 BASE = presets.normalize({"game": "mario", "start_level": "default", "timesteps": 2_000_000})
 
@@ -63,6 +63,8 @@ class ExperienceTests(unittest.TestCase):
         self.assertNotEqual(experience.task_of(a), experience.task_of({**a, "start_level": "marathon"}))
         self.assertNotEqual(experience.task_of(a), experience.task_of({**a, "timesteps": 50_000}))
         self.assertIn(ENV_VERSION, experience.signature_of(a))
+        self.assertIn(env_version("kirby"), experience.signature_of({**a, "game": "kirby"}))
+        self.assertNotIn(ENV_VERSION, experience.signature_of({**a, "game": "kirby"}))
         # ints and floats compare by value
         self.assertEqual(experience.signature_of({**a, "n_steps": 512}),
                          experience.signature_of({**a, "n_steps": 512.0}))

@@ -51,7 +51,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from aiboy import tuning
-from aiboy.games import ENV_VERSION
+from aiboy.games import env_version
 from aiboy.paths import EXPERIENCE_FILE, cpu_count
 from aiboy.presets import DEFAULT_CONFIG, normalize
 
@@ -94,15 +94,21 @@ def _canon(value):
     return str(value)
 
 
-def signature_of(cfg: dict, fields=OUTCOME_FIELDS, env_version: str = ENV_VERSION) -> str:
-    """Canonical text of the outcome-deciding fields of a configuration."""
+def current_env_version(cfg: dict) -> str:
+    """The task version the game of `cfg` has now (see games.ENV_VERSIONS)."""
+    return env_version(str(cfg.get("game", DEFAULT_CONFIG["game"])))
+
+
+def signature_of(cfg: dict, fields=OUTCOME_FIELDS, env_version: str | None = None) -> str:
+    """Canonical text of the outcome-deciding fields of a configuration
+    (under the game's current task version unless one is given)."""
     cfg = {**DEFAULT_CONFIG, **cfg}
     parts = {k: _canon(cfg[k]) for k in fields if k in cfg}
-    parts["env_version"] = env_version
+    parts["env_version"] = env_version or current_env_version(cfg)
     return json.dumps(parts, sort_keys=True, separators=(",", ":"))
 
 
-def task_of(cfg: dict, env_version: str = ENV_VERSION) -> str:
+def task_of(cfg: dict, env_version: str | None = None) -> str:
     return signature_of(cfg, TASK_FIELDS, env_version)
 
 
@@ -117,13 +123,15 @@ class Record:
     source: str = "cli"              # cli | train | tune | wizard
     run_name: str = ""
     resumed: bool = False
-    env_version: str = ENV_VERSION
+    env_version: str = ""            # the game's task version when recorded
     created_at: float = field(default_factory=time.time)
     id: str = ""
     note: str = ""                   # improvement records: what changed and why
 
     def __post_init__(self):
         self.config = normalize(self.config)
+        if not self.env_version:
+            self.env_version = current_env_version(self.config)
         if not self.id:
             raw = f"{self.signature}|{self.created_at}|{self.run_name}"
             self.id = hashlib.sha1(raw.encode()).hexdigest()[:12]
@@ -160,7 +168,7 @@ class Record:
     def usable(self) -> bool:
         """Good enough to stand in for a new trial with the same signature."""
         return self.kind != KIND_IMPROVEMENT and self.complete and not self.resumed \
-            and bool(self.evals) and self.env_version == ENV_VERSION
+            and bool(self.evals) and self.env_version == current_env_version(self.config)
 
     def to_dict(self) -> dict:
         return asdict(self)

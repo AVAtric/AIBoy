@@ -40,8 +40,8 @@ from PIL import Image
 
 from aiboy import APP_NAME, presets, runs, settings, tuning
 from aiboy.experience import Experience, Record
-from aiboy.games import (OBS_TYPES, SML_ALL_LEVELS, RomInfo, discover_roms, display_name,
-                         level_choices, probe_rom)
+from aiboy.games import (GAMES, OBS_TYPES, SML_ALL_LEVELS, RomInfo, check_start_level,
+                         discover_roms, display_name, level_choices, probe_rom)
 from aiboy.gui.controls import ControlMap, Gamepad, HeldButtons, KeyboardInput
 from aiboy.gui.controls_dialog import ControlsDialog
 from aiboy.gui.experience_tab import ExperienceTab
@@ -303,6 +303,7 @@ class AIboyGUI:
         self.refresh_run_names()
         self.refresh_models()
         self.refresh_presets()
+        self.set_live_mode(self.play_mode)      # the live panel's words follow the game
 
     # ---------- state queries ----------
 
@@ -781,10 +782,14 @@ class AIboyGUI:
         names = {"episode": "game" if human else "round",
                  "reward": "score" if human else "reward",
                  "steps": "time" if human else "steps"}
+        spec = GAMES.get(self.game)
+        if spec is not None:
+            names.update(spec.stat_labels)      # e.g. Kirby's "power" cell is his health
         self._live_help = {
             "episode": "Who is playing: you, or the round the agent is on, of how many.",
             "world": "Level Mario is in (world-level).",
-            "power": "Mario's size: small, super (mushroom) or superball (flower).",
+            "power": ("Kirby's health, out of 6." if names.get("power") == "health" else
+                      "Mario's size: small, super (mushroom) or superball (flower)."),
             "lives": "Lives left.", "coins": "Coins collected in this game.",
             "reward": ("The game's score." if human else
                        "Score the agent has earned in this round so far."),
@@ -1207,6 +1212,10 @@ class AIboyGUI:
         plan, err = self.tune_plan()
         if err:
             messagebox.showerror("Tune", f"Cannot start: {err}")
+            return False
+        why = check_start_level(plan["game"], plan["base"].get("start_level"))
+        if why:
+            messagebox.showerror("Tune", why)
             return False
         plan["source"] = source
         n_trials = len(plan["combos"]) * plan["n_seeds"]
@@ -1781,6 +1790,10 @@ class AIboyGUI:
         except ValueError as e:
             messagebox.showerror("Training", f"A training field has an invalid value:\n{e}")
             return False
+        why = check_start_level(self.game, cfg.get("start_level"))
+        if why:
+            messagebox.showerror("Training", why)
+            return False
         # Playback would compete for CPU and for the shared canvas.
         if self.playing_active():
             self.play_stop.set()
@@ -1905,6 +1918,10 @@ class AIboyGUI:
             messagebox.showerror("Play", f"A play option has an invalid value:\n{e}")
             return False
         raw_level = self.play_level_var.get()
+        why = check_start_level(self.game, raw_level)
+        if why:
+            messagebox.showerror("Play", why)
+            return False
 
         self._begin_playback("agent")
         self.play_status_var.set(f"loading {model_path.name}…")
