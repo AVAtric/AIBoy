@@ -14,7 +14,8 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
-from aiboy.gui.controls import BUTTON_TITLES, BUTTONS, ControlMap, Gamepad, key_label, pad_label
+from aiboy.gui.controls import (BUTTON_TITLES, BUTTONS, PAD_INPUTS, ControlMap, Gamepad, key_label,
+                                pad_label)
 from aiboy.gui.widgets import MONO, THEME, tooltip
 
 POLL_MS = 30
@@ -34,6 +35,8 @@ class ControlsDialog:
         self.capturing: tuple[str, str, bool] | None = None   # (button, "keys"|"pad", add)
         self._baseline: frozenset[str] = frozenset()
         self._poll: str | None = None
+        self._live = False                      # the status line shows what the pad holds
+        self._hold_note = False                 # keep a change note until the pad is released
         self.cells: dict[tuple[str, str], ttk.Button] = {}
 
         win = self.win = tk.Toplevel(parent)
@@ -160,13 +163,35 @@ class ControlsDialog:
                                   f"{BUTTON_TITLES[button]}.")
                 else:
                     self._baseline &= self.gamepad.raw_held     # released inputs may be bound
-            elif self.pad_head_var.get() != (
-                    f"Controller ({self.gamepad.pad_name})" if self.gamepad.pad_name
-                    else "Controller (none connected)"):
-                self.refresh()                   # a pad came or went
+            else:
+                if self.pad_head_var.get() != (
+                        f"Controller ({self.gamepad.pad_name})" if self.gamepad.pad_name
+                        else "Controller (none connected)"):
+                    self.refresh()               # a pad came or went
+                self._show_live()
             self._poll = self.win.after(POLL_MS, self._tick)
         except tk.TclError:
             pass
+
+    def _show_live(self) -> None:
+        """While nothing is being bound, the status line follows the pad: what
+        is pressed on it and what that does on the Game Boy, so anyone can
+        see whether the app hears the controller at all."""
+        raw = self.gamepad.raw_held
+        if raw:
+            if self._hold_note:                 # a fresh "X is now Y" stays while X is still down
+                return
+            table = self.controls.pad_to_button
+            does = [BUTTON_TITLES[table[r]] for r in sorted(raw, key=PAD_INPUTS.index)
+                    if r in table]
+            self.status_var.set(f"Pressed on the controller: {self.gamepad.raw_text()} → "
+                                f"Game Boy {', '.join(does) if does else 'nothing (not bound)'}.")
+            self._live = True
+        else:
+            self._hold_note = False
+            if self._live:
+                self._live = False
+                self.refresh()                  # back to the standing hint
 
     # ----- changes -----
 
@@ -174,6 +199,7 @@ class ControlsDialog:
         self.controls.save()
         self.refresh()
         self.status_var.set(note)
+        self._live, self._hold_note = False, True
         if self.on_change is not None:
             self.on_change()
 

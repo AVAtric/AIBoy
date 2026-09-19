@@ -5,6 +5,7 @@ Usage:
     python main.py gui                                                 # same
     python main.py train --game mario --n-envs 10 --timesteps 500000   # train headless
     python main.py play  --game mario --episodes 3                     # watch in an SDL2 window
+    python main.py controller-test                                     # what a game controller sends
 
 Every `train` records its settings, evaluation history and duration in the
 experience file when it ends (see experience.py), which is how the app
@@ -402,6 +403,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "(tune / wizard runs are short search trials)")
 
     sub.add_parser("gui", help="Open the AIboy app (wizard, train, tune, presets, experience)")
+    ct = sub.add_parser("controller-test",
+                        help="Show what the app sees from a game controller (which pads, "
+                             "which buttons) for a few seconds")
+    ct.add_argument("--seconds", type=float, default=20.0)
 
     # Internal helpers the GUI runs in a throw-away process (see games.py).
     pr = sub.add_parser("probe-rom", help=argparse.SUPPRESS)
@@ -461,6 +466,9 @@ def main(argv: list[str] | None = None) -> None:
     elif args.mode == "gui":
         from aiboy.gui.app import run as run_gui
         run_gui()
+    elif args.mode == "controller-test":
+        from aiboy.gui.controls import watch
+        sys.exit(0 if watch(args.seconds) else 1)
     elif args.mode == "probe-rom":
         probe_rom_worker(args.rom)
     elif args.mode == "level-state":

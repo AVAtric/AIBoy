@@ -13,10 +13,12 @@ play_human). Nothing here touches the emulator.
   Gamepad         a thread polling SDL2's game-controller API (PySDL2 is
                   already a dependency through PyBoy), so any pad SDL
                   knows works: Switch Pro Controller, Xbox, PlayStation,
-                  8BitDo… Hot-plugging is handled; the name and the kind
-                  of the connected pad are reported to the GUI, and the
-                  raw inputs it is holding are exposed so the dialog can
-                  bind "the next button you press".
+                  8BitDo… Every connected pad plays; hot-plugging is
+                  handled; the names and the kind of the connected pads
+                  are reported to the GUI, and the raw inputs they hold
+                  are exposed so the dialog can bind "the next button you
+                  press" and show what the app hears (`watch` prints the
+                  same on the command line: main.py controller-test).
 
 Game Boy button names: up, down, left, right, a, b, select, start.
 Controller inputs are SDL's generic names ("a", "dpad_up", "leftx-",
@@ -402,16 +404,107 @@ def _load_sdl():
         return None
 
 
-class Gamepad(threading.Thread):
-    """Polls the first connected game controller on its own thread, maps
-    what it holds through `controls` and keeps `held` up to date.
+class _Pads:
+    """The game controllers SDL has open right now, keyed by SDL's instance
+    id. Lives on the polling thread only (see Gamepad.run)."""
 
-    `pad_name` / `pad_kind` describe the connected pad (None / "generic"
-    without one); `on_change(name_or_None)` is called from the thread when
-    a pad connects or disconnects. `raw_held` is the set of raw inputs
-    down right now, for the dialog that binds "the next button pressed".
-    `active` switches between a fast poll (playing, binding) and a slow
-    one (only watching for a pad to appear)."""
+    AXES = ("leftx", "lefty", "rightx", "righty", "triggerleft", "triggerright")
+
+    def __init__(self, sdl2):
+        self.sdl2 = sdl2
+        self.open: dict[int, tuple[object, str, str]] = {}      # id -> (handle, name, kind)
+        self.buttons = [(raw, getattr(sdl2, f"SDL_CONTROLLER_BUTTON_{raw.upper()}"))
+                        for raw in PAD_BUTTONS
+                        if hasattr(sdl2, f"SDL_CONTROLLER_BUTTON_{raw.upper()}")]
+        self.axes = [(name, getattr(sdl2, f"SDL_CONTROLLER_AXIS_{name.upper()}"))
+                     for name in self.AXES if hasattr(sdl2, f"SDL_CONTROLLER_AXIS_{name.upper()}")]
+        # SDL_CONTROLLER_TYPE_* code -> "switch" / "xbox" / "playstation" / "generic"
+        self.kinds = {getattr(sdl2, const): pad_kind_of(const)
+                      for const in dir(sdl2) if const.startswith("SDL_CONTROLLER_TYPE_")}
+
+    def __bool__(self) -> bool:
+        return bool(self.open)
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return tuple(name for _pad, name, _kind in self.open.values())
+
+    @property
+    def kind(self) -> str:
+        """The first pad's console, which names the inputs in the GUI."""
+        for _pad, _name, kind in self.open.values():
+            return kind
+        return "generic"
+
+    def sync(self) -> bool:
+        """Close the pads that went away and open the ones that appeared.
+        True if the set of pads changed."""
+        sdl2 = self.sdl2
+        changed = False
+        for iid, (pad, _name, _kind) in list(self.open.items()):
+            if not sdl2.SDL_GameControllerGetAttached(pad):
+                sdl2.SDL_GameControllerClose(pad)
+                del self.open[iid]
+                changed = True
+        for i in range(sdl2.SDL_NumJoysticks()):
+            if not sdl2.SDL_IsGameController(i):
+                continue
+            iid = int(sdl2.SDL_JoystickGetDeviceInstanceID(i))
+            if iid in self.open:
+                continue
+            pad = sdl2.SDL_GameControllerOpen(i)
+            if not pad:
+                continue
+            raw = sdl2.SDL_GameControllerName(pad)
+            name = raw.decode(errors="replace") if raw else "game controller"
+            kind = "generic"
+            if hasattr(sdl2, "SDL_GameControllerGetType"):
+                try:
+                    kind = self.kinds.get(int(sdl2.SDL_GameControllerGetType(pad)), "generic")
+                except Exception:
+                    pass
+            self.open[iid] = (pad, name, kind)
+            changed = True
+        return changed
+
+    def raw_inputs(self) -> frozenset[str]:
+        """Every input held on any open pad."""
+        sdl2 = self.sdl2
+        raw: set[str] = set()
+        for pad, _name, _kind in self.open.values():
+            raw.update(name for name, btn in self.buttons
+                       if sdl2.SDL_GameControllerGetButton(pad, btn))
+            for name, axis in self.axes:
+                raw |= axis_inputs(name, sdl2.SDL_GameControllerGetAxis(pad, axis) / 32767.0)
+        return frozenset(raw)
+
+    def close_all(self) -> None:
+        for pad, _name, _kind in self.open.values():
+            try:
+                self.sdl2.SDL_GameControllerClose(pad)
+            except Exception:
+                pass
+        self.open.clear()
+
+
+class Gamepad(threading.Thread):
+    """Polls every connected game controller on its own thread, maps what
+    they hold through `controls` and keeps `held` up to date. All pads play
+    at once, so it never matters which one SDL lists first (a pad plugged
+    in by USB while it is still paired by Bluetooth can show up twice; a
+    second pad in the room may come first).
+
+    `pad_names` / `pad_name` / `pad_kind` describe the connected pads (empty
+    / None / "generic" without one); `on_change(name_or_None)` is called from
+    the thread when a pad connects or disconnects, or when controller
+    support fails (`error` is set then). `raw_held` is the set of raw inputs
+    down right now, for the dialog that binds "the next button pressed" and
+    for telling the person what the app sees (`raw_text`). `active`
+    switches between a fast poll (playing, binding) and a slow one (only
+    watching for a pad to appear); setting it wakes the thread at once.
+
+    SDL's joystick layer must be initialised, polled and shut down on the
+    same thread, so everything SDL happens inside run()."""
 
     FAST_PERIOD = 1 / 120
     SLOW_PERIOD = 0.5
@@ -424,74 +517,84 @@ class Gamepad(threading.Thread):
         self.controls = controls
         self.on_change = on_change
         self.source = source
-        self.active = False
-        self.pad_name: str | None = None        # the connected controller, or None
-        self.pad_kind: str = "generic"
+        self.pad_names: tuple[str, ...] = ()    # every connected controller
+        self.pad_kind: str = "generic"          # the first one's console, for labels
         self.raw_held: frozenset[str] = frozenset()
         self.error: str | None = None
+        self._active = False
         self._quit = threading.Event()
+        self._wake = threading.Event()          # ends a wait early: quit, active change
+
+    # ----- what the GUI reads -----
+
+    @property
+    def pad_name(self) -> str | None:
+        """The connected controller(s) as one name; None without one."""
+        return " + ".join(self.pad_names) if self.pad_names else None
+
+    @property
+    def active(self) -> bool:
+        return self._active
+
+    @active.setter
+    def active(self, value: bool) -> None:
+        self._active = bool(value)
+        self._wake.set()
+
+    def raw_text(self) -> str:
+        """What is pressed on the controller right now, in its own words:
+        'A, D-pad ↑'; '' for nothing."""
+        return ", ".join(pad_label(r, self.pad_kind)
+                         for r in sorted(self.raw_held, key=PAD_INPUTS.index))
 
     def stop(self) -> None:
         self._quit.set()
+        self._wake.set()
 
-    # SDL's joystick layer must be initialised, polled and shut down on the
-    # same thread, so everything SDL happens inside run().
+    def remap(self) -> None:
+        """Publish what is held right now through the current mapping: after
+        the mapping changed, and after `held` was cleared (the loop only
+        publishes when the raw inputs change)."""
+        table = self.controls.pad_to_button
+        self.held.set(self.source, frozenset(table[r] for r in self.raw_held if r in table))
+
+    # ----- the thread -----
+
     def run(self) -> None:
         sdl2 = _load_sdl()
         if sdl2 is None:
-            self.error = "PySDL2 not available"
+            self._fail("PySDL2 is not installed")
             return
         try:
             # Without this SDL drops pad input while no SDL window has the
             # focus (there is none: the window is Tk's). Face buttons are
             # named by their labels on Nintendo pads (SDL's default; pinned).
+            # A pair of Joy-Cons counts as one pad.
             sdl2.SDL_SetHint(b"SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", b"1")
             sdl2.SDL_SetHint(b"SDL_GAMECONTROLLER_USE_BUTTON_LABELS", b"1")
+            sdl2.SDL_SetHint(b"SDL_JOYSTICK_HIDAPI_JOY_CONS", b"1")
             if sdl2.SDL_Init(sdl2.SDL_INIT_GAMECONTROLLER) != 0:
-                self.error = sdl2.SDL_GetError().decode(errors="replace")
+                self._fail(sdl2.SDL_GetError().decode(errors="replace"))
                 return
         except Exception as e:      # a broken SDL build must not take the app down
-            self.error = repr(e)
+            self._fail(repr(e))
             return
-        buttons = [(raw, getattr(sdl2, f"SDL_CONTROLLER_BUTTON_{raw.upper()}"))
-                   for raw in PAD_BUTTONS if hasattr(sdl2, f"SDL_CONTROLLER_BUTTON_{raw.upper()}")]
-        axes = [(name, getattr(sdl2, f"SDL_CONTROLLER_AXIS_{name.upper()}"))
-                for name in ("leftx", "lefty", "rightx", "righty", "triggerleft", "triggerright")
-                if hasattr(sdl2, f"SDL_CONTROLLER_AXIS_{name.upper()}")]
-        pad = None
-        last: frozenset[str] = frozenset()
+        pads = _Pads(sdl2)
         try:
             while not self._quit.is_set():
+                self._wake.clear()
                 sdl2.SDL_GameControllerUpdate()
-                if pad is not None and not sdl2.SDL_GameControllerGetAttached(pad):
-                    sdl2.SDL_GameControllerClose(pad)
-                    pad = None
-                    self._set_pad(None, "generic")
-                if pad is None:
-                    pad = self._open_first(sdl2)
-                    if pad is None:
-                        if last:
-                            last = frozenset()
-                            self.raw_held = last
-                            self.held.set(self.source, frozenset())
-                        self._quit.wait(self.SLOW_PERIOD)
-                        continue
-                raw = {name for name, btn in buttons if sdl2.SDL_GameControllerGetButton(pad, btn)}
-                for name, axis in axes:
-                    raw |= axis_inputs(name, sdl2.SDL_GameControllerGetAxis(pad, axis) / 32767.0)
-                raw = frozenset(raw)
-                if raw != last:
-                    last = raw
+                if pads.sync():
+                    self._set_pads(pads.names, pads.kind)
+                raw = pads.raw_inputs()
+                if raw != self.raw_held:
                     self.raw_held = raw
-                    table = self.controls.pad_to_button
-                    self.held.set(self.source, frozenset(table[r] for r in raw if r in table))
-                self._quit.wait(self.FAST_PERIOD if self.active else self.SLOW_PERIOD)
+                    self.remap()
+                self._wake.wait(self.FAST_PERIOD if self._active and pads else self.SLOW_PERIOD)
+        except Exception as e:      # an SDL call failed: say so instead of dying quietly
+            self._fail(repr(e))
         finally:
-            if pad is not None:
-                try:
-                    sdl2.SDL_GameControllerClose(pad)
-                except Exception:
-                    pass
+            pads.close_all()
             self.raw_held = frozenset()
             self.held.set(self.source, frozenset())
             try:
@@ -499,40 +602,56 @@ class Gamepad(threading.Thread):
             except Exception:
                 pass
 
-    def remap(self) -> None:
-        """Apply a changed mapping to what is held right now (the loop only
-        re-maps when the raw inputs change)."""
-        table = self.controls.pad_to_button
-        self.held.set(self.source, frozenset(table[r] for r in self.raw_held if r in table))
-
-    def _open_first(self, sdl2):
-        for i in range(sdl2.SDL_NumJoysticks()):
-            if not sdl2.SDL_IsGameController(i):
-                continue
-            pad = sdl2.SDL_GameControllerOpen(i)
-            if pad:
-                raw = sdl2.SDL_GameControllerName(pad)
-                kind = "generic"
-                if hasattr(sdl2, "SDL_GameControllerGetType"):
-                    try:
-                        code = sdl2.SDL_GameControllerGetType(pad)
-                        for const in dir(sdl2):
-                            if (const.startswith("SDL_CONTROLLER_TYPE_")
-                                    and getattr(sdl2, const) == code):
-                                kind = pad_kind_of(const)
-                                break
-                    except Exception:
-                        pass
-                self._set_pad(raw.decode(errors="replace") if raw else "game controller", kind)
-                return pad
-        return None
-
-    def _set_pad(self, name: str | None, kind: str) -> None:
-        if name == self.pad_name and kind == self.pad_kind:
+    def _set_pads(self, names: tuple[str, ...], kind: str) -> None:
+        if names == self.pad_names and kind == self.pad_kind:
             return
-        self.pad_name, self.pad_kind = name, kind
+        self.pad_names, self.pad_kind = names, kind
+        self._notify()
+
+    def _fail(self, message: str) -> None:
+        self.error = message
+        self.pad_names, self.pad_kind = (), "generic"
+        self._notify()
+
+    def _notify(self) -> None:
         if self.on_change is not None:
             try:
-                self.on_change(name)
+                self.on_change(self.pad_name)
             except Exception:
                 pass
+
+
+def watch(seconds: float = 20.0, controls: ControlMap | None = None, out=print) -> bool:
+    """Show what the app sees from the game controllers for `seconds`: which
+    pads connect, every change of what is pressed and what it means on the
+    Game Boy (`python main.py controller-test`). For finding out why a pad
+    does nothing. True if a controller was seen."""
+    import time
+    held = HeldButtons()
+    pad = Gamepad(held, controls or ControlMap.load(),
+                  on_change=lambda n: out(f"[controller] {'connected: ' + n if n else 'no controller connected'}"))
+    pad.start()
+    pad.active = True
+    out(f"[controller] watching for {seconds:.0f} s: press buttons on the pad (Ctrl-C ends)")
+    t0 = time.time()
+    last = None
+    seen = False
+    try:
+        while time.time() - t0 < seconds and pad.is_alive():
+            seen = seen or bool(pad.pad_names)
+            now = (pad.raw_held, held.held())
+            if now != last:
+                out(f"[controller] pressed: {pad.raw_text() or '—':<24} Game Boy: "
+                    f"{action_name(held.held())}")
+                last = now
+            time.sleep(0.02)
+    except KeyboardInterrupt:
+        pass
+    if pad.error:
+        out(f"[controller] controllers are off: {pad.error}")
+    elif not seen:
+        out("[controller] no game controller was seen; plug one in by USB or pair it by "
+            "Bluetooth and try again")
+    pad.stop()
+    pad.join(timeout=2)
+    return seen

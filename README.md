@@ -170,12 +170,18 @@ ignores them for one start.
   is START, Shift is SELECT; the buttons on the picture can be clicked. A
   controller connected by USB or Bluetooth is picked up while the app runs
   and shown next to *Controller* (a Switch Pro, Xbox or PlayStation pad, or
-  anything else SDL2 knows); as standard the D-pad or left stick move, A / X
-  = A, B / Y = B, + = START, − = SELECT. **Controls…** changes all of this:
-  click a cell, press the key or the controller button you want (right-click
-  adds a second one or clears), and it is saved in `settings.json` under
-  `controls` for next time. The window names the buttons the way your
-  controller does (a PlayStation ✕, a Switch −). Any ROM that boots can be
+  anything else SDL2 knows); every connected controller plays, so it does
+  not matter which one the system lists first. As standard the D-pad or
+  left stick move, A / X = A, B / Y = B, + = START, − = SELECT.
+  **Controls…** changes all of this: click a cell, press the key or the
+  controller button you want (right-click adds a second one or clears), and
+  it is saved in `settings.json` under `controls` for next time. The window
+  names the buttons the way your controller does (a PlayStation ✕, a Switch
+  −), and while nothing is being bound its status line shows what is pressed
+  on the controller right now and what that does on the Game Boy — the
+  quickest way to see whether the app hears the pad at all (hovering
+  *Controller* shows the same). Without the app, `python main.py
+  controller-test` prints the same for 20 seconds. Any ROM that boots can be
   played, not only Super Mario Land. Each finished round of an agent's
   playback is written to the Train log.
 

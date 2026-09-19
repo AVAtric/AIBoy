@@ -81,6 +81,7 @@ PUMP_MS = 16                # the GUI's frame timer: paints the newest emulator 
 IDLE_SCREEN_TEXT = "No video"
 HUMAN_FROM_START = "from the start"     # the "Start:" choice that boots the game normally
 NO_GAMEPAD = "none — keyboard"
+GAMEPAD_OFF = "unavailable"           # SDL could not start; the hover text says why
 INTRO_DISABLED = os.environ.get("AIBOY_NO_INTRO") == "1"      # tests: silent, no video
 
 
@@ -708,13 +709,7 @@ class AIboyGUI:
         self.gamepad_label = ttk.Label(you, textvariable=self.gamepad_var, font=MONO,
                                        foreground=THEME.muted, wraplength=TRACK_W - 90)
         self.gamepad_label.grid(row=1, column=1, sticky="w", padx=(4, 0), pady=(4, 0))
-        tooltip(pad_lbl, lambda: (f"Game controller in use: {self.gamepad_var.get()}. "
-                                  if self.gamepad.pad_name else
-                                  "No game controller found. ") + (
-                                  f"Controllers are off: {self.gamepad.error}."
-                                  if self.gamepad.error else
-                                  "Plug one in by USB or pair it by Bluetooth; it is picked "
-                                  "up while the app runs."), self.gamepad_label)
+        tooltip(pad_lbl, self._gamepad_help, self.gamepad_label)
         self.btn_human = ttk.Button(you, text="🎮 Play yourself", command=self.toggle_human_play)
         self.btn_human.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
         tooltip(self.btn_human, lambda: (
@@ -741,6 +736,22 @@ class AIboyGUI:
         self._play_widgets: list[tk.Widget] = [self.model_combo, ep_spin, speed_combo,
                                                self.btn_play_start, self.btn_play_adv,
                                                self.human_start_combo, self.btn_human]
+
+    def _gamepad_help(self) -> str:
+        """Hover text of the Controller line: which pads are in use and what
+        is pressed on them right now, or why controllers are off."""
+        pad = self.gamepad
+        if pad.error:
+            return (f"Game controllers are off: {pad.error}. The keyboard and the mouse still "
+                    f"work. `python main.py controller-test` shows what SDL sees.")
+        if not pad.pad_name:
+            return ("No game controller found. Plug one in by USB or pair it by Bluetooth; it "
+                    "is picked up while the app runs.")
+        pressed = pad.raw_text()
+        return (f"Game controller in use: {pad.pad_name}. "
+                + (f"Pressed on it right now: {pressed}. " if pressed else
+                   "Nothing is pressed on it right now. ")
+                + "Every connected controller plays; Controls… shows what each button does.")
 
     def open_controls(self) -> None:
         """The key / controller mapping window (one at a time)."""
@@ -1962,6 +1973,7 @@ class AIboyGUI:
         self._begin_playback("human")
         self.play_status_var.set("starting…")
         self.held.clear()
+        self.gamepad.remap()          # a button already held on the pad counts from the start
         self.keyboard.set_enabled(True)
         self.gamepad.active = True
         self.gameboy.focus_set()
@@ -2086,10 +2098,15 @@ class AIboyGUI:
                 self.wizard.on_play_done(item[1])
         elif kind == "gamepad":
             name = item[1]
-            self.gamepad_var.set(name or NO_GAMEPAD)
-            self.gamepad_label.config(foreground=THEME.ok if name else THEME.muted)
-            self.flash(f"Game controller connected: {name}" if name
-                       else "Game controller disconnected.")
+            if self.gamepad.error:
+                self.gamepad_var.set(GAMEPAD_OFF)
+                self.gamepad_label.config(foreground=THEME.err)
+                self.flash(f"Game controllers are off: {self.gamepad.error}", seconds=12)
+            else:
+                self.gamepad_var.set(name or NO_GAMEPAD)
+                self.gamepad_label.config(foreground=THEME.ok if name else THEME.muted)
+                self.flash(f"Game controller connected: {name}" if name
+                           else "Game controller disconnected.")
             if self._controls_dialog is not None:
                 self._controls_dialog.refresh()
         elif kind == "play_error":
@@ -2252,6 +2269,7 @@ class AIboyGUI:
                     kill_if_alive(proc)
         if self.tb_proc is not None and self.tb_proc.poll() is None:
             self.tb_proc.terminate()
+        self.gamepad.join(timeout=2)    # SDL shuts down on its own thread before the process ends
         self.root.destroy()
 
 

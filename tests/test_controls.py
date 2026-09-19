@@ -186,11 +186,40 @@ class GamepadTests(unittest.TestCase):
         pad.join(timeout=10)
         self.assertFalse(pad.is_alive())
         self.assertEqual(held.held(), frozenset())
-        self.assertTrue(all(isinstance(n, str) for n in seen))     # only names, when a pad exists
+        # Names of the pads that exist, or None if controller support is off.
+        self.assertTrue(all(isinstance(n, str) or (n is None and pad.error) for n in seen))
+        self.assertEqual(pad.pad_name, None)                       # closed at the end
         pad.raw_held = frozenset({"a", "dpad_left"})              # remap applies a new table
         m.bind_pad("select", "a")
         pad.remap()
         self.assertEqual(held.held(), {"select", "left"})
+        self.assertEqual(pad.raw_text(), "A (south), D-pad ←")
+
+    def test_active_wakes_the_poller_and_stop_is_quick(self):
+        pad = controls.Gamepad(HeldButtons(), ControlMap())
+        pad.start()
+        pad.active = True
+        self.assertTrue(pad.active)
+        import time
+        t0 = time.time()
+        pad.stop()
+        pad.join(timeout=10)
+        self.assertFalse(pad.is_alive())
+        self.assertLess(time.time() - t0, 3.0)
+
+    def test_pad_names_join_and_kind_defaults(self):
+        pad = controls.Gamepad(HeldButtons(), ControlMap())
+        self.assertIsNone(pad.pad_name)
+        pad.pad_names = ("Pro Controller", "Xbox Wireless Controller")
+        self.assertEqual(pad.pad_name, "Pro Controller + Xbox Wireless Controller")
+        self.assertEqual(pad.pad_kind, "generic")
+        self.assertEqual(pad.raw_text(), "")
+
+    def test_watch_reports_without_a_display(self):
+        lines = []
+        controls.watch(0.3, ControlMap(), out=lines.append)
+        self.assertTrue(any("watching" in line for line in lines))
+        self.assertTrue(all(line.startswith("[controller]") for line in lines))
 
 
 if __name__ == "__main__":
