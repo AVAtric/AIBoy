@@ -40,7 +40,7 @@ from aiboy import APP_NAME, presets, runs, settings, tuning
 from aiboy.experience import Experience, Record
 from aiboy.games import OBS_TYPES, RomInfo, discover_roms, level_choices, probe_rom
 from aiboy.gui.experience_tab import ExperienceTab
-from aiboy.gui.gameboy import PHOTO_W, SCREEN_H, SCREEN_W, GameBoyView
+from aiboy.gui.gameboy import LCD_SCALES, GameBoyView, photo_size
 from aiboy.gui.player import GAME_H, GAME_W, SPEED_CHOICES, EmbeddedPlayer, IntroVideo, LatestFrame
 from aiboy.gui.presets_tab import PresetsTab
 from aiboy.paths import DATA_DIR, FROZEN
@@ -57,10 +57,15 @@ TRACKED_STATS = ("total_timesteps", "ep_rew_mean", "ep_len_mean", "fps", "time_e
 
 LEVEL_CHOICES = level_choices()
 
-# Window: tabs (grow) | Preview (screen width) | Tracking (TRACK_W).
-WINDOW_W, WINDOW_H = 1650, 900
-MIN_W, MIN_H = 1560, 820
+# Window: tabs (grow) | Preview (the Game Boy photo) | Tracking (TRACK_W).
+# The tabs need TABS_W, the Tracking panel TRACK_PANEL_W; the Preview's
+# width and the window's height follow the Game Boy's size, which is the
+# largest LCD scale the display has room for (see choose_lcd_scale).
+TABS_W = 760
 TRACK_W = 330               # width of the Tracking panel's contents
+TRACK_PANEL_W = 360
+CHROME_W, CHROME_H = 60, 155    # paddings, panel headers, top and status bars
+SCREEN_MARGIN_W, SCREEN_MARGIN_H = 20, 80       # room for the menu bar, dock, window title
 
 STOP_GRACE_SECONDS = 20     # SIGINT -> trainer saves final.zip; SIGKILL after this
 NO_MODEL = "(no trained model yet)"     # shown in the model box until a run has produced one
@@ -71,7 +76,22 @@ IDLE_SCREEN_TEXT = "No video"
 INTRO_DISABLED = os.environ.get("AIBOY_NO_INTRO") == "1"      # tests: silent, no video
 
 
-def idle_screen(intro: IntroVideo | None = None) -> Image.Image:
+def choose_lcd_scale(screen_w: int, screen_h: int) -> float:
+    """The largest emulator pixel scale whose window fits the display."""
+    for scale in LCD_SCALES:
+        w, h = window_size(scale)
+        if w <= screen_w - SCREEN_MARGIN_W and h <= screen_h - SCREEN_MARGIN_H:
+            return scale
+    return LCD_SCALES[-1]
+
+
+def window_size(lcd_scale: float) -> tuple[int, int]:
+    pw, ph = photo_size(lcd_scale)
+    return TABS_W + pw + TRACK_PANEL_W + CHROME_W, ph + CHROME_H
+
+
+def idle_screen(intro: IntroVideo | None = None,
+                size: tuple[int, int] = (240, 216)) -> Image.Image:
     """Screen for the LCD while no video is active: the intro video's last
     frame with the logo, with a pixel-font "No video" under it. Falls back
     to a drawn screen when the intro assets are missing."""
@@ -81,7 +101,7 @@ def idle_screen(intro: IntroVideo | None = None) -> Image.Image:
         draw = ImageDraw.Draw(base)
         w = draw.textlength(IDLE_SCREEN_TEXT)
         draw.text(((GAME_W - w) / 2, 92), IDLE_SCREEN_TEXT, fill=(2, 10, 7))
-        return base.resize((SCREEN_W, SCREEN_H), Image.NEAREST)
+        return base.resize(size, Image.NEAREST)
     img = Image.new("RGB", (GAME_W, GAME_H), (155, 188, 15))
     draw = ImageDraw.Draw(img)
     dark = (15, 56, 15)
@@ -89,7 +109,7 @@ def idle_screen(intro: IntroVideo | None = None) -> Image.Image:
     for i, line in enumerate((APP_NAME, IDLE_SCREEN_TEXT)):
         w = draw.textlength(line)
         draw.text(((GAME_W - w) / 2, 56 + i * 20), line, fill=dark)
-    return img.resize((SCREEN_W, SCREEN_H), Image.NEAREST)
+    return img.resize(size, Image.NEAREST)
 
 
 def interrupt(proc: subprocess.Popen | None) -> None:
@@ -119,8 +139,10 @@ class AIboyGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title(f"{APP_NAME} — Super Mario Land")
-        root.geometry(f"{WINDOW_W}x{WINDOW_H}")
-        root.minsize(MIN_W, MIN_H)
+        self.lcd_scale = choose_lcd_scale(root.winfo_screenwidth(), root.winfo_screenheight())
+        self.window_w, self.window_h = window_size(self.lcd_scale)
+        root.geometry(f"{self.window_w}x{self.window_h}")
+        root.minsize(self.window_w - 90, self.window_h - 80)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Cross-thread channels
@@ -393,7 +415,7 @@ class AIboyGUI:
 
     def _init_canvas(self) -> None:
         """Idle screen ("No video") when nothing else is on the LCD; LED off."""
-        self._tk_img = ImageTk.PhotoImage(idle_screen(self.intro))
+        self._tk_img = ImageTk.PhotoImage(idle_screen(self.intro, self.gameboy.screen_size))
         self.gameboy.set_screen(self._tk_img)
         self.gameboy.set_power(False)
 
@@ -493,7 +515,7 @@ class AIboyGUI:
         ttk.Label(pb_frame, textvariable=self.train_progress_text, width=32, anchor="e").grid(
             row=0, column=1, sticky="e")
 
-        # ---- Training log (full width, grows). Live stats are on the screen panel. ----
+        # ---- Training log (full width, grows). Live stats are under Tracking. ----
         parent.rowconfigure(3, weight=1)
         log_frame = ttk.LabelFrame(parent, text="Training log", padding=4)
         log_frame.grid(row=3, column=0, sticky="nsew")
@@ -513,13 +535,12 @@ class AIboyGUI:
         up as the agent presses them, and a status line under it. Playback,
         the live preview during training and the wizard's Watch step all
         render here, so nothing has to switch tabs to be seen."""
-        self.gameboy = GameBoyView(parent)
+        self.gameboy = GameBoyView(parent, self.lcd_scale)
         self.gameboy.pack()
-        self.canvas = self.gameboy                    # the same canvas, older name
         self._init_canvas()
         self.play_status_var = tk.StringVar(value="idle")
         status = ttk.Label(parent, textvariable=self.play_status_var, font=MONO,
-                           wraplength=PHOTO_W, anchor="center", justify="center")
+                           wraplength=self.gameboy.geo.width, anchor="center", justify="center")
         status.pack(fill="x", pady=(4, 0))
         tooltip(status, "What the screen is showing right now: the model being played, the "
                         "live preview of a training run, or the last round's result.")
@@ -531,6 +552,7 @@ class AIboyGUI:
         stats = ttk.LabelFrame(parent, text="Live episode", padding=(6, 2))
         stats.pack(fill="x", pady=(0, 6))
         keys = ["episode", "world", "power", "lives", "coins", "reward", "x", "steps", "action"]
+        names = {"episode": "round"}           # the player's "episode" is a round to the user
         help_texts = {
             "episode": "Round being played, of how many.",
             "world": "Level Mario is in (world-level).",
@@ -545,7 +567,7 @@ class AIboyGUI:
         left = keys[:5]
         for col, column_keys in enumerate((left, keys[5:])):
             for row, key in enumerate(column_keys):
-                lbl = ttk.Label(stats, text=f"{key}:", foreground=THEME.muted)
+                lbl = ttk.Label(stats, text=f"{names.get(key, key)}:", foreground=THEME.muted)
                 lbl.grid(row=row, column=col * 2, sticky="w", padx=(0 if col == 0 else 12, 4))
                 val = ttk.Label(stats, textvariable=self.play_stat_vars[key], font=MONO_BOLD,
                                 width=7 if col == 0 else 14, anchor="w")
@@ -639,10 +661,10 @@ class AIboyGUI:
         rounds = ttk.LabelFrame(parent, text="Rounds played", padding=4)
         rounds.pack(fill="both", expand=True, pady=(6, 0))
         self.rounds_tree = make_table(rounds, [
-            ("round", "#", 30, "e", False), ("score", "score", 58, "e", False),
+            ("round", "#", 30, "e", False), ("reward", "reward", 58, "e", False),
             ("steps", "steps", 52, "e", False), ("end", "ended", 150, "w", True),
         ], height=6)
-        tooltip(self.rounds_tree, "One line per finished round: the score it reached, how many "
+        tooltip(self.rounds_tree, "One line per finished round: the reward it earned, how many "
                                   "decisions it took, and how it ended (died, cleared, time "
                                   "budget, stalled…). Cleared when a new playback starts.")
 
@@ -1806,7 +1828,7 @@ class AIboyGUI:
 
         latest = self.frames.take()
         if latest is not None:
-            img = Image.fromarray(latest).resize((SCREEN_W, SCREEN_H), Image.NEAREST)
+            img = Image.fromarray(latest).resize(self.gameboy.screen_size, Image.NEAREST)
             self._tk_img = ImageTk.PhotoImage(img)
             self.gameboy.set_screen(self._tk_img)
 
@@ -1886,9 +1908,9 @@ class AIboyGUI:
                                                        r["steps"], r["end"]))
             self.rounds_tree.see(self.rounds_tree.get_children()[-1])
         elif kind == "play_done":
-            # Keep the last episode's report ("Episode 2: … died in 1-2") visible.
+            # Keep the last round's report ("Round 2: … died in 1-2") visible.
             last = self.play_status_var.get()
-            self.play_status_var.set(f"done · {last}" if last.startswith("Episode") else "done")
+            self.play_status_var.set(f"done · {last}" if last.startswith("Round") else "done")
             self._play_finished()
             if self.wizard is not None:
                 self.wizard.on_play_done(item[1])

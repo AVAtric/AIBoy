@@ -1,8 +1,8 @@
 """Play through the GUI and watch the Game Boy react: train a tiny model,
 play it at real speed, and check mid-play that frames reach the LCD, the
 pressed buttons light up, the battery LED is on, and finished rounds land
-in the Rounds table. With a path as first argument, screenshots of the
-Preview are written there (macOS). ~60 s."""
+in the Rounds table. With a directory as first argument, screenshots of
+the whole window are written there (macOS). ~60 s."""
 import subprocess, sys, time, tkinter as tk
 from _common import say, silence_dialogs, cleanup
 
@@ -20,8 +20,7 @@ def fail(msg):
 
 def shot(name):
     if OUT and sys.platform == "darwin":
-        f = app.preview_frame
-        x, y, w, h = f.winfo_rootx(), f.winfo_rooty(), f.winfo_width(), f.winfo_height()
+        x, y, w, h = root.winfo_rootx(), root.winfo_rooty(), root.winfo_width(), root.winfo_height()
         subprocess.run(["screencapture", "-x", "-R", f"{x},{y},{w},{h}", f"{OUT}/{name}.png"])
 
 def tick():

@@ -1,5 +1,5 @@
 """Marathon through the GUI: train a short marathon run from the Train tab,
-then play it on the screen panel (one life from 1-1) and check the
+then play it on the Game Boy (one life from 1-1) and check the
 episode-end report. ~40 s."""
 import sys, time, tkinter as tk
 from _common import say, silence_dialogs, cleanup

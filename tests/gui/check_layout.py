@@ -1,4 +1,5 @@
-"""Every tab, the Preview and the Tracking panel must fit the default window."""
+"""Every tab, the Preview and the Tracking panel must fit the window, at
+the Game Boy size chosen for this display and at the smallest one."""
 import tkinter as tk
 from _common import say
 
@@ -6,7 +7,11 @@ from aiboy.gui import app as gui
 
 root = tk.Tk(); root.withdraw()
 app = gui.AIboyGUI(root); root.update()
-W, H = gui.WINDOW_W, gui.WINDOW_H
+W, H = app.window_w, app.window_h
+say(f"display {root.winfo_screenwidth()}x{root.winfo_screenheight()} -> LCD scale "
+    f"{app.lcd_scale} -> window {W}x{H}, screen {app.gameboy.screen_size}")
+for sw, sh, want in ((2560, 1440, 2.0), (1728, 1117, 1.75), (1440, 900, 1.5)):
+    assert gui.choose_lcd_scale(sw, sh) == want, (sw, sh, gui.choose_lcd_scale(sw, sh))
 pw, ph = app.preview_frame.winfo_reqwidth(), app.preview_frame.winfo_reqheight()
 tw, th = app.tracking_frame.winfo_reqwidth(), app.tracking_frame.winfo_reqheight()
 avail_h, left_w = H - 140, W - 40 - pw - tw
@@ -28,6 +33,10 @@ for name, tab in [("wizard", app.wizard_tab), ("train", app.train_tab), ("tune",
 app.gameboy.show("RIGHT+RUN+JUMP"); assert app.gameboy.pressed == {"right", "b", "a"}
 app.gameboy.show("NOOP"); assert not app.gameboy.pressed
 assert not app.gameboy.power; app.gameboy.set_power(True); assert app.gameboy.power
+# The smallest Game Boy still holds the frame at 1.5x and fits its window.
+from aiboy.gui.gameboy import GameBoyView
+small = GameBoyView(root, 1.5); root.update()
+assert small.screen_size == (240, 216) and small.winfo_reqheight() + gui.CHROME_H == gui.window_size(1.5)[1]
 app._closing = True; root.destroy()
 print("LAYOUT_OK" if ok else "LAYOUT_PROBLEM")
 raise SystemExit(0 if ok else 1)

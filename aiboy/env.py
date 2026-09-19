@@ -240,7 +240,7 @@ class MarioEnv(gym.Env):
         # Marathon mode: index into SML_ALL_LEVELS of the level being played
         # and the number of clears so far in this episode. Every episode is
         # the same marathon (from 1-1, one life) whoever runs it, so a
-        # training reward, an evaluation reward and what the screen panel
+        # training reward, an evaluation reward and what the Preview screen
         # shows all mean the same thing. The episode ends with a big bonus
         # after the last usable level.
         self._marathon_idx = 0

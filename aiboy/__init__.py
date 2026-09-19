@@ -3,7 +3,7 @@ it learn from every training it has ever done.
 
     aiboy/            core (no Tk): paths, games, env, presets, runs, tuning,
                       experience, the trainer and the command line
-    aiboy/gui/        the Tkinter application (wizard, tabs, screen panel)
+    aiboy/gui/        the Tkinter application (wizard, tabs, the Game Boy preview, tracking)
 """
 APP_NAME = "AIboy"
 __version__ = "1.0.0"

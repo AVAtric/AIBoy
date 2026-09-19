@@ -2,12 +2,15 @@
 emulator's picture inside its LCD, its buttons lit up as the agent presses
 them, and the battery LED on while something is playing.
 
-`assets/orig_gb.png` is the device photo, shown at its native size so the
-LCD (a 10:9 window of 242x218 px) holds the 160x144 emulator frame at an
-exact 1.5x, pixel for pixel. `GameBoyView` is one canvas with three image
-items: the photo, the screen and the controls region, which is swapped for
-a version with a glow over the pressed buttons (composed with PIL once per
-action and cached). Hovering a button tells what it does.
+`assets/orig_gb.png` is the device photo. Its LCD is a 10:9 window of
+242x218 px, so at the photo's native size it holds the 160x144 emulator
+frame at 1.5x; the photo is scaled so the frame lands on the LCD at the
+largest of LCD_SCALES the display has room for (`Geometry`; the window
+picks the scale, see app.choose_lcd_scale). `GameBoyView` is one canvas
+with three image items: the photo, the screen and the controls region,
+which is swapped for a version with a glow over the pressed buttons
+(composed with PIL once per action and cached). Hovering a button tells
+what it does.
 
 Without the photo (a bundle built without the asset) a plain drawn device
 with the same geometry is used.
@@ -17,7 +20,9 @@ from __future__ import annotations
 import tkinter as tk
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageTk
+from tkinter import ttk
+
+from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
 from aiboy.gui.widgets import Tooltip
 from aiboy.paths import BUNDLE_DIR
@@ -25,12 +30,11 @@ from aiboy.paths import BUNDLE_DIR
 PHOTO = BUNDLE_DIR / "assets" / "orig_gb.png"
 PHOTO_W, PHOTO_H = 446, 737
 
-# Everything below is in photo pixels (measured from the image).
+GAME_W, GAME_H = 160, 144
+LCD_SCALES = (2.0, 1.75, 1.5)                  # emulator pixel scales, largest first
+
+# Everything below is in the photo's own pixels (measured from the image).
 LCD = (109, 99, 351, 317)                      # the blue window behind the glass
-SCREEN_SCALE = 1.5
-SCREEN_W, SCREEN_H = 160 * 3 // 2, 144 * 3 // 2                  # 240x216
-SCREEN_X = (LCD[0] + LCD[2] - SCREEN_W) // 2
-SCREEN_Y = (LCD[1] + LCD[3] - SCREEN_H) // 2
 LED = (64, 178)                                # battery LED centre
 PAD_BOX = (28, 440, 420, 650)                  # region that holds every button
 
@@ -59,6 +63,40 @@ LABELS = {
 WORD_BUTTONS = {"RIGHT": "right", "LEFT": "left", "DOWN": "down", "UP": "up",
                 "JUMP": "a", "RUN": "b", "A": "a", "B": "b", "START": "start", "SELECT": "select"}
 GLOW = (255, 214, 60)             # the highlight colour (alpha added per layer)
+
+
+def photo_scale(lcd_scale: float) -> float:
+    """Photo scale that puts GAME_W * lcd_scale pixels across the LCD."""
+    return lcd_scale * GAME_W / (LCD[2] - LCD[0])
+
+
+def photo_size(lcd_scale: float) -> tuple[int, int]:
+    f = photo_scale(lcd_scale)
+    return round(PHOTO_W * f), round(PHOTO_H * f)
+
+
+class Geometry:
+    """Every position of the view for one LCD scale, in canvas pixels."""
+
+    def __init__(self, lcd_scale: float):
+        f = self.factor = photo_scale(lcd_scale)
+        self.lcd_scale = lcd_scale
+        self.width, self.height = photo_size(lcd_scale)
+        self.screen_w, self.screen_h = round(GAME_W * lcd_scale), round(GAME_H * lcd_scale)
+        lcd = self.box(LCD)
+        self.screen_x = (lcd[0] + lcd[2] - self.screen_w) // 2
+        self.screen_y = (lcd[1] + lcd[3] - self.screen_h) // 2
+        self.led = (round(LED[0] * f), round(LED[1] * f))
+        self.pad_box = self.box(PAD_BOX)
+        self.regions = {key: (kind, self.box(b)) for key, (kind, b) in REGIONS.items()}
+
+    def box(self, b: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+        f = self.factor
+        return round(b[0] * f), round(b[1] * f), round(b[2] * f), round(b[3] * f)
+
+    @property
+    def screen_size(self) -> tuple[int, int]:
+        return self.screen_w, self.screen_h
 
 
 def buttons_for_action(name: str | None) -> frozenset[str]:
@@ -101,7 +139,6 @@ def device_mask(img: Image.Image) -> Image.Image:
     backdrop is whatever a flood fill reaches from the corners. The edge is
     eroded by a pixel and softened so the photo's anti-aliased white rim
     disappears instead of showing as a bright outline."""
-    from PIL import ImageFilter
     probe = img.copy()
     sentinel = (255, 0, 255)
     w, h = probe.size
@@ -121,8 +158,9 @@ def device_mask(img: Image.Image) -> Image.Image:
     return mask.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.GaussianBlur(0.7))
 
 
-def load_photo(path: Path = PHOTO, background: tuple[int, int, int] = (34, 34, 34)) -> Image.Image:
-    """The device photo at its native size (or the drawn fallback), laid on
+def load_photo(path: Path = PHOTO, background: tuple[int, int, int] = (34, 34, 34),
+               size: tuple[int, int] = (PHOTO_W, PHOTO_H)) -> Image.Image:
+    """The device photo at `size` (or the drawn fallback), laid on
     `background` (the window colour) with the photo's white backdrop
     removed, so the device sits on the window and not on a white card."""
     try:
@@ -131,14 +169,16 @@ def load_photo(path: Path = PHOTO, background: tuple[int, int, int] = (34, 34, 3
         img = _draw_fallback()
     if img.size != (PHOTO_W, PHOTO_H):
         img = img.resize((PHOTO_W, PHOTO_H), Image.LANCZOS)
-    return Image.composite(img, Image.new("RGB", img.size, background), device_mask(img))
+    img = Image.composite(img, Image.new("RGB", img.size, background), device_mask(img))
+    if img.size != tuple(size):
+        img = img.resize(size, Image.LANCZOS)
+    return img
 
 
 def window_rgb(widget: tk.Misc) -> tuple[int, int, int]:
     """The window background as 8-bit RGB (Tk names it, e.g.
     'systemWindowBackgroundColor' on macOS, so ask Tk for the value)."""
     try:
-        from tkinter import ttk
         name = ttk.Style(widget).lookup("TFrame", "background") or widget.cget("background")
         r, g, b = widget.winfo_rgb(name)
         return r // 256, g // 256, b // 256
@@ -146,52 +186,56 @@ def window_rgb(widget: tk.Misc) -> tuple[int, int, int]:
         return 34, 34, 34
 
 
-def glow_image(pad: Image.Image, pressed: frozenset[str]) -> Image.Image:
-    """The controls region (`pad`, the PAD_BOX crop) with a glow over every
+def glow_image(pad: Image.Image, pressed: frozenset[str], geo: Geometry) -> Image.Image:
+    """The controls region (`pad`, the pad_box crop) with a glow over every
     button in `pressed`."""
     if not pressed:
         return pad
     img = pad.convert("RGBA")
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     d = ImageDraw.Draw(overlay)
-    ox, oy = PAD_BOX[0], PAD_BOX[1]
+    ox, oy = geo.pad_box[0], geo.pad_box[1]
+    f = geo.factor
     for key in pressed:
-        kind, (x0, y0, x1, y1) = REGIONS[key]
+        kind, (x0, y0, x1, y1) = geo.regions[key]
         x0, y0, x1, y1 = x0 - ox, y0 - oy, x1 - ox, y1 - oy
         # A soft halo around the button, then the bright press on top.
-        for grow, alpha in ((7, 60), (3, 100), (0, 150)):
+        for grow, alpha in ((7 * f, 60), (3 * f, 100), (0, 150)):
             box = (x0 - grow, y0 - grow, x1 + grow, y1 + grow)
             if kind == "oval":
                 d.ellipse(box, fill=GLOW + (alpha,))
             else:
-                d.rounded_rectangle(box, radius=6 + grow, fill=GLOW + (alpha,))
+                d.rounded_rectangle(box, radius=6 * f + grow, fill=GLOW + (alpha,))
     return Image.alpha_composite(img, overlay).convert("RGB")
 
 
 class GameBoyView(tk.Canvas):
-    """The device on a canvas. `set_screen(photo_image)` puts a 240x216
-    PhotoImage on the LCD; `show(action_name)` lights that action's buttons
-    (None or "NOOP" clears them); `set_power(on)` drives the battery LED;
-    hovering a button shows its label."""
+    """The device on a canvas, at `lcd_scale` emulator pixels (see
+    `Geometry`). `set_screen(photo_image)` puts a `screen_size` PhotoImage
+    on the LCD; `show(action_name)` lights that action's buttons (None or
+    "NOOP" clears them); `set_power(on)` drives the battery LED; hovering
+    a button shows its label."""
 
-    def __init__(self, parent: tk.Misc, **kw):
+    def __init__(self, parent: tk.Misc, lcd_scale: float = 1.5, **kw):
+        geo = self.geo = Geometry(lcd_scale)
         rgb = window_rgb(parent)
-        self.photo = load_photo(background=rgb)
-        super().__init__(parent, width=PHOTO_W, height=PHOTO_H, highlightthickness=0,
+        self.photo = load_photo(background=rgb, size=(geo.width, geo.height))
+        super().__init__(parent, width=geo.width, height=geo.height, highlightthickness=0,
                          bg="#%02x%02x%02x" % rgb, **kw)
         self._photo_img = ImageTk.PhotoImage(self.photo)
         self.create_image(0, 0, anchor="nw", image=self._photo_img)
-        self._pad = self.photo.crop(PAD_BOX)
+        self._pad = self.photo.crop(geo.pad_box)
         self._cache: dict[frozenset[str], ImageTk.PhotoImage] = {}
         self._pressed: frozenset[str] = frozenset()
-        self._pad_id = self.create_image(PAD_BOX[0], PAD_BOX[1], anchor="nw",
+        self._pad_id = self.create_image(geo.pad_box[0], geo.pad_box[1], anchor="nw",
                                          image=self._pad_image(frozenset()))
-        self._screen_id = self.create_image(SCREEN_X, SCREEN_Y, anchor="nw")
+        self._screen_id = self.create_image(geo.screen_x, geo.screen_y, anchor="nw")
         self._screen_img: ImageTk.PhotoImage | None = None
-        x, y = LED
-        self._led_halo = self.create_oval(x - 7, y - 7, x + 7, y + 7, fill="#7a1010", outline="",
-                                          state="hidden")
-        self._led = self.create_oval(x - 4, y - 4, x + 4, y + 4, fill="#ff3030", outline="",
+        x, y = geo.led
+        r = max(4, round(4 * geo.factor))
+        self._led_halo = self.create_oval(x - r - 3, y - r - 3, x + r + 3, y + r + 3,
+                                          fill="#7a1010", outline="", state="hidden")
+        self._led = self.create_oval(x - r, y - r, x + r, y + r, fill="#ff3030", outline="",
                                      state="hidden")
         self._power = False
         self._hover: str | None = None
@@ -200,8 +244,12 @@ class GameBoyView(tk.Canvas):
 
     # ----- screen -----
 
+    @property
+    def screen_size(self) -> tuple[int, int]:
+        return self.geo.screen_size
+
     def set_screen(self, image: ImageTk.PhotoImage) -> None:
-        """Show `image` (SCREEN_W x SCREEN_H) on the LCD; keeps a reference."""
+        """Show `image` (`screen_size`) on the LCD; keeps a reference."""
         self._screen_img = image
         self.itemconfig(self._screen_id, image=image)
 
@@ -224,7 +272,7 @@ class GameBoyView(tk.Canvas):
     def _pad_image(self, pressed: frozenset[str]) -> ImageTk.PhotoImage:
         img = self._cache.get(pressed)
         if img is None:
-            img = ImageTk.PhotoImage(glow_image(self._pad, pressed))
+            img = ImageTk.PhotoImage(glow_image(self._pad, pressed, self.geo))
             self._cache[pressed] = img
         return img
 
@@ -239,10 +287,9 @@ class GameBoyView(tk.Canvas):
         self._pressed = pressed
         self.itemconfig(self._pad_id, image=self._pad_image(pressed))
 
-    @staticmethod
-    def button_at(x: int, y: int) -> str | None:
+    def button_at(self, x: int, y: int) -> str | None:
         """The button under canvas position (x, y), if any."""
-        for key, (_kind, (x0, y0, x1, y1)) in REGIONS.items():
+        for key, (_kind, (x0, y0, x1, y1)) in self.geo.regions.items():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 return key
         return None

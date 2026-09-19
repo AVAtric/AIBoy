@@ -369,7 +369,7 @@ class EmbeddedPlayer:
                 self._emit("play_episode", {"episode": ep + 1, "reward": total, "steps": steps,
                                             "end": reason})
                 self._emit("play_status",
-                           f"Episode {ep + 1}: reward {total:.0f}, {steps} steps, {reason}")
+                           f"Round {ep + 1}: reward {total:.0f}, {steps} steps, {reason}")
             self._emit("play_done", summary)
         except Exception:
             self._emit("play_error", traceback.format_exc())

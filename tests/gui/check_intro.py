@@ -20,7 +20,7 @@ say(f"canvas updates during intro: {changes}; sound process seen: {sound_seen}")
 assert changes > 60, "too few frames reached the canvas"
 assert sound_seen or sys.platform != "darwin", "sound did not start"
 # after the intro the canvas shows the idle frame (same pixels as idle_screen())
-idle = gui.idle_screen(app.intro)
+idle = gui.idle_screen(app.intro, app.gameboy.screen_size)
 shown = app._tk_img
 assert shown.width() == idle.width and shown.height() == idle.height
 app._closing = True; root.destroy()

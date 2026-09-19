@@ -1,6 +1,6 @@
 """Build the GUI and exercise every tab without training: wizard navigation,
 presets tab (edit / override / reset / create / rename / delete), Train tab
-markers, screen panel, housekeeping. Dialogs are auto-answered."""
+markers, Tracking panel, housekeeping. Dialogs are auto-answered."""
 import tkinter as tk
 from _common import say, silence_dialogs, cleanup
 
@@ -86,7 +86,7 @@ try:
     app.form.vars["n_envs"].set(10)
     assert app.form.vars["obs_type"].get() == "tiles"
 
-    # ---- screen panel ----
+    # ---- Tracking panel ----
     app.refresh_models(); assert app.select_model(runs.best_model_for_run("mario", "zzcheck-exists"))
     say("model note: " + app.model_note_var.get()[:60]); assert "older run" in app.model_note_var.get()
     app.play_stat_vars["reward"].set("1"); app.clear_screen(); assert app.play_stat_vars["reward"].get() == "—"
