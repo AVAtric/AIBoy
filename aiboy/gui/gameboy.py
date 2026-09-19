@@ -261,11 +261,26 @@ def load_photo(path: Path = PHOTO, background: tuple[int, int, int] = (34, 34, 3
     return img
 
 
+# On macOS a ttk LabelFrame's inside is drawn one shade lighter than the
+# window (Tk's name for that shade), so a device composed on the window
+# colour showed as a darker rectangle around the rounded corners.
+AQUA_GROUP_BOX_COLOR = "systemWindowBackgroundColor1"
+
+
 def window_rgb(widget: tk.Misc) -> tuple[int, int, int]:
-    """The window background as 8-bit RGB (Tk names it, e.g.
-    'systemWindowBackgroundColor' on macOS, so ask Tk for the value)."""
+    """The colour behind `widget` as 8-bit RGB: the group-box shade when it
+    sits inside a ttk LabelFrame on macOS, else the frame background (Tk
+    names them, e.g. 'systemWindowBackgroundColor', so ask Tk for the
+    value)."""
     try:
         name = ttk.Style(widget).lookup("TFrame", "background") or widget.cget("background")
+        if widget.tk.call("tk", "windowingsystem") == "aqua":
+            parent = widget
+            while parent is not None:
+                if isinstance(parent, ttk.LabelFrame):
+                    name = AQUA_GROUP_BOX_COLOR
+                    break
+                parent = parent.master
         r, g, b = widget.winfo_rgb(name)
         return r // 256, g // 256, b // 256
     except tk.TclError:

@@ -244,8 +244,9 @@ update under Tracking and the log scrolls below the fields.
 - A **modified** marker appears under the preset selector as soon as a field
   differs from the preset.
 - **Live preview while training** plays each new `best_model.zip` on the
-  Game Boy as it is saved (costs some fps). When a run ends its best model is
-  selected under Tracking.
+  Game Boy as it is saved, at training speed (unthrottled, like the trainer;
+  the play modes run at real time). It costs some training fps. When a run
+  ends its best model is selected under Tracking.
 - **Stop** interrupts the trainer: it saves `checkpoints/final.zip` and
   exits. `logs/best_model.zip` is always kept.
 - **TensorBoard** serves `models/mario/` on port 6006. **Save as…** stores

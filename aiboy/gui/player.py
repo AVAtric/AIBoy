@@ -24,9 +24,9 @@ and the canvas would only ever show the last frame of each step.
 
 Three entry points share one engine:
   - `play()`        plays a fixed model for N episodes (Play tab, wizard step 4)
-  - `preview()`     follows a training run at real time, reloading
-                    `best_model.zip` whenever it changes, until training
-                    ends (Train tab live preview)
+  - `preview()`     follows a training run at training speed (unthrottled),
+                    reloading `best_model.zip` whenever it changes, until
+                    training ends (Train tab live preview)
   - `play_human()`  runs the plain game at real speed with the buttons the
                     person holds (keyboard / mouse / controller, see
                     controls.py) — no model, no environment, any ROM
@@ -212,6 +212,7 @@ SPEED_CHOICES = [("0.5×", 0.5), ("1× (real time)", 1.0), ("2×", 2.0),
                  ("4×", 4.0), ("Unlimited", 0.0)]
 
 HUMAN_STATS_EVERY = 6           # frames between two live-panel updates while a person plays (10 Hz)
+PREVIEW_SPEED = 0.0             # the live preview during training runs unthrottled, like the trainer
 
 
 def _button_events():
@@ -460,11 +461,11 @@ class EmbeddedPlayer:
                     try:
                         if session is not None:
                             session.close()
-                        # Real time, like the Play controls at 1x: fluent to
-                        # watch, and it costs the trainer less CPU than the
-                        # old fast-forward-then-sleep pattern.
+                        # Training speed (unthrottled), the way the agent is
+                        # actually trained; the LCD shows whichever frame is
+                        # newest at each paint. Real time is for playing.
                         session = _Session(game, obs_type, action_repeat, frame_stack,
-                                           start_level, self.frames, speed_mult=1.0)
+                                           start_level, self.frames, speed_mult=PREVIEW_SPEED)
                         model = PPO.load(str(model_path), env=session.vec, device="cpu")
                         model_mtime = mtime
                         obs = session.vec.reset()
