@@ -195,3 +195,23 @@ class GamepadTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PhotoTilesTests(unittest.TestCase):
+    """The device photo is cut into bands that leave out the screen's rim
+    box and the pad box (see gameboy.GameBoyView)."""
+
+    def test_tiles_cover_everything_but_the_holes_without_overlap(self):
+        from aiboy.gui.gameboy import tiles
+        holes = [(20, 20, 40, 40), (10, 60, 90, 80)]
+        out = tiles(100, 100, holes)
+        area = sum((x1 - x0) * (y1 - y0) for x0, y0, x1, y1 in out)
+        self.assertEqual(area, 100 * 100 - 20 * 20 - 80 * 20)
+        for x0, y0, x1, y1 in out:
+            self.assertTrue(0 <= x0 < x1 <= 100 and 0 <= y0 < y1 <= 100, (x0, y0, x1, y1))
+            for hx0, hy0, hx1, hy1 in holes:      # no tile reaches into a hole
+                self.assertTrue(x1 <= hx0 or x0 >= hx1 or y1 <= hy0 or y0 >= hy1)
+        for i, a in enumerate(out):                # and no two tiles overlap
+            for b in out[i + 1:]:
+                self.assertTrue(a[2] <= b[0] or a[0] >= b[2] or a[3] <= b[1] or a[1] >= b[3])
+        self.assertEqual(tiles(10, 10, []), [(0, 0, 10, 10)])

@@ -16,7 +16,7 @@ from aiboy.gui import app as gui
 
 rec = silence_dialogs(gui)
 root = tk.Tk(); app = gui.AIboyGUI(root)
-state = {"s": "start", "frames": set(), "lit": 0, "led": 0, "t0": 0.0, "worlds": set(), "x": 0}
+state = {"s": "start", "frames0": 0, "lit": 0, "led": 0, "t0": 0.0, "worlds": set(), "x": 0}
 
 
 def fail(msg):
@@ -44,9 +44,8 @@ def tick():
         assert app.btn_human.cget("text").startswith("■"), "button did not turn into Stop"
         assert app._live_labels["reward"].cget("text") == "score:", "live panel not in human wording"
         root.lift()
-        state["s"] = "booting"; state["t0"] = time.time()
+        state["s"] = "booting"; state["t0"] = time.time(); state["frames0"] = app.frames_painted
     elif s == "booting":
-        state["frames"].add(id(app._tk_img))
         if time.time() - state["t0"] > 3.0:               # past the Nintendo logo, at the title
             key("Return"); root.after(120, lambda: key("Return", False))
             state["s"] = "started"; state["t0"] = time.time()
@@ -55,7 +54,6 @@ def tick():
             key("Right"); key("x")                       # walk right and jump, held
             state["s"] = "running"; state["t0"] = time.time()
     elif s == "running":
-        state["frames"].add(id(app._tk_img))
         if app.gameboy.pressed: state["lit"] += 1
         if app.gameboy.power: state["led"] += 1
         w = app.play_stat_vars["world"].get()
@@ -98,10 +96,11 @@ def tick():
             state["s"] = "stopping"; state["t0"] = time.time()
     elif s == "stopping":
         if not app.playing_active() and app.play_status_var.get().startswith("you played"):
-            say(f"frames: {len(state['frames'])}, lit ticks: {state['lit']}, LED ticks: "
+            frames = app.frames_painted - state["frames0"]
+            say(f"frames painted: {frames}, lit ticks: {state['lit']}, LED ticks: "
                 f"{state['led']}, worlds: {sorted(state['worlds'])}, furthest x: {state['x']}, "
                 f"end: {app.play_status_var.get()!r}")
-            if len(state["frames"]) < 30: fail("too few frames reached the LCD")
+            if frames < 300: fail("too few frames reached the LCD (display slower than 30 fps)")
             if state["lit"] < 10: fail("held buttons never lit up")
             if not state["led"]: fail("LED never on")
             if not state["worlds"]: fail("no world reached the live panel (game did not start?)")

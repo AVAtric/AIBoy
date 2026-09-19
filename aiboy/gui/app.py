@@ -36,7 +36,7 @@ import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from PIL import Image, ImageTk
+from PIL import Image
 
 from aiboy import APP_NAME, presets, runs, settings, tuning
 from aiboy.experience import Experience, Record
@@ -75,6 +75,7 @@ SCREEN_MARGIN_W, SCREEN_MARGIN_H = 20, 80       # room for the menu bar, dock, w
 STOP_GRACE_SECONDS = 20     # SIGINT -> trainer saves final.zip; SIGKILL after this
 NO_MODEL = "(no trained model yet)"     # shown in the model box until a run has produced one
 FLASH_SECONDS = 6           # transient status-bar messages
+PUMP_MS = 16                # the GUI's frame timer: paints the newest emulator frame at ~60 Hz
 
 
 IDLE_SCREEN_TEXT = "No video"
@@ -186,7 +187,8 @@ class AIboyGUI:
         self._model_paths: dict[str, Path] = {}
         self._all_presets: dict[str, dict] = {}
         self._tune_results: dict[int, tuning.ConfigResult] = {}
-        self._tk_img: ImageTk.PhotoImage | None = None        # what the LCD shows right now
+        self.frames_painted = 0                 # emulator frames put on the LCD so far
+        self._pending_stats: dict[str, str] = {}   # live-panel values, applied once per pump
         self.train_progress_var = tk.DoubleVar(value=0.0)
         self.train_progress_text = tk.StringVar(value="—")
         self._closing = False
@@ -440,8 +442,7 @@ class AIboyGUI:
 
     def _init_canvas(self) -> None:
         """Idle screen ("No video") when nothing else is on the LCD; LED off."""
-        self._tk_img = ImageTk.PhotoImage(idle_screen(self.intro, self.gameboy.screen_size))
-        self.gameboy.set_screen(self._tk_img)
+        self.gameboy.set_screen(idle_screen(self.intro, self.gameboy.screen_size))
         self.gameboy.set_power(False)
 
     # ---------- Train tab ----------
@@ -800,6 +801,7 @@ class AIboyGUI:
         self._init_canvas()
         self.gameboy.show(None)
         self.clear_rounds()
+        self._pending_stats.clear()
         for v in self.play_stat_vars.values():
             v.set("—")
         self.play_status_var.set("idle")
@@ -1922,6 +1924,7 @@ class AIboyGUI:
         self.btn_human.config(state="disabled" if mode == "agent" else "normal",
                               text="■ Stop playing" if mode == "human" else "🎮 Play yourself")
         self.clear_rounds()
+        self._pending_stats.clear()
         for v in self.play_stat_vars.values():
             v.set("—")
 
@@ -1977,16 +1980,23 @@ class AIboyGUI:
                 self._handle_event(self.stats_queue.get_nowait())
         except queue.Empty:
             pass
+        if self._pending_stats:
+            # Every label change redraws the window (all of it, on macOS), so
+            # the live numbers are applied once per pump, newest values only.
+            for key, val in self._pending_stats.items():
+                if self.play_stat_vars[key].get() != val:
+                    self.play_stat_vars[key].set(val)
+            self._pending_stats.clear()
 
         latest = self.frames.take()
         if latest is not None:
-            img = Image.fromarray(dmg_tint(latest)).resize(self.gameboy.screen_size, Image.NEAREST)
-            self._tk_img = ImageTk.PhotoImage(img)
-            self.gameboy.set_screen(self._tk_img)
+            self.gameboy.set_screen(
+                Image.fromarray(dmg_tint(latest)).resize(self.gameboy.screen_size, Image.NEAREST))
+            self.frames_painted += 1
 
         self._update_status_bar()
         try:
-            self.root.after(33, self._pump)
+            self.root.after(PUMP_MS, self._pump)
         except tk.TclError:
             pass
 
@@ -2048,13 +2058,13 @@ class AIboyGUI:
         elif kind == "play_stat":
             _, key, val = item
             if key in self.play_stat_vars:
-                self.play_stat_vars[key].set(val)
+                self._pending_stats[key] = val
             if key == "action":
                 self.gameboy.show(val)
         elif kind == "play_stats":
             for key, val in item[1].items():
                 if key in self.play_stat_vars:
-                    self.play_stat_vars[key].set(val)
+                    self._pending_stats[key] = val
             if "action" in item[1]:
                 self.gameboy.show(item[1]["action"])
         elif kind == "play_episode":

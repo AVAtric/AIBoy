@@ -12,7 +12,7 @@ RUN = "e2etest-play"
 OUT = sys.argv[1] if len(sys.argv) > 1 else None
 rec = silence_dialogs(gui); cleanup([RUN])
 root = tk.Tk(); app = gui.AIboyGUI(root)
-state = {"s": "start", "lit": 0, "shots": 0, "frames": set(), "t_play": 0.0}
+state = {"s": "start", "lit": 0, "shots": 0, "frames0": 0, "t_play": 0.0}
 
 def fail(msg):
     say(f"FAIL: {msg} (status: {app.play_status_var.get()!r}, errors: {rec['errors']})")
@@ -40,22 +40,22 @@ def tick():
         app.play_max_steps_var.set(150)
         if not app.start_playing(): fail("play did not start: " + str(rec["errors"]))
         root.lift(); root.attributes("-topmost", True)          # so screenshots show the app
-        state["s"] = "playing"; state["t_play"] = time.time()
+        state["s"] = "playing"; state["t_play"] = time.time(); state["frames0"] = app.frames_painted
     elif s == "playing":
         if app.gameboy.pressed:
             state["lit"] += 1
             if state["shots"] < 3 and state["lit"] % 4 == 1:
                 state["shots"] += 1; shot(f"play-{state['shots']}-{'+'.join(sorted(app.gameboy.pressed))}")
-        state["frames"].add(id(app._tk_img))
         if app.gameboy.power: state["led"] = state.get("led", 0) + 1
         if app.play_status_var.get().startswith("done"):
             rows = app.play_rounds
             played = [(r["episode"], round(r["reward"]), r["steps"], r["end"]) for r in rows]
-            say(f"lit ticks: {state['lit']}, LED-on ticks: {state.get('led', 0)}, distinct frames: "
-                f"{len(state['frames'])}, rounds: {played}, {time.time() - state['t_play']:.1f} s")
+            frames = app.frames_painted - state["frames0"]
+            say(f"lit ticks: {state['lit']}, LED-on ticks: {state.get('led', 0)}, frames painted: "
+                f"{frames}, rounds: {played}, {time.time() - state['t_play']:.1f} s")
             if not state.get("led"): fail("LED never on during play")
             if state["lit"] < 5: fail("buttons never lit up during play")
-            if len(state["frames"]) < 30: fail("too few frames reached the LCD")
+            if frames < 30: fail("too few frames reached the LCD")
             if len(rows) != 2: fail("rounds incomplete")
             if app.gameboy.pressed or app.gameboy.power: fail("pad or LED still on after play")
             shot("done")
