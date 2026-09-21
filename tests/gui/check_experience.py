@@ -25,8 +25,12 @@ def fail(msg):
 def setup_search():
     w.goal_var.set(presets.SMOKE_TEST_PRESET); w._on_goal_changed()
     w.template_var.set(tuning.TEMPLATE_PLAIN[tuning.DEFAULT_TEMPLATE]); w._on_template_changed()
+    # the wizard runs exactly its own candidate list (written at Start), so
+    # the check sweep goes in through the wizard
+    plan_by_wizard = w.candidates
+    w.candidates = lambda: (plan_by_wizard() if w.template_var.get() == wizard.AUTO_CHOICE
+                            else ([{"ent_coef": v} for v in SWEEP["ent_coef"]], "check sweep"))
     w.trial_steps_var.set(4000); w.seeds_var.set(1); w._sync_tune_tab()
-    app.set_sweep(SWEEP, "check sweep")
     w.auto_var.set(False)
 
 def tick():
@@ -74,7 +78,9 @@ def tick():
         know = app.experience.knowledge_for(w._trial_task())
         borrowed = tuning.config_diff(know.config, tuning.full_config(app.presets_by_name()[marathon], {}), experience.HYPER_FIELDS)
         if borrowed and "worked best for the campaign" not in w.template_note.cget("text"): fail("borrowed plan: " + w.template_note.cget("text"))
-        if borrowed and app.tune_plan()[0]["combos"][1] != borrowed: fail("borrowed settings not tried first: " + str(app.tune_plan()[0]["combos"][:2]))
+        # the marathon goal is a long run: the borrowed settings are tried with the goal's own curiosity
+        expected = tuning.keep_curiosity([borrowed], app.presets_by_name()[marathon])
+        if borrowed and app.tune_plan()[0]["combos"][1:2] != expected: fail("borrowed settings not tried first: " + str(app.tune_plan()[0]["combos"][:2]))
         w.template_var.set(tuning.TEMPLATE_PLAIN[tuning.DEFAULT_TEMPLATE]); w._on_template_changed()
         setup_search()
         # AIboy acts on what it knows: the improvement is applied only on a clear win,

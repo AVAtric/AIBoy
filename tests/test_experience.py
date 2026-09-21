@@ -282,3 +282,45 @@ class ExperienceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LongRunCuriosityTests(unittest.TestCase):
+    """Short tests cannot judge exploration: a long-run preset's curiosity is
+    never lowered by an improvement, even when the greedier trials scored
+    best (that is what short trials do)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.exp = experience.Experience(Path(self._tmp.name) / "experience.jsonl")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _trial(self, base, overrides, score, seed=0):
+        cfg = tuning.trial_config(base, overrides, 1_000_000, seed)
+        return experience.make_record(cfg, evals_for(score, 1_000_000), duration=300.0,
+                                      completed=True, source="wizard", run_name=f"w-{seed}")
+
+    def test_improvement_keeps_a_long_runs_curiosity(self):
+        long = presets.normalize({"game": "mario", "start_level": "marathon",
+                                  "timesteps": 60_000_000, "ent_coef": 0.02})
+        for seed in (0, 1):
+            self.exp.add(self._trial(long, {}, 1000.0, seed))
+            self.exp.add(self._trial(long, {"ent_coef": 0.005}, 3000.0, seed))
+            self.exp.add(self._trial(long, {"ent_coef": 0.005, "learning_rate": 3e-4}, 3200.0, seed))
+        imp = self.exp.improvement_for("Marathon", long)
+        self.assertIsNotNone(imp)
+        self.assertEqual(imp.overrides, {"learning_rate": 3e-4})     # the greed is dropped
+        self.assertEqual(imp.config["ent_coef"], 0.02)
+        # only the curiosity differed: then there is nothing to improve
+        self.exp.clear()
+        for seed in (0, 1):
+            self.exp.add(self._trial(long, {}, 1000.0, seed))
+            self.exp.add(self._trial(long, {"ent_coef": 0.005}, 3000.0, seed))
+        self.assertIsNone(self.exp.improvement_for("Marathon", long))
+        # a short goal is improved as before
+        short = presets.normalize({**long, "timesteps": 2_000_000})
+        for seed in (0, 1):
+            self.exp.add(self._trial(short, {}, 1000.0, seed))
+            self.exp.add(self._trial(short, {"ent_coef": 0.005}, 3000.0, seed))
+        self.assertEqual(self.exp.improvement_for("Campaign", short).overrides, {"ent_coef": 0.005})

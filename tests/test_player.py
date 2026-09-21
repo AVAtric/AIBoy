@@ -70,27 +70,18 @@ class SoundGateTests(unittest.TestCase):
 
 
 class IntroSoundTests(unittest.TestCase):
-    def _intro(self):
+    def test_boot_video_always_plays_its_jingle(self):
+        """The Sound checkbox is for the games; the boot video plays its
+        sound like a real Game Boy (AIBOY_NO_INTRO skips the video)."""
         import numpy as np
         video = player.IntroVideo.__new__(player.IntroVideo)
         video.frames = np.zeros((3, 144, 160, 3), dtype=np.uint8)
         video.fps = 600.0
         video.idle_index = 2
         video.sound_path = "nowhere.wav"
-        return video
-
-    def test_boot_video_plays_silently_when_sound_is_off(self):
-        done = threading.Event()
-        with mock.patch.object(player, "play_sound") as play_sound:
-            t = self._intro().play(player.LatestFrame(), threading.Event(), done.set, with_sound=False)
-            t.join(timeout=5)
-        self.assertTrue(done.is_set())
-        play_sound.assert_not_called()
-
-    def test_boot_video_plays_its_sound_by_default(self):
         done = threading.Event()
         with mock.patch.object(player, "play_sound", return_value=None) as play_sound:
-            t = self._intro().play(player.LatestFrame(), threading.Event(), done.set)
+            t = video.play(player.LatestFrame(), threading.Event(), done.set)
             t.join(timeout=5)
         self.assertTrue(done.is_set())
         play_sound.assert_called_once()

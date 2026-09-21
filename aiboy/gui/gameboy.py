@@ -98,7 +98,15 @@ def dmg_tint(frame: np.ndarray) -> np.ndarray:
             and np.array_equal(sample[..., 1], sample[..., 2])):
         return frame
     return _DMG_LUT[frame[..., 0]]
-LED = (64, 178)                                # battery LED centre
+# The battery LED. The photo has its hole at LED_SOURCE (measured: the dark
+# disc's centre (60.8, 174.8), radius 5.8 px), which is left of where it
+# belongs: the bezel strip between the case and the LCD spans x 39..104 and
+# the BATTERY label under it x 48..91, both centred near x 70. `load_photo`
+# moves the hole there (`relocate_led`), and the lit LED is drawn at LED.
+LED_SOURCE = (61, 175)
+LED = (70, 175)
+LED_R = 6
+BODY_LEVEL = 205                               # grey level of the case next to the backdrop
 PAD_BOX = (28, 440, 420, 650)                  # region that holds every button
 
 # Button shapes: (kind, (x0, y0, x1, y1)); "rect" = D-pad arm, "oval" = button.
@@ -206,7 +214,7 @@ def _draw_fallback() -> Image.Image:
                         width=2)
     d.rounded_rectangle((40, 62, 410, 350), radius=10, fill=(96, 92, 104))
     d.rectangle(LCD_PATCH, fill=BEZEL)
-    d.ellipse((LED[0] - 3, LED[1] - 3, LED[0] + 3, LED[1] + 3), fill=(90, 20, 20))
+    d.ellipse((LED[0] - LED_R, LED[1] - LED_R, LED[0] + LED_R, LED[1] + LED_R), fill=(90, 20, 20))
     d.text((40, 372), "GAME BOY", fill=(40, 40, 140))
     dark = (40, 40, 44)
     d.rectangle(REGIONS["up"][1][:2] + REGIONS["down"][1][2:], fill=dark)
@@ -222,27 +230,66 @@ def _draw_fallback() -> Image.Image:
 
 
 def device_mask(img: Image.Image) -> Image.Image:
-    """Where the device is (255) and where the white backdrop is (0): the
-    backdrop is whatever a flood fill reaches from the corners. The edge is
-    eroded by a pixel and softened so the photo's anti-aliased white rim
-    disappears instead of showing as a bright outline."""
+    """Where the device is (255) and where the white backdrop is (0), with
+    a soft edge: the backdrop is whatever a flood fill reaches from the
+    corners; in a band a few pixels wide around it the photo's own
+    anti-aliasing decides, a pixel counting as device by how far it is
+    from white (the case reads about BODY_LEVEL, a half-blended edge pixel
+    in between). A hard cut there left the big curve at the lower right a
+    staircase with a pale halo."""
     probe = img.copy()
     sentinel = (255, 0, 255)
     w, h = probe.size
     for corner in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
         if min(probe.getpixel(corner)) > 200:                # white-ish: outside the device
             ImageDraw.floodfill(probe, corner, sentinel, thresh=70)
-    px = probe.load()
-    mask = Image.new("L", probe.size, 255)
-    mp = mask.load()
+    arr = np.asarray(probe)
+    backdrop = (arr[..., 0] == 255) & (arr[..., 1] == 0) & (arr[..., 2] == 255)
+    if not backdrop.any():                                    # a photo without a backdrop
+        return Image.new("L", img.size, 255)
+    band = np.asarray(Image.fromarray(backdrop.astype(np.uint8) * 255)
+                      .filter(ImageFilter.MaxFilter(7))) > 0
+    level = np.asarray(img).astype(np.float32).mean(axis=2)
+    soft = np.clip((255.0 - level) / (255.0 - BODY_LEVEL), 0.0, 1.0)
+    alpha = np.ones(level.shape, dtype=np.float32)
+    alpha[band] = soft[band]
+    alpha[backdrop] = 0.0
     rim = 10                                                  # white specks the fill missed
-    for y in range(h):
-        for x in range(w):
-            if px[x, y] == sentinel:
-                mp[x, y] = 0
-            elif (x < rim or y < rim or x >= w - rim or y >= h - rim) and min(px[x, y]) > 225:
-                mp[x, y] = 0
-    return mask.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.GaussianBlur(0.7))
+    edge = np.zeros(level.shape, dtype=bool)
+    edge[:rim, :] = edge[-rim:, :] = edge[:, :rim] = edge[:, -rim:] = True
+    alpha[edge & (arr.min(axis=2) > 225)] = 0.0
+    return Image.fromarray((alpha * 255).round().astype(np.uint8))
+
+
+def _disc_mask(size: int, radius: float) -> Image.Image:
+    """An "L" mask of `size` x `size` with a disc of `radius` at its centre,
+    one soft pixel at the edge."""
+    yy, xx = np.mgrid[0:size, 0:size]
+    d = np.hypot(xx - (size - 1) / 2, yy - (size - 1) / 2)
+    return Image.fromarray((np.clip(radius - d + 0.5, 0.0, 1.0) * 255).round().astype(np.uint8))
+
+
+def relocate_led(img: Image.Image, source: tuple[int, int] = LED_SOURCE,
+                 target: tuple[int, int] = LED) -> Image.Image:
+    """The photo with its battery LED hole moved from `source` to `target`
+    (photo pixels): the hole and its red glint are lifted as a small disc,
+    the spot they leave is painted in the bezel's colour around it, and the
+    disc is set down centred on `target`."""
+    if source == target:
+        return img
+    img = img.copy()
+    reach = LED_R + 3
+    size = 2 * reach + 1
+    sx, sy = source
+    box = (sx - reach, sy - reach, sx - reach + size, sy - reach + size)
+    patch = img.crop(box)
+    ring = np.asarray(patch).reshape(-1, 3)
+    d = np.hypot(*np.mgrid[0:size, 0:size][::-1] - reach).reshape(-1)
+    bezel = tuple(int(v) for v in np.median(ring[(d > LED_R + 1) & (d <= reach)], axis=0))
+    img.paste(bezel, box, _disc_mask(size, LED_R + 2))
+    tx, ty = target
+    img.paste(patch, (tx - reach, ty - reach), _disc_mask(size, LED_R + 1.5))
+    return img
 
 
 def load_photo(path: Path = PHOTO, background: tuple[int, int, int] = (34, 34, 34),
@@ -252,10 +299,11 @@ def load_photo(path: Path = PHOTO, background: tuple[int, int, int] = (34, 34, 3
     removed, so the device sits on the window and not on a white card."""
     try:
         img = Image.open(path).convert("RGB")
+        if img.size != (PHOTO_W, PHOTO_H):
+            img = img.resize((PHOTO_W, PHOTO_H), Image.LANCZOS)
+        img = relocate_led(img)               # the photo's LED sits left of the middle
     except (OSError, ValueError):
         img = _draw_fallback()
-    if img.size != (PHOTO_W, PHOTO_H):
-        img = img.resize((PHOTO_W, PHOTO_H), Image.LANCZOS)
     # The window and the uneven shadow the photo has around it become plain
     # bezel; the view draws its own, even rim under the screen.
     ImageDraw.Draw(img).rectangle(LCD_PATCH, fill=BEZEL)
@@ -353,9 +401,12 @@ class GameBoyView(tk.Frame):
             self._tiles.append(img)
             self.device.create_image(box[0], box[1], anchor="nw", image=img)
         self.device.create_rectangle(*geo.rim_box, fill=lcd_bg, outline="")
+        # The lit LED: a red dot in a dark ring; the ring covers the whole
+        # hole (its glint included) so nothing of the unlit LED shows.
         x, y = geo.led
         r = max(4, round(4 * geo.factor))
-        self._led_halo = self.device.create_oval(x - r - 3, y - r - 3, x + r + 3, y + r + 3,
+        ring = max(r + 3, round((LED_R + 2) * geo.factor))
+        self._led_halo = self.device.create_oval(x - ring, y - ring, x + ring, y + ring,
                                                  fill="#7a1010", outline="", state="hidden")
         self._led = self.device.create_oval(x - r, y - r, x + r, y + r, fill="#ff3030",
                                             outline="", state="hidden")

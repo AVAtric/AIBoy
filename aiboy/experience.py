@@ -432,6 +432,9 @@ class Experience:
         if best is own or best.score - own.score <= margin:
             return None
         overrides = tuning.config_diff(best.records[-1].config, cfg, IMPROVABLE_FIELDS)
+        # Short tests cannot judge exploration: a long run's curiosity is
+        # never lowered on their word (see tuning.keep_curiosity).
+        overrides = (tuning.keep_curiosity([overrides], cfg) or [{}])[0]
         if not overrides:
             return None
         return Improvement(preset=name, overrides=overrides, config={**cfg, **overrides},

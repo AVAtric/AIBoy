@@ -273,14 +273,13 @@ class AIboyGUI:
         self.refresh_presets()
         self._pump()
         if self.intro is not None:
-            # Boot video (with sound when Sound is on) once the window is up;
-            # ends on the idle frame ("No video") unless something else takes
-            # the screen.
+            # Boot video with its jingle once the window is up (always, like
+            # a real Game Boy; the Sound checkbox is for the games); ends on
+            # the idle frame ("No video") unless something else takes the screen.
             self.gameboy.set_power(True)
             self.root.after(300, lambda: self.intro.play(
                 self.frames, self.intro_stop,
-                on_done=lambda: self.stats_queue.put(("intro_done",)),
-                with_sound=bool(self.sound_var.get())))
+                on_done=lambda: self.stats_queue.put(("intro_done",))))
 
     # ---------- game selection ----------
 
@@ -425,10 +424,9 @@ class AIboyGUI:
                                            command=self._on_sound_toggled)
         self.sound_check.pack(side="left", padx=(14, 0))
         tooltip(self.sound_check, "Play the game's sound while you play yourself or an agent "
-                                  "plays at real speed (1×), and the boot video's. Faster or "
-                                  "slower playback and the live preview of a training run stay "
-                                  "silent: the sound cannot follow them. Remembered for next "
-                                  "time.")
+                                  "plays at real speed (1×). Faster or slower playback and the "
+                                  "live preview of a training run stay silent: the sound cannot "
+                                  "follow them. Off until you tick it; remembered for next time.")
         self.player.set_sound(bool(self.sound_var.get()))
         self.preview_frame = ttk.LabelFrame(main, labelwidget=preview_head, padding=8)
         self.preview_frame.grid(row=0, column=1, sticky="ns", padx=(10, 0))
@@ -617,18 +615,9 @@ class AIboyGUI:
         self.btn_run_delete = ttk.Button(keep, text="Delete…", command=self._delete_run)
         self.btn_run_delete.pack(side="left", padx=2)
 
-        pb_frame = ttk.Frame(controls)
-        pb_frame.grid(row=5, column=0, sticky="ew", pady=(4, 0))
-        pb_frame.columnconfigure(0, weight=1)
-        ttk.Progressbar(pb_frame, mode="determinate", maximum=100,
-                        variable=self.train_progress_var).grid(row=0, column=0, sticky="ew",
-                                                               padx=(0, 6))
-        ttk.Label(pb_frame, textvariable=self.train_progress_text, width=32, anchor="e").grid(
-            row=0, column=1, sticky="e")
-
         # ---- This run: its evaluations and the trainer's messages, read
-        # out of the trainer's output. The live numbers are under Tracking;
-        # the raw output stays available behind "Full log…". ----
+        # out of the trainer's output. Progress, ETA and the live numbers
+        # are under Tracking; the raw output stays behind "Full log…". ----
         parent.rowconfigure(3, weight=1)
         details = ttk.Frame(parent)
         details.grid(row=3, column=0, sticky="nsew")
@@ -1414,24 +1403,19 @@ class AIboyGUI:
         self.tune_summary_label.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
         self._tune_config_widgets.extend([rb_grid, rb_random, n_random_spin])
 
+        # Progress, ETA and the trial's live numbers are under Tracking.
         ctrl = ttk.Frame(parent)
-        ctrl.grid(row=2, column=0, sticky="ew", pady=(0, 2))
-        ctrl.columnconfigure(3, weight=1)
+        ctrl.grid(row=2, column=0, sticky="ew", pady=(0, 6))
         self.btn_tune_start = ttk.Button(ctrl, text="Start tuning", command=self.start_tuning)
         self.btn_tune_start.grid(row=0, column=0, padx=(0, 4))
         self.btn_tune_stop = ttk.Button(ctrl, text="Stop", command=self.stop_tuning, state="disabled")
         self.btn_tune_stop.grid(row=0, column=1, padx=4)
         self.btn_tune_load = ttk.Button(ctrl, text="Load results…", command=self._tune_load_results)
         self.btn_tune_load.grid(row=0, column=2, padx=4)
+        tooltip(self.btn_tune_load, "Show the results of an earlier sweep from its file under "
+                                    "models/<game>/_tune/.")
         self.tune_progress_var = tk.DoubleVar(value=0.0)
         self.tune_progress_text = tk.StringVar(value="—")
-        ttk.Progressbar(ctrl, mode="determinate", maximum=100,
-                        variable=self.tune_progress_var).grid(row=0, column=3, sticky="ew", padx=6)
-        ttk.Label(ctrl, textvariable=self.tune_progress_text, width=20, anchor="e").grid(
-            row=0, column=4, sticky="e")
-        self.tune_live_var = tk.StringVar(value="idle")
-        ttk.Label(parent, textvariable=self.tune_live_var, font=MONO).grid(
-            row=3, column=0, sticky="w", pady=(0, 4))
 
         res_frame = ttk.LabelFrame(parent, text="Results (best first)", padding=4)
         res_frame.grid(row=4, column=0, sticky="nsew")
@@ -1481,8 +1465,7 @@ class AIboyGUI:
                 stale += 1
         self.render_tune_results()
         if stale:
-            self.tune_live_var.set(f"{stale} result(s) come from an older file and keep their "
-                                   f"original metric")
+            self.flash(f"{stale} result(s) come from an older file and keep their original metric")
         if self.wizard is not None:
             self.wizard.on_tune_result()
 
@@ -1643,7 +1626,6 @@ class AIboyGUI:
         self.tune_tree.heading("score", text=plan["metric"])
         self.tune_progress_var.set(0)
         self.tune_progress_text.set(f"0/{n_trials}")
-        self.tune_live_var.set("starting…")
         for v in self.tune_vars.values():
             v.set("—")
         self.tune_vars["trial"].set(f"starting {n_trials} trials…")
@@ -1869,7 +1851,7 @@ class AIboyGUI:
             self.tune_sweep_text.delete("1.0", "end")
             self.tune_sweep_text.insert("1.0", json.dumps(meta["sweep"], indent=2))
         self.render_tune_results()
-        self.tune_live_var.set(f"loaded {len(results)} results from {Path(path).name}")
+        self.flash(f"Loaded {len(results)} results from {Path(path).name}.")
 
     def _tune_save_as_preset(self) -> None:
         res = self._selected_tune_result()
@@ -2141,7 +2123,6 @@ class AIboyGUI:
         if self.tune_run_prefix_var.get().strip() == prefix:
             self._tune_results.clear()
             self.render_tune_results()
-            self.tune_live_var.set("idle")
             self.tune_progress_var.set(0)
             self.tune_progress_text.set("—")
         self.refresh_run_names()
@@ -2602,7 +2583,6 @@ class AIboyGUI:
                 self.wizard.on_play_error(item[1])
             messagebox.showerror("Play error", item[1])
         elif kind == "tune_live":
-            self.tune_live_var.set(item[1])
             for key, val in item[2].items():
                 self.tune_vars[key].set(val)
         elif kind == "tune_known":
@@ -2641,7 +2621,6 @@ class AIboyGUI:
             self.set_inputs_disabled(False)
             self._update_start_buttons()
             self.tune_proc = None
-            self.tune_live_var.set(text)
             self.tune_vars["trying"].set("—")
             self.tune_vars["trial"].set("stopped" if cancelled else "all done")
             head = self.activity_var.get()

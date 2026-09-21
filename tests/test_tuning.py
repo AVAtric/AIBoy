@@ -306,3 +306,23 @@ class ResultTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CuriosityRuleTests(unittest.TestCase):
+    def test_long_runs_never_lower_the_goals_curiosity(self):
+        from aiboy import tuning
+        combos = tuning.expand_grid(tuning.SWEEP_TEMPLATES[tuning.DEFAULT_TEMPLATE])
+        short = {"timesteps": 2_000_000, "ent_coef": 0.02}
+        self.assertEqual(tuning.keep_curiosity(combos, short), combos)     # a short goal: all
+        long = {"timesteps": 60_000_000, "ent_coef": 0.02}
+        kept = tuning.keep_curiosity(combos, long)
+        self.assertTrue(kept and all(c.get("ent_coef", 0.02) >= 0.02 for c in kept), kept)
+        self.assertLess(len(kept), len(combos))                   # the greedy rows collapse
+        self.assertIn({"learning_rate": 1e-4}, kept)              # their other changes survive
+        self.assertEqual(len(kept), len({str(sorted(c.items())) for c in kept}))   # no duplicates
+        # a candidate that does not touch curiosity keeps the goal's own: fine
+        self.assertEqual(tuning.keep_curiosity([{"learning_rate": 1e-4}], long),
+                         [{"learning_rate": 1e-4}])
+        self.assertEqual(tuning.keep_curiosity([{"ent_coef": 0.02}, {"ent_coef": 0.01}], long),
+                         [{"ent_coef": 0.02}])
+        self.assertGreaterEqual(tuning.LONG_RUN_STEPS, 10_000_000)

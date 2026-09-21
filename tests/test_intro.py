@@ -107,3 +107,21 @@ class IntroAssetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LedPositionTests(unittest.TestCase):
+    def test_the_led_hole_is_moved_to_the_middle_of_its_strip(self):
+        """The photo's LED hole sits left of the middle; load_photo moves it
+        (both the shipped photo and an original have it at the same spot)."""
+        import numpy as np
+        for name in ("gb_interface.png", "orig_gb_interface.png"):
+            path = paths.ASSET_DIR / name
+            if not path.exists():
+                continue
+            img = np.asarray(gameboy.load_photo(path)).astype(int).mean(axis=2)
+            for (x, y), expect_hole in ((gameboy.LED, True), (gameboy.LED_SOURCE, False)):
+                window = img[y - 4:y + 5, x - 4:x + 5]
+                self.assertEqual(bool((window < 70).sum() >= 20), expect_hole, (name, x, y))
+            ys, xs = np.nonzero(img[160:190, 45:95] < 70)
+            self.assertAlmostEqual(xs.mean() + 45, gameboy.LED[0], delta=1.0, msg=name)
+            self.assertAlmostEqual(ys.mean() + 160, gameboy.LED[1], delta=1.0, msg=name)

@@ -346,6 +346,43 @@ def with_baseline(combos: list[dict]) -> list[dict]:
     return [{}] + [c for c in combos if c]
 
 
+LONG_RUN_STEPS = 10_000_000     # from here on a goal counts as a long run (see keep_curiosity)
+
+
+def keep_curiosity(combos: list[dict], base: dict) -> list[dict]:
+    """For a long goal, the candidates with their curiosity (ent_coef) never
+    below the goal's own: a candidate that would lower it keeps its other
+    changes and the goal's curiosity instead. Duplicates and candidates
+    left with no change at all are dropped (the baseline is added by the
+    caller).
+
+    A search trial is a short run, and a short run scores best when the
+    agent exploits what it finds at once, so trials favour low curiosity.
+    A long run needs the opposite: the overnight marathon that was tuned
+    to ent_coef 0.005 by its search reached the gap in 1-2 and never tried
+    the jump. Short trials cannot judge exploration, so the wizard leaves
+    it where the goal put it (or higher) once the goal is a long run."""
+    if int(base.get("timesteps", 0)) < LONG_RUN_STEPS:
+        return list(combos)
+    own = float(base.get("ent_coef", DEFAULT_CONFIG["ent_coef"]))
+    out: list[dict] = []
+    seen: set[str] = set()
+    for combo in combos:
+        c = dict(combo)
+        if float(c.get("ent_coef", own)) < own - 1e-12:
+            c.pop("ent_coef")                        # back to the goal's own curiosity
+        key = json.dumps(c, sort_keys=True)
+        if c and key not in seen:
+            seen.add(key)
+            out.append(c)
+    return out
+
+
+CURIOSITY_NOTE = ("Variations with less curiosity than the goal's own get the goal's curiosity "
+                  "instead: this is a long run, and short tests reward greed while a long run "
+                  "needs exploration.")
+
+
 def suggested_trial_steps(goal_timesteps: int) -> int:
     """Trial length for the wizard: 5% of the final run, 100k..1M, rounded
     to 50k. Short trials rank learning speed, not final skill; 5% is the

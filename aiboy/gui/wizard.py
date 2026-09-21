@@ -171,8 +171,7 @@ class WizardTab:
         self._inputs: list[tk.Widget] = []
         self._input_lock = WidgetLock()
         self._presets: dict[str, dict] = {}
-        self._synced: str | None = None     # what the Tune tab's sweep text currently holds
-        self._auto_why = ""                 # plain explanation of the last "Let AIboy choose" plan
+        self._plan_why = ""                 # plain explanation of the current candidate list
         self._build(parent)
         self.goto(0)
 
@@ -338,23 +337,18 @@ class WizardTab:
         tooltip(self.btn_clear_search, "Remove the run folders of earlier wizard searches from "
                                        "disk. What AIboy learned from them is kept.")
 
-        prog = ttk.Frame(pane)
-        prog.grid(row=6, column=0, sticky="ew")
-        prog.columnconfigure(0, weight=1)
-        ttk.Progressbar(prog, mode="determinate", maximum=100,
-                        variable=self.app.tune_progress_var).grid(row=0, column=0, sticky="ew")
-        ttk.Label(prog, textvariable=self.app.tune_progress_text, width=20, anchor="e").grid(
-            row=0, column=1, padx=(6, 0))
-        ttk.Label(pane, textvariable=self.app.tune_live_var, font=MONO).grid(
-            row=7, column=0, sticky="w", pady=(2, 2))
-
+        # The search's progress and live numbers are under Tracking, always
+        # in view; the wizard only keeps the plain results table.
         res = ttk.LabelFrame(pane, text="Variations tried (best first)", padding=4)
-        res.grid(row=8, column=0, sticky="nsew")
-        pane.rowconfigure(8, weight=1)
+        res.grid(row=6, column=0, sticky="nsew", pady=(6, 0))
+        pane.rowconfigure(6, weight=1)
         self.tree = make_table(res, [
             ("rank", "#", 32, "e", False), ("config", "settings", 300, "w", True),
             ("score", "score", 110, "e", False), ("time", "time", 64, "e", False),
-        ], height=2)
+        ], height=3)
+        tooltip(self.tree, "Every variation the search has scored so far, best first: its "
+                           "settings, the score of its short training runs and how long they "
+                           "took. The Tune tab has the full table.")
         self._on_template_changed()
         self._on_effort_changed()
         self._on_search_choice()
@@ -413,12 +407,7 @@ class WizardTab:
         self.train_eta_var = tk.StringVar()
         ttk.Label(form, textvariable=self.train_eta_var, foreground=THEME.muted).grid(
             row=2, column=1, sticky="w", padx=6)
-        preview_cb = ttk.Checkbutton(form, text="Show it playing while it trains",
-                                     variable=self.preview_var)
-        preview_cb.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        tooltip(preview_cb, "Play the newest best model on the Preview screen during the "
-                            "training run. Costs some training speed.")
-        self._register(run_entry, steps_spin, preview_cb)
+        self._register(run_entry, steps_spin)
 
         btns = ttk.Frame(pane)
         btns.grid(row=2, column=0, sticky="ew", pady=(10, 6))
@@ -438,17 +427,10 @@ class WizardTab:
                                     state="disabled")
         self.btn_watch.pack(side="right")
 
-        prog = ttk.Frame(pane)
-        prog.grid(row=3, column=0, sticky="ew")
-        prog.columnconfigure(0, weight=1)
-        ttk.Progressbar(prog, mode="determinate", maximum=100,
-                        variable=self.app.train_progress_var).grid(row=0, column=0, sticky="ew")
-        ttk.Label(prog, textvariable=self.app.train_progress_text, width=32, anchor="e").grid(
-            row=0, column=1, padx=(6, 0))
-
+        # Progress, ETA and the live numbers of the run are under Tracking.
         self.train_result_var = tk.StringVar()
         ttk.Label(pane, textvariable=self.train_result_var, wraplength=640).grid(
-            row=5, column=0, sticky="w", pady=(10, 0))
+            row=3, column=0, sticky="w", pady=(10, 0))
 
     # ----- pane 4: watch -----
 
@@ -570,9 +552,8 @@ class WizardTab:
         if cfg:
             self.goal_note.config(text=describe_preset(cfg, self.app.fps_for(cfg)))
         self._update_known_note()
-        if self._template_name() == AUTO:
-            _combos, self._auto_why = self.auto_plan()
-            self._update_template_note()
+        _combos, self._plan_why = self.candidates()
+        self._update_template_note()
         self._update_summary()
 
     def _trial_task(self) -> dict | None:
@@ -615,13 +596,9 @@ class WizardTab:
 
     def _on_template_changed(self) -> None:
         self._sync_tune_tab()
-        self._update_template_note()
 
     def _update_template_note(self) -> None:
-        if self._template_name() == AUTO:
-            self.template_note.config(text=self._auto_why)
-        else:
-            self.template_note.config(text=tuning.TEMPLATE_PLAIN_NOTES.get(self._template_name(), ""))
+        self.template_note.config(text=self._plan_why)
 
     def auto_plan(self) -> tuple[list[dict], str]:
         """The candidates "Let AIboy choose" would try right now, and why.
@@ -636,6 +613,27 @@ class WizardTab:
             return fallback, ""
         combos, why = self.app.experience.auto_plan(cfg, steps, seeds, SUGGESTIONS)
         return combos or fallback, why
+
+    def candidates(self) -> tuple[list[dict], str]:
+        """The variations the search would try now (without the baseline) and
+        the plain note that explains them: the experience-based plan for
+        "Let AIboy choose", else the chosen template expanded (sampled for
+        the broad one). For a long goal, variations with less curiosity than
+        the goal's own are left out (see tuning.keep_curiosity)."""
+        template = self._template_name()
+        if template == AUTO:
+            combos, why = self.auto_plan()
+        else:
+            sweep = tuning.SWEEP_TEMPLATES[template]
+            search, n_random = tuning.template_search(template)
+            combos = (tuning.sample_random(sweep, n_random) if search == "random"
+                      else tuning.expand_grid(sweep))
+            why = tuning.TEMPLATE_PLAIN_NOTES.get(template, "")
+        cfg = self._presets.get(self.goal_var.get()) or {}
+        kept = tuning.keep_curiosity(combos, cfg)
+        if len(kept) < len(combos):
+            why = f"{why} {tuning.CURIOSITY_NOTE}".strip()
+        return kept, why
 
     def _on_search_choice(self) -> None:
         searching = self.search_var.get() == "yes"
@@ -658,8 +656,10 @@ class WizardTab:
             self.advanced.grid_forget()
 
     def _sync_tune_tab(self) -> None:
-        """Mirror the wizard's choices into the Tune tab, which owns the plan.
-        In auto mode the sweep is the experience-based candidate list."""
+        """Mirror the wizard's choices into the Tune tab, which runs the
+        search: the goal as base preset, the candidates as an explicit list
+        (so the wizard's rules, such as keeping curiosity, are what gets
+        trained), and the wizard's fixed settings (prefix, metric, seeds)."""
         app = self.app
         if app.busy():
             return
@@ -670,20 +670,11 @@ class WizardTab:
         except (tk.TclError, ValueError):
             pass
         template = self._template_name()
-        if template == AUTO:
-            combos, self._auto_why = self.auto_plan()
-            app.tune_template_var.set(tuning.DEFAULT_TEMPLATE)
-            app.set_sweep(combos, "Candidates chosen by the wizard from AIboy's experience.")
-            search, n_random = "grid", 0
-        else:
-            if self._synced != template:
-                app.tune_template_var.set(template)
-                app.apply_tune_template()
-            search, n_random = tuning.template_search(template)
-        self._synced = template
-        app.tune_search_type_var.set(search)
-        if n_random:
-            app.tune_n_random_var.set(n_random)
+        combos, self._plan_why = self.candidates()
+        app.tune_template_var.set(tuning.DEFAULT_TEMPLATE if template == AUTO else template)
+        app.set_sweep(combos, "Candidates chosen by the wizard" + (
+            " from AIboy's experience." if template == AUTO else f" ({self.template_var.get()})."))
+        app.tune_search_type_var.set("grid")
         app.tune_run_prefix_var.set(WIZARD_PREFIX)
         app.tune_keep_best_var.set(KEEP_BEST_TRIALS)
         app.tune_metric_var.set(tuning.METRIC_LATE)
@@ -697,12 +688,8 @@ class WizardTab:
         self._update_summary()
 
     def _plan(self) -> tuple[dict | None, str | None]:
-        """The search the wizard would start now. Fixed templates read the
-        Tune tab (the wizard keeps it in sync); "Let AIboy choose" is
-        computed from the experience, so the plan line is right even
-        before Start writes the candidates into the Tune tab."""
-        if self._template_name() != AUTO:
-            return self.app.tune_plan()
+        """The search the wizard would start now, computed here so the plan
+        line is right whatever the Tune tab holds at the moment."""
         cfg = self._presets.get(self.goal_var.get())
         if not cfg:
             return None, "pick a goal"
@@ -710,7 +697,7 @@ class WizardTab:
             steps, seeds = int(self.trial_steps_var.get()), max(1, int(self.seeds_var.get()))
         except (tk.TclError, ValueError):
             return None, "steps and seeds must be whole numbers"
-        combos, _why = self.auto_plan()
+        combos, _why = self.candidates()
         return {"base": dict(cfg), "combos": tuning.with_baseline(combos), "trial_steps": steps,
                 "n_seeds": seeds, "skip_done": True}, None
 

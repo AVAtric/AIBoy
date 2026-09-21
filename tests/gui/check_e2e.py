@@ -20,10 +20,12 @@ def tick():
     s = state["s"]
     if s == "search":
         w.goal_var.set(presets.SMOKE_TEST_PRESET); w._on_goal_changed()
-        # a fixed template: "Let AIboy choose" would replace a hand-written sweep at Start
+        # The wizard writes its own candidate list into the Tune tab at Start
+        # (it runs exactly what its plan line says), so a tiny check sweep
+        # is put in through the wizard, not the Tune tab.
         w.template_var.set(tuning.TEMPLATE_PLAIN[tuning.DEFAULT_TEMPLATE]); w._on_template_changed()
+        w.candidates = lambda: ([{"ent_coef": 0.01}, {"ent_coef": 0.03}], "check sweep")
         w.trial_steps_var.set(4000); w.seeds_var.set(1); w._sync_tune_tab()
-        app.set_sweep({"ent_coef": [0.01, 0.03]}, "check sweep")
         w.auto_var.set(False)                                  # the manual flow: continue by hand
         w.start_search()
         if w.phase != "tuning": fail("search did not start: " + w.status_var.get())

@@ -109,9 +109,12 @@ trained. Rest the pointer on any control for its explanation.
 
 1. Goal `Mario — Marathon, overnight (~8 h)`, keep *Yes* and *Let AIboy
    choose*, leave **run everything by itself** ticked, press **Start**.
-   Expect about 1.5 h of search the first time (less on later nights,
+   Expect up to 1.5 h of search the first time (less on later nights,
    because AIboy skips what it knows), then the 60 M-step training. The ETA
-   is under Tracking.
+   is under Tracking. For a goal this long the search never tries less
+   curiosity than the goal's own (such variations get the goal's curiosity
+   instead): short tests reward greed, and an overnight run tuned that way
+   once stood at the gap in 1-2 all night.
 2. On a Mac the app prevents idle sleep while training or tuning runs
    (`caffeinate`); the display may still turn off. Do not close the lid.
 3. In the morning the wizard is on **Watch** and the agent is playing. If you
@@ -155,7 +158,8 @@ runs. Under the device a status line says what is playing and how each
 round ended. **Sound**, in the panel's header, plays the game's own sound
 while you play yourself or an agent plays at real speed (1×); faster or
 slower playback and the training preview stay silent, since the sound
-cannot follow them. It also covers the boot video, and is remembered.
+cannot follow them. It is off until you tick it and then remembered; the
+boot video's jingle plays regardless.
 
 The photo (`assets/gb_interface.png`) is scaled so the 160 × 144 frame sits
 on the LCD at 2× when the display has room for the window, else 1.75× or
@@ -258,9 +262,9 @@ From those records AIboy answers six questions.
 |----------|--------|
 | **Do I already know this?** | Two records are the same experiment when every outcome-deciding field matches (game, observation type, level mode, action timing, attempt limits, trial length, emulators, PPO settings, seed). A planned trial that matches is scored from the record instead of trained; the results table marks it *known*. Unfinished runs are remembered but never reused. |
 | **What worked best for this goal?** | Trials are compared within a *task*: same game, observation type, level mode, attempt limits and trial length. Seeds of the same settings are averaged. |
-| **What should I try next?** | *Let AIboy choose* runs the standard search until at least half of it is known, then proposes untested single-step changes around the best known settings (learning rate and curiosity ×/÷ 2, rollout and batch ×/÷ 2, epochs, gamma, clip and GAE lambda one rung up or down). The best known settings always take part, so the winner is the best of old and new. |
+| **What should I try next?** | *Let AIboy choose* runs the standard search until at least half of it is known, then proposes untested single-step changes around the best known settings (learning rate and curiosity ×/÷ 2, rollout and batch ×/÷ 2, epochs, gamma, clip and GAE lambda one rung up or down). The best known settings always take part, so the winner is the best of old and new. For a goal of 10 M steps or more a variation with less curiosity than the goal's own is tried with the goal's curiosity instead: short tests cannot judge exploration. |
 | **What do goals have in common?** | Goals that share the game, observation type and action timing are *related*. For a goal never tested, AIboy *borrows*: it says what worked for the related goal and tries those settings first. Nothing borrowed is applied without a test. |
-| **Which presets can be improved?** | After every search and training, each preset's own settings are compared with the best tested settings for its goal. A clear win (the preset's own settings were tested, the challenger leads by more than the seed spread and by at least 5 %) is applied: built-ins get a resettable override, user presets are updated, and an *improved* record with the evidence is kept. **Improve presets automatically** on the Experience tab turns this off; **Improve presets now** applies it on demand. |
+| **Which presets can be improved?** | After every search and training, each preset's own settings are compared with the best tested settings for its goal. A clear win (the preset's own settings were tested, the challenger leads by more than the seed spread and by at least 5 %) is applied: built-ins get a resettable override, user presets are updated, and an *improved* record with the evidence is kept. The curiosity of a long-run preset (10 M steps or more) is never lowered this way. **Improve presets automatically** on the Experience tab turns this off; **Improve presets now** applies it on demand. |
 | **How fast is this computer?** | The median steps per second of recent runs with the same setup replaces the built-in guess in every estimate ("measured speed"). |
 
 Scores are only comparable while the game logic stays the same, so every
@@ -682,7 +686,7 @@ and writes screenshots of the window mid-play into it (macOS).
 | Symptom | What to do |
 |---------|------------|
 | `ROM not found: ROMs/mario.gb` | Place your ROM there (see Install). |
-| No sound | Tick **Sound** in the Preview header; sound plays only at 1× (your own game, an agent at *1× (real time)*), never during the training preview or at other speeds. The built app needs the SDL2 library, the same one the controller uses. |
+| No sound | Tick **Sound** in the Preview header (off by default); sound plays only at 1× (your own game, an agent at *1× (real time)*), never during the training preview or at other speeds. The built app needs the SDL2 library, the same one the controller uses. |
 | Game shows amber | You can play it yourself; only Super Mario Land and Kirby's Dream Land can be trained. If it *is* one of those, check that `mario.gb` / `kirby.gb` is the original cartridge. |
 | Game shows red | The ROM does not boot in PyBoy; the text says why. |
 | The wizard says every variation is already known | Raise *Effort* (longer trials are a new task), pick a fixed set under *Vary*, or **Forget all…** on the Experience tab. |

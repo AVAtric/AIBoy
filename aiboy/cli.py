@@ -590,7 +590,7 @@ def _add_common(p: argparse.ArgumentParser) -> None:
                    help="Level mode: 'default' (campaign, respect lives), "
                         "'random' (new random level per episode), "
                         "'sequential' (advance level on clear, retry on death), "
-                        "'marathon' (one episode = all 10 levels), "
+                        "'marathon' (one episode = one life through all twelve levels), "
                         "or a specific level 'W-L' (fixed). Super Mario Land only; other "
                         "games start from the beginning.")
 

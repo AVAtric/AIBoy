@@ -225,13 +225,11 @@ class IntroVideo:
     def idle_frame(self) -> np.ndarray:
         return self.frames[self.idle_index]
 
-    def play(self, frames: LatestFrame, stop: threading.Event, on_done,
-             with_sound: bool = True) -> threading.Thread:
+    def play(self, frames: LatestFrame, stop: threading.Event, on_done) -> threading.Thread:
         """Push frames at `fps` until the end or `stop`; then call `on_done()`
-        from this thread (the GUI hands it to the Tk thread via its queue).
-        `with_sound` False shows the video silently."""
+        from this thread (the GUI hands it to the Tk thread via its queue)."""
         def _run():
-            sound = play_sound(self.sound_path) if with_sound else None
+            sound = play_sound(self.sound_path)
             t0 = time.perf_counter()
             for i, frame in enumerate(self.frames):
                 if stop.is_set():

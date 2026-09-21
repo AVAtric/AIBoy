@@ -22,8 +22,9 @@ DEFAULTS: dict = {
     "auto_improve_presets": True,
     # Show the agent's observation as a table of numbers under Tracking.
     "show_agent_view": False,
-    # The game's sound while something plays at real speed, and the boot video's.
-    "sound": True,
+    # The game's sound while something plays at real speed (off until asked
+    # for; the boot video's jingle plays regardless).
+    "sound": False,
 }
 
 

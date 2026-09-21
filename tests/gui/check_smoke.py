@@ -25,7 +25,7 @@ try:
     w.effort_var.set("Quick"); w._on_effort_changed(); assert w.seeds_var.get() == 1 and w.trial_steps_var.get() == 50_000
     w.effort_var.set("Normal"); w._on_effort_changed()
     w.template_var.set(tuning.TEMPLATE_PLAIN["Broad random search (use Random, ~12 trials)"]); w._on_template_changed()
-    plan, _ = app.tune_plan(); assert plan["search"] == "random" and len(plan["combos"]) == 13, len(plan["combos"])
+    plan, _ = app.tune_plan(); assert plan["search"] == "grid" and len(plan["combos"]) == 13, len(plan["combos"])   # 12 sampled + baseline
     w.template_var.set(tuning.TEMPLATE_PLAIN["Learning rate (5 configs)"]); w._on_template_changed()
     w.search_var.set("no"); w._on_search_choice(); root.update()
     assert str(w.template_combo.cget("state")) == "disabled" and w.summary_var.get().startswith("Plan: train for")
