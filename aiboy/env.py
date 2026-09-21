@@ -27,7 +27,8 @@ import numpy as np
 from gymnasium import spaces
 from pyboy import PyBoy, WindowEvent
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import VecEnv, VecFrameStack, VecTransposeImage
+from stable_baselines3.common.vec_env import (VecEnv, VecEnvWrapper, VecFrameStack,
+                                              VecTransposeImage)
 
 # Light, emulator-free facts live in games.py; re-exported here so existing
 # `from env import ...` call sites keep working.
@@ -36,7 +37,8 @@ from aiboy.games import (  # noqa: F401
     DEFAULT_TIME_BUDGET, GAMES, KIRBY_ATTEMPT_STEPS, KIRBY_MAX_HEALTH, LEVEL_MODES,
     LEVEL_STATES_DIR, TIMER_START, MULTI_LEVEL_MODES, OBS_TYPES, POWER_NAMES, POWER_SMALL,
     POWER_SUPER, POWER_SUPERBALL, ROM_DIR, ROM_SUFFIXES, SML_ALL_LEVELS, SML_BACKGROUND_TILES,
-    SML_BROKEN_LEVELS, SML_CLEAR_STATES, SML_DEATH_STATES, SUPPORTED_GAMES, GameSpec, RomInfo,
+    SML_CLEAR_STATES, SML_DEATH_STATES, SML_HAZARD_TILES, SML_PLAY_STATES, SML_VEHICLE_LEVELS,
+    SUPPORTED_GAMES, GameSpec, RomInfo,
     _level_state_path,
     check_start_level, discover_roms, ensure_level_states, level_choices, level_targets,
     parse_start_level, power_state, prepare_level_states, probe_rom,
@@ -77,8 +79,10 @@ def mario_tile_lut() -> np.ndarray:
         enemies, easy and hard, and projectiles   1.0
         everything else (sky, background)         0.0
 
-    with one correction: SML_BACKGROUND_TILES (decoration PyBoy files under
-    the blocks; see games.py for how that was measured) read 0.0.
+    with two corrections measured in the game (see games.py for how):
+    SML_BACKGROUND_TILES (decoration PyBoy files under the blocks) read
+    0.0, and SML_HAZARD_TILES (enemies, bombs and projectiles PyBoy's lists
+    miss, such as the bomb a stomped Nokobon leaves) read 1.0.
 
     Otherwise these are exactly the values of the `custom_minimal_enemy()`
     method a locally patched PyBoy used to provide. Changing a value here
@@ -100,6 +104,7 @@ def mario_tile_lut() -> np.ndarray:
     for tiles, value in categories:
         lut[list(tiles)] = value
     lut[list(SML_BACKGROUND_TILES)] = 0.0
+    lut[list(SML_HAZARD_TILES)] = 1.0
     return lut
 
 
@@ -254,18 +259,24 @@ class GameBoyEnv(gym.Env):
 class MarioEnv(GameBoyEnv):
     """Super Mario Land: hold-button actions + shaped reward.
 
-    Discrete(11) action space, symmetric so Mario can jump in either direction
+    Discrete(13) action space, symmetric so Mario can jump in either direction
     (essential for maneuvers like "back up, jump onto a brick, jump forward
-    over an obstacle with enemies on top") plus DOWN so Mario can enter
-    downward pipes:
+    over an obstacle with enemies on top"), DOWN so Mario can enter
+    downward pipes, and UP for the submarine and the plane of levels 2-3
+    and 4-3 (they move up with UP and fire with A or B; UP does nothing in
+    the walking levels):
         0 NOOP           1 RIGHT          2 LEFT          3 JUMP
         4 RIGHT+JUMP     5 RIGHT+RUN      6 RIGHT+RUN+JUMP
         7 LEFT+JUMP      8 LEFT+RUN       9 LEFT+RUN+JUMP
         10 DOWN  (crouch / enter pipe when standing on one)
+        11 UP            12 UP+JUMP (the vehicle rises and fires)
+    Models trained before the UP actions (11 actions) still play: see
+    `fit_action_space`.
 
     Tiles: the 16x20 game area with every tile replaced by its meaning
-    (`mario_tile_lut`): -1.0 Mario, 0.0 empty, 0.5 ground and pipes, 0.6
-    question / pushable blocks, 0.80 coin, 0.85 power-up, 1.0 enemy. Seven
+    (`mario_tile_lut`): -1.0 Mario (or his submarine / plane), 0.0 empty,
+    0.5 ground, pipes and lifts, 0.6 question / pushable blocks, 0.80 coin,
+    0.85 power-up, 1.0 enemy, bomb or projectile (the hazard). Seven
     HUD scalars (lives, coins, timer, x, world, level, power-up) are written
     into cells (0, 0..6); see `_tiles`.
 
@@ -293,21 +304,21 @@ class MarioEnv(GameBoyEnv):
       - "W-L" (FIXED): each reset loads the save-state for that level.
         Any death or level clear ends the episode; next reset replays the
         same level (so lives are effectively infinite for training).
-      - "random" (RANDOM): each reset picks a random usable level from
+      - "random" (RANDOM): each reset picks a random level from
         SML_ALL_LEVELS and loads its state. Death or level clear ends the
         episode so the next reset picks a new level — Mario is always
         training on varied content.
       - "sequential" (SEQUENTIAL): cycles through SML_ALL_LEVELS. The
         cursor only ADVANCES on a real level clear; death retries the
         same level with fresh lives (via state reload).
-      - "marathon" (MARATHON): one life through every usable level in one
+      - "marathon" (MARATHON): one life through all twelve levels in one
         episode, always from 1-1. On level clear we IMMEDIATELY force-load
         the next level's save-state — the in-game level-end cutscene
         (Mario walking off screen, bonus countdown, intro screen) is
         skipped entirely. ANY death ends the episode and the next episode
         starts at 1-1 again (so does an exhausted time budget or a stall).
-        Clearing the last usable level ends the episode with a big bonus.
-        Training, evaluation and playback all play the same marathon.
+        Clearing the last level (4-3, Tatanga) ends the episode with a big
+        bonus. Training, evaluation and playback all play the same marathon.
 
     Rewards fire in every mode: +completion_bonus on level clear,
     -death_penalty on death (whether or not the episode ends). Both events
@@ -321,7 +332,7 @@ class MarioEnv(GameBoyEnv):
         "NOOP", "RIGHT", "LEFT", "JUMP",
         "RIGHT+JUMP", "RIGHT+RUN", "RIGHT+RUN+JUMP",
         "LEFT+JUMP", "LEFT+RUN", "LEFT+RUN+JUMP",
-        "DOWN",
+        "DOWN", "UP", "UP+JUMP",
     )
     ACTIONS = (
         (),                     # 0 NOOP
@@ -335,6 +346,8 @@ class MarioEnv(GameBoyEnv):
         (LEFT, B),              # 8 LEFT+RUN
         (LEFT, A, B),           # 9 LEFT+RUN+JUMP
         (DOWN,),                # 10 DOWN
+        (UP,),                  # 11 UP (the vehicle rises)
+        (UP, A),                # 12 UP+JUMP (rises and fires)
     )
 
     def __init__(
@@ -561,12 +574,13 @@ class MarioEnv(GameBoyEnv):
             self._sequential_advance_pending = True
 
         # Attempt limits. Time budget: checked only while actually playing
-        # (game_state 0), so the level-end countdown, which drains the timer
-        # into score, cannot trigger it. Every attempt starts with the timer
-        # at TIMER_START (level start, respawn and marathon level loads all
-        # reset it). Stall: steps without a new furthest x (off by default).
+        # (SML_PLAY_STATES: walking or the vehicle levels' auto-scroll), so
+        # the level-end countdown, which drains the timer into score, cannot
+        # trigger it. Every attempt starts with the timer at TIMER_START
+        # (level start, respawn and marathon level loads all reset it).
+        # Stall: steps without a new furthest x (off by default).
         time_used = max(0, TIMER_START - int(self.gw.time_left))
-        in_play = game_state == 0 and not (died or level_cleared)
+        in_play = game_state in SML_PLAY_STATES and not (died or level_cleared)
         over_budget = in_play and self.time_budget > 0 and time_used >= self.time_budget
         stalled = in_play and self._stalled()
 
@@ -588,7 +602,7 @@ class MarioEnv(GameBoyEnv):
                         world=self._last_world, coins=self._last_coins, score=self._last_score,
                         stuck=0, game_over=False, game_state=0, time_used=0, **extra)
 
-        # Marathon mode: one life through every usable level. On a clear we
+        # Marathon mode: one life through every level. On a clear we
         # do NOT wait for the in-game level-end cutscene (~70 env-steps of
         # no learning signal): `level_cleared` fires the step the goal is
         # touched and the next level's save-state is loaded.
@@ -811,6 +825,52 @@ def wrap_vec_env(vec: VecEnv, obs_type: str, frame_stack: int) -> VecEnv:
         order = "first" if obs_type == "pixels" else "last"
         vec = VecFrameStack(vec, n_stack=frame_stack, channels_order=order)
     return vec
+
+
+class _FewerActions(VecEnvWrapper):
+    """The env with its action space narrowed to the first `n` actions."""
+
+    def __init__(self, venv: VecEnv, n: int):
+        super().__init__(venv, action_space=spaces.Discrete(n))
+
+    def reset(self):
+        return self.venv.reset()
+
+    def step_wait(self):
+        return self.venv.step_wait()
+
+
+def fit_action_space(vec: VecEnv, model_action_space) -> VecEnv:
+    """`vec` as a model trained with `model_action_space` expects it.
+
+    New actions are only ever appended to a game's table (Mario's UP
+    actions came after 11 others), so a model from before them keeps its
+    meaning: the env is narrowed to the first n actions and the model plays
+    exactly as it was trained. A model with more actions than the env, or a
+    different kind of action space, cannot be fitted and raises."""
+    n = getattr(model_action_space, "n", None)
+    have = getattr(vec.action_space, "n", None)
+    if n is None or have is None:
+        raise ValueError(f"cannot fit action space {model_action_space} to {vec.action_space}")
+    if int(n) == int(have):
+        return vec
+    if int(n) > int(have):
+        raise ValueError(f"the model has {int(n)} actions, this game only {int(have)}")
+    return _FewerActions(vec, int(n))
+
+
+def load_model(model_path, vec: VecEnv, device: str = "cpu"):
+    """PPO.load for playback: the model with `vec` as its environment, the
+    env narrowed for a model from before the game gained actions (see
+    `fit_action_space`). Returns (model, env)."""
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.save_util import load_from_zip_file
+    # The saved action space, read without building the model: PPO.load
+    # with the env checks the spaces, and set_env afterwards insists on the
+    # training run's number of envs (playback has one).
+    data, _, _ = load_from_zip_file(str(model_path), load_data=True, device=device)
+    env = fit_action_space(vec, data["action_space"])
+    return PPO.load(str(model_path), env=env, device=device), env
 
 
 def make_pyboy_env(

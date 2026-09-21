@@ -15,6 +15,10 @@ using the GUI's `_pump` protocol:
     ("play_done", summary)        playback finished; summary = list of
                                   {"reward", "steps"} per completed episode
     ("play_error", traceback)
+    ("agent_view", grid | None)   what the agent sees: the newest 16x20 frame
+                                  of its tile observation (a float array),
+                                  or None for a pixel model; only while
+                                  `view_wanted` is set, at most VIEW_HZ a second
 
 Pacing is done per emulator frame with `time.sleep()` because PyBoy's own
 speed setting only paces when it owns an SDL2 window. Per-frame (not
@@ -48,6 +52,7 @@ from aiboy.gui.controls import BUTTONS, HeldButtons, action_name, diff_presses
 from aiboy.paths import ASSET_DIR, LOCAL_ASSET_DIR, local_or_shipped
 
 GB_FPS = 60.0
+VIEW_HZ = 8.0               # the agent's-view table is refreshed at most this often
 RESYNC_AFTER = 0.25         # if pacing falls this far behind, drop the backlog instead of racing
 
 
@@ -313,10 +318,24 @@ class _Session:
             pass
 
 
+def agent_view(obs) -> np.ndarray | None:
+    """The newest frame of a (vectorised, stacked) tile observation as a
+    16x20 array: exactly the numbers the model gets for "now". None for a
+    pixel observation (channels first, 144x160), which is a picture."""
+    arr = np.asarray(obs)
+    if arr.ndim != 4 or arr.shape[1:3] != (16, 20):
+        return None
+    return np.array(arr[0, :, :, -1], dtype=np.float32)
+
+
 class EmbeddedPlayer:
     def __init__(self, frames: LatestFrame, event_queue: queue.Queue):
         self.frames = frames
         self.events = event_queue
+        # Set while the Tracking panel shows the agent's view (a checkbox);
+        # the grids are only built and sent then.
+        self.view_wanted = threading.Event()
+        self._view_sent = 0.0
 
     # ---------- public entry points ----------
 
@@ -355,6 +374,17 @@ class EmbeddedPlayer:
     def _emit(self, *item) -> None:
         self.events.put(item)
 
+    def _report_view(self, obs, force: bool = False) -> None:
+        """Send the agent's view when it is wanted, at most VIEW_HZ a second
+        (`force`: now, e.g. the first frame of a round)."""
+        if not self.view_wanted.is_set():
+            return
+        now = time.monotonic()
+        if not force and now - self._view_sent < 1.0 / VIEW_HZ:
+            return
+        self._view_sent = now
+        self._emit("agent_view", agent_view(obs))
+
     def _report_step(self, game: str, action, info, ep_reward: float, ep_steps: int) -> None:
         from aiboy.env import ENV_CLASSES
         act_id = int(np.asarray(action).flat[0])
@@ -380,7 +410,7 @@ class EmbeddedPlayer:
     def _play_loop(self, model_path, game, obs_type, action_repeat, frame_stack, start_level,
                    episodes, max_steps, deterministic, speed_mult, stop,
                    time_budget=DEFAULT_TIME_BUDGET, stall_steps=DEFAULT_STALL_STEPS) -> None:
-        from stable_baselines3 import PPO
+        from aiboy.env import load_model
         _single_threaded_torch()
         session = None
         summary: list[dict] = []
@@ -392,19 +422,21 @@ class EmbeddedPlayer:
             session = _Session(game, obs_type, action_repeat, frame_stack, start_level,
                                self.frames, speed_mult, time_budget, stall_steps)
             self._emit("play_status", f"loaded {model_path.name}")
-            model = PPO.load(str(model_path), env=session.vec, device="cpu")
+            model, vec = load_model(model_path, session.vec)
 
             for ep in range(episodes):
                 if stop.is_set():
                     break
-                obs = session.vec.reset()
+                obs = vec.reset()
+                self._report_view(obs, force=True)
                 session.push_frame()
                 session.pacer.reset()
                 total, steps, done, clears = 0.0, 0, [False], 0
                 self._emit("play_stat", "episode", f"{ep + 1}/{episodes}")
                 while not done[0] and not stop.is_set():
                     action, _ = model.predict(obs, deterministic=deterministic)
-                    obs, reward, done, info = session.vec.step(action)
+                    obs, reward, done, info = vec.step(action)
+                    self._report_view(obs)
                     total += float(reward[0])
                     steps += 1
                     i0 = info[0] if info and isinstance(info[0], dict) else {}
@@ -438,7 +470,7 @@ class EmbeddedPlayer:
 
     def _preview_loop(self, model_path, game, obs_type, action_repeat, frame_stack, start_level,
                       stop, training_active) -> None:
-        from stable_baselines3 import PPO
+        from aiboy.env import load_model
         _single_threaded_torch()
         session = None
         model = None
@@ -461,9 +493,9 @@ class EmbeddedPlayer:
                         # newest at each paint. Real time is for playing.
                         session = _Session(game, obs_type, action_repeat, frame_stack,
                                            start_level, self.frames, speed_mult=PREVIEW_SPEED)
-                        model = PPO.load(str(model_path), env=session.vec, device="cpu")
+                        model, vec = load_model(model_path, session.vec)
                         model_mtime = mtime
-                        obs = session.vec.reset()
+                        obs = vec.reset()
                         session.pacer.reset()
                         ep_num, ep_reward, ep_steps = 1, 0.0, 0
                         self._emit("log", f"[preview] loaded {model_path.name}\n")
@@ -477,7 +509,8 @@ class EmbeddedPlayer:
                         continue
 
                 action, _ = model.predict(obs, deterministic=False)
-                obs, r, done, info = session.vec.step(action)
+                obs, r, done, info = vec.step(action)
+                self._report_view(obs)
                 ep_reward += float(r[0])
                 ep_steps += 1
                 self._report_step(game, action, info, ep_reward, ep_steps)
@@ -485,7 +518,7 @@ class EmbeddedPlayer:
                     self._emit("play_episode", {"episode": ep_num, "reward": ep_reward,
                                                 "steps": ep_steps,
                                                 "end": episode_end_reason(info, ep_steps, 0)})
-                    obs = session.vec.reset()
+                    obs = vec.reset()
                     session.pacer.reset()
                     ep_num += 1
                     ep_reward, ep_steps = 0.0, 0

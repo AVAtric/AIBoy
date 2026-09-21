@@ -463,14 +463,24 @@ first three cells.
 
 - **Held-button actions.** Buttons stay pressed for the whole
   `action_repeat` window; jump actions hold A for extra frames so Mario
-  reaches full height. Eleven actions: NOOP, RIGHT, LEFT, JUMP, RIGHT+JUMP,
-  RIGHT+RUN, RIGHT+RUN+JUMP, LEFT+JUMP, LEFT+RUN, LEFT+RUN+JUMP, DOWN.
-- **Observations.** `tiles` (default): a 16 × 20 semantic grid (Mario,
-  empty, ground, enemy, pipe/wall) with seven normalised scalars in the
-  top-left cells: lives, coins, timer, x, world, level and Mario's power-up
-  (read from RAM at `FF99` / `FFB5`). Trained with an MLP, about 10× faster
-  than pixels on CPU. `pixels`: the raw 144 × 160 screen with a CNN. The
-  score is not observed: it only grows and nothing depends on it.
+  reaches full height. Thirteen actions: NOOP, RIGHT, LEFT, JUMP, RIGHT+JUMP,
+  RIGHT+RUN, RIGHT+RUN+JUMP, LEFT+JUMP, LEFT+RUN, LEFT+RUN+JUMP, DOWN, UP,
+  UP+JUMP. The two UP actions are for the submarine (2-3) and the plane
+  (4-3), which rise with UP and fire with A or B. A model trained before
+  them (eleven actions) still plays, and a resumed run gets the two new
+  outputs added.
+- **Observations.** `tiles` (default): a 16 × 20 semantic grid (−1 Mario,
+  0 empty, .5 ground / pipe / lift, .6 block, .8 coin, .85 item, 1 enemy,
+  bomb or projectile) with seven normalised scalars in the top-left cells:
+  lives, coins, timer, x, world, level and Mario's power-up (read from RAM
+  at `FF99` / `FFB5`). Trained with an MLP, about 10× faster than pixels on
+  CPU. `pixels`: the raw 144 × 160 screen with a CNN. The score is not
+  observed: it only grows and nothing depends on it. The grid is built from
+  PyBoy's tile lists plus corrections measured in the game
+  (`tools/mario_tile_survey.py`, also `--sprites`): decoration PyBoy files
+  as a block reads empty, and the enemies, bombs and projectiles PyBoy's
+  lists miss read as hazards. Under Tracking, **Show what the agent sees**
+  displays this grid as a table of numbers while an agent plays.
 - **Reward per step.** `3 × new forward distance` (backtracking cannot
   farm) `+ 5 × coins` `+ 0.05 × score gained` `− 0.03` per step. A death is
   `− 500`, a level clear `+ 1000` (`+ 3000` more for finishing a marathon).
@@ -498,17 +508,21 @@ Any change here changes what a score means: bump the game's entry in
 | `W-L`        | any death or clear                    | drilling one level                   |
 
 Levels other than 1-1 start from cached save-states in
-`models/mario/_level_states/`, created on first use. Levels 2-3 and 4-3
-cannot be booted through PyBoy's wrapper (upstream bug) and are skipped.
+`models/mario/_level_states/`, created on first use. All twelve levels are
+in, including the two vehicle levels 2-3 (submarine) and 4-3 (plane, ending
+with Tatanga), which the game runs in its auto-scroll state.
 
 **A marathon is one continuous run from 1-1.** The moment Mario touches the
 goal the next level's save-state is loaded and play continues in the same
 life. The episode ends at the first death, when the time budget is used up,
-or after the last usable level (with a large bonus). Training, evaluation
-and playback all play exactly this marathon, so a training reward, an
-evaluation score and what you watch mean the same thing. Completing all ten
-levels in one life is a long project: `Marathon, all levels (~1 h)` is a
-start, the `overnight` preset is realistic.
+or after 4-3 (with a large bonus). Training, evaluation and playback all
+play exactly this marathon, so a training reward, an evaluation score and
+what you watch mean the same thing. Completing all twelve levels in one
+life is a long project: `Marathon, all levels (~1 h)` is a start, the
+`overnight` preset is realistic. Because every attempt starts at 1-1, a
+later level is only practised after everything before it was cleared in
+that same life; a `sequential` run learns the later levels faster and can
+be watched as a marathon afterwards.
 
 Evaluation during training mirrors the mode where that terminates cleanly
 (fixed level, marathon) and uses the campaign otherwise (random,

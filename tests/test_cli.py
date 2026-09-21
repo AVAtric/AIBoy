@@ -128,3 +128,84 @@ class ExplorationGuardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WidenActionsTests(unittest.TestCase):
+    """A model from before Mario had UP actions continues training with them."""
+
+    def test_old_outputs_are_kept_and_the_new_ones_start_unlikely(self):
+        import numpy as np
+        import torch as th
+        from gymnasium import spaces
+        from stable_baselines3 import PPO
+        from stable_baselines3.common.vec_env import DummyVecEnv
+
+        def dummy(n):
+            class Dummy(__import__("gymnasium").Env):
+                observation_space = spaces.Box(-1, 1, (4,))
+                action_space = spaces.Discrete(n)
+                def reset(self, *, seed=None, options=None): return np.zeros(4, np.float32), {}
+                def step(self, a): return np.zeros(4, np.float32), 0.0, True, False, {}
+            return DummyVecEnv([Dummy])
+
+        import tempfile
+        old = PPO("MlpPolicy", dummy(11), n_steps=8, batch_size=8, device="cpu", seed=0)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "old.zip"
+            old.save(str(path))
+            obs = th.zeros(1, 4)
+            before = old.policy.get_distribution(obs).distribution.probs.detach()[0]
+            model = cli.load_for_training(path, dummy(13), device="cpu")
+        self.assertEqual(model.action_space, spaces.Discrete(13))
+        probs = model.policy.get_distribution(obs).distribution.probs.detach()[0]
+        self.assertEqual(len(probs), 13)
+        # The old actions keep their order and most of the probability.
+        self.assertEqual(int(th.argmax(probs[:11])), int(th.argmax(before)))
+        self.assertLess(float(probs[11:].sum()), 0.1)
+        self.assertGreater(float(probs[11:].sum()), 0.0)
+        model.learn(16)                                   # and it trains
+        self.assertFalse(cli.widen_actions(model, 13))    # nothing left to do
+
+    def test_the_guard_can_restore_a_best_model_from_before_the_new_actions(self):
+        """A resumed run whose best_model.zip has 11 outputs: the repair
+        widens that model and takes its weights, and the optimizer it uses
+        afterwards belongs to the run's own policy."""
+        import contextlib
+        import io
+        import tempfile
+        import types
+        import numpy as np
+        import torch as th
+        from gymnasium import spaces
+        from stable_baselines3 import PPO
+        from stable_baselines3.common.vec_env import DummyVecEnv
+
+        def dummy(n):
+            class Dummy(__import__("gymnasium").Env):
+                observation_space = spaces.Box(-1, 1, (4,))
+                action_space = spaces.Discrete(n)
+                def reset(self, *, seed=None, options=None): return np.zeros(4, np.float32), {}
+                def step(self, a): return np.zeros(4, np.float32), 0.0, True, False, {}
+            return DummyVecEnv([Dummy])
+
+        with tempfile.TemporaryDirectory() as d:
+            best = Path(d) / "best_model.zip"
+            PPO("MlpPolicy", dummy(11), n_steps=8, batch_size=8, device="cpu", seed=0).save(str(best))
+            model = cli.load_for_training(best, dummy(13), device="cpu")
+            widened = {k: v.clone() for k, v in model.policy.state_dict().items()}
+            model.learn(16)
+            guard = cli._exploration_guard(types.SimpleNamespace(best_mean_reward=5.0), best)
+            guard.init_callback(model)
+            guard.policy_entropy = lambda: 0.0
+            model.ep_info_buffer.extend({"r": -1.0, "l": 1, "t": 0.0}
+                                        for _ in range(cli.COLLAPSE_EPISODES))
+            with contextlib.redirect_stdout(io.StringIO()):
+                for _ in range(cli.COLLAPSE_PATIENCE):
+                    guard.on_rollout_end()
+        self.assertEqual(guard.repairs, 1)
+        self.assertTrue(all(th.equal(v, widened[k]) for k, v in model.policy.state_dict().items()))
+        own = {id(p) for p in model.policy.parameters()}
+        for group in model.policy.optimizer.param_groups:
+            for p in group["params"]:
+                self.assertIn(id(p), own)               # the optimizer drives this policy
+        model.learn(16)                                  # and training goes on

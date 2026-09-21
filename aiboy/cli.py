@@ -191,7 +191,16 @@ def _exploration_guard(eval_cb, best_path: Path):
                       f"run with a higher ent_coef (curiosity).", flush=True)
                 self.stop = True
                 return
-            self.model.set_parameters(str(best_path), exact_match=True, device=self.model.device)
+            try:
+                self.model.set_parameters(str(best_path), exact_match=True,
+                                          device=self.model.device)
+            except (RuntimeError, ValueError):
+                # The best model is from before the game gained actions:
+                # widen a copy and take its weights and optimizer state.
+                best_model = load_for_training(best_path, self.model.get_env(),
+                                               device=self.model.device)
+                self.model.set_parameters(best_model.get_parameters(), exact_match=True,
+                                          device=self.model.device)
             factor, at_least, at_most = ENT_COEF_AFTER_REPAIR
             old = float(self.model.ent_coef)
             self.model.ent_coef = min(max(old * factor, at_least), at_most)
@@ -207,6 +216,63 @@ def _exploration_guard(eval_cb, best_path: Path):
             return not self.stop
 
     return ExplorationGuard()
+
+
+def widen_actions(model, n_actions: int) -> bool:
+    """Give a loaded PPO model `n_actions` outputs instead of fewer.
+
+    Actions are only ever appended to a game's table (Mario gained UP and
+    UP+JUMP after 11 others), so a model from before keeps what it learned:
+    the old output rows are copied, the new rows start with zero weights
+    and a bias 3 nats below the old actions' lowest, so they are rarely
+    picked until training finds them useful. The optimizer is rebuilt
+    (its moments have the old shape). False when there was nothing to do.
+    Defined here so importing this module does not import torch."""
+    import torch as th
+    from gymnasium import spaces
+    from stable_baselines3.common.distributions import make_proba_distribution
+    have = int(model.action_space.n)
+    if n_actions <= have:
+        return False
+    policy = model.policy
+    old = policy.action_net
+    new = th.nn.Linear(old.in_features, n_actions).to(old.weight.device)
+    with th.no_grad():
+        new.weight.zero_()
+        new.weight[:have] = old.weight
+        new.bias[:have] = old.bias
+        new.bias[have:] = old.bias.min() - 3.0
+    policy.action_net = new
+    space = spaces.Discrete(n_actions)
+    policy.action_space = model.action_space = space
+    policy.action_dist = make_proba_distribution(space)
+    policy.optimizer = policy.optimizer_class(policy.parameters(), lr=model.lr_schedule(1),
+                                              **policy.optimizer_kwargs)
+    return True
+
+
+def load_for_training(path, env, *, device: str, tensorboard_log=None):
+    """PPO.load of a checkpoint to continue training on `env`, widened when
+    the game has gained actions since the checkpoint was saved."""
+    import tempfile
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.save_util import load_from_zip_file
+    n = int(env.action_space.n)
+    data, _, _ = load_from_zip_file(str(path), load_data=True, device=device)
+    if int(data["action_space"].n) >= n:
+        return PPO.load(str(path), env=env, device=device, tensorboard_log=tensorboard_log)
+    # Widen a copy and load that one with the env, so SB3 sizes the rollout
+    # buffer and the env count the usual way (set_env insists on the saved
+    # number of envs; load does not).
+    model = PPO.load(str(path), device=device)
+    widen_actions(model, n)
+    print(f"[train] the game has {n} actions now; the model had fewer. It keeps what it "
+          f"learned and starts to try the new ones (UP for the submarine and the plane).",
+          flush=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        widened = Path(tmp) / "widened.zip"
+        model.save(str(widened))
+        return PPO.load(str(widened), env=env, device=device, tensorboard_log=tensorboard_log)
 
 
 def _apply_resume_overrides(model, args: argparse.Namespace) -> None:
@@ -349,7 +415,7 @@ def cmd_train(args: argparse.Namespace) -> None:
         print("[train] WARNING: --resume loads the saved model's hyperparameters. "
               "Mutable overrides (ent_coef, learning_rate, n_epochs) are applied, "
               "but architecture / n_steps / batch_size come from the saved model.")
-        model = PPO.load(str(resumed_from), env=env, device=args.device, tensorboard_log=tb_log)
+        model = load_for_training(resumed_from, env, device=args.device, tensorboard_log=tb_log)
         _apply_resume_overrides(model, args)
     else:
         policy, policy_kwargs = pick_policy(args.obs_type)
@@ -473,7 +539,7 @@ def _remember_run(args: argparse.Namespace, run_name: str, paths: dict, duration
 # ------------------------- play -------------------------
 
 def cmd_play(args: argparse.Namespace) -> None:
-    from stable_baselines3 import PPO
+    from aiboy.env import load_model
     run_name = args.run_name or "default"
     model_path = resolve_model_path(args.model, args.game, run_name)
     print(f"[play] loading model from {model_path}")
@@ -483,7 +549,7 @@ def cmd_play(args: argparse.Namespace) -> None:
                          args.emulation_speed, args.obs_type,
                          start_level=start_level,
                          time_budget=args.time_budget, stall_steps=args.stall_steps)
-    model = PPO.load(str(model_path), env=env, device=args.device)
+    model, env = load_model(model_path, env, device=args.device)
     deterministic = not args.stochastic
     print(f"[play] {args.episodes} episode(s), deterministic={deterministic}")
 

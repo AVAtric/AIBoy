@@ -12,7 +12,9 @@ class LevelSpecTests(unittest.TestCase):
         self.assertEqual(env.parse_start_level("all_levels"), "marathon")
         self.assertEqual(env.parse_start_level("2-1"), (2, 1))
         self.assertEqual(env.parse_start_level((3, 2)), (3, 2))
-        for bad in ("2-3", "4-3", "5-1", "1-2-3", "nope"):
+        self.assertEqual(env.parse_start_level("2-3"), (2, 3))      # the submarine
+        self.assertEqual(env.parse_start_level("4-3"), (4, 3))      # the plane, Tatanga
+        for bad in ("5-1", "1-4", "1-2-3", "nope"):
             with self.assertRaises(ValueError, msg=bad):
                 env.parse_start_level(bad)
 
@@ -20,7 +22,9 @@ class LevelSpecTests(unittest.TestCase):
         choices = env.level_choices()
         self.assertEqual(choices[:4], list(env.LEVEL_MODES))
         self.assertEqual(len(choices), 4 + len(env.SML_ALL_LEVELS))
-        self.assertNotIn("2-3", choices)
+        self.assertEqual(len(env.SML_ALL_LEVELS), 12)                # a marathon is the whole game
+        self.assertEqual(env.SML_ALL_LEVELS[-1], (4, 3))
+        self.assertIn("2-3", choices)
         self.assertEqual(env.level_targets("default"), [])
         self.assertEqual(env.level_targets("1-2"), [(1, 2)])
         self.assertEqual(env.level_targets("marathon"), list(env.SML_ALL_LEVELS))
@@ -93,7 +97,37 @@ class ObservationTests(unittest.TestCase):
             self.assertEqual(lut[tile], 0.0, tile)
         self.assertEqual(lut[144], 1.0)                                          # goomba
         self.assertEqual(lut[0], -1.0)                                           # Mario
-        self.assertEqual(games.env_version("mario"), "mario-3")
+        for tile in (200, 201, 168, 169, 98, 216, 250, 251):                    # hazards PyBoy misses
+            self.assertEqual(lut[tile], 1.0, tile)
+        for tile in (88, 89, 145, 246, 254, 122, 110):                          # score numbers, torpedo
+            self.assertEqual(lut[tile], 0.0, tile)
+        self.assertEqual(lut[112], -1.0)                                         # the submarine
+        self.assertEqual(games.env_version("mario"), "mario-4")
+
+    def test_mario_has_up_actions_appended(self):
+        names = env.MarioEnv.ACTION_NAMES
+        self.assertEqual(len(names), 13)
+        self.assertEqual(names[11:], ("UP", "UP+JUMP"))
+        self.assertEqual(names[10], "DOWN")                  # the first 11 keep their meaning
+
+    def test_old_models_play_through_a_narrowed_action_space(self):
+        from gymnasium import spaces
+        from stable_baselines3.common.vec_env import DummyVecEnv
+
+        class Dummy(__import__("gymnasium").Env):
+            observation_space = spaces.Box(-1, 1, (2,))
+            action_space = spaces.Discrete(13)
+            def reset(self, *, seed=None, options=None): return self.observation_space.sample() * 0, {}
+            def step(self, a):
+                assert 0 <= int(a) < 13
+                return self.observation_space.sample() * 0, 0.0, False, False, {}
+        vec = DummyVecEnv([Dummy])
+        self.assertIs(env.fit_action_space(vec, spaces.Discrete(13)), vec)
+        narrow = env.fit_action_space(vec, spaces.Discrete(11))
+        self.assertEqual(narrow.action_space, spaces.Discrete(11))
+        narrow.reset(); narrow.step(__import__("numpy").array([10]))
+        with self.assertRaises(ValueError):
+            env.fit_action_space(vec, spaces.Discrete(14))
 
     def test_obs_types(self):
         self.assertEqual(games.OBS_TYPES, ("tiles", "pixels"))
@@ -200,6 +234,78 @@ class ObservationTests(unittest.TestCase):
             self.assertTrue(trunc and info["time_budget_exceeded"], info)
             e.reset()
             self.assertEqual(tuple(e.gw.world), (1, 1))
+        finally:
+            pb.stop(save=False)
+
+    @unittest.skipUnless((games.ROM_DIR / "mario.gb").exists(), "needs ROMs/mario.gb")
+    def test_marathon_walks_all_twelve_levels_and_ends_after_tatanga(self):
+        """Every clear (the game-state byte set to "goal touched") loads the
+        next level's state in the same life, through the two vehicle levels,
+        and the twelfth clear ends the run with the marathon bonus."""
+        from pyboy import PyBoy
+        games.prepare_level_states("marathon")
+        pb = PyBoy(str(games.ROM_DIR / "mario.gb"), window_type="null", game_wrapper=True,
+                   disable_renderer=True)
+        try:
+            e = env.MarioEnv(pb, obs_type="tiles", start_level="marathon", time_budget=0)
+            e.reset()
+            for i, lvl in enumerate(games.SML_ALL_LEVELS):
+                self.assertEqual(tuple(e.gw.world), lvl)
+                for _ in range(3):
+                    _, _, term, trunc, info = e.step(0)
+                    self.assertFalse(term or trunc, (lvl, info))
+                    self.assertIn(info["game_state"], games.SML_PLAY_STATES, lvl)
+                pb.set_memory_value(games.ADDR_GAME_STATE, 0x07)      # the goal is touched
+                _, reward, term, trunc, info = e.step(0)
+                self.assertTrue(info["level_cleared"], lvl)
+                self.assertGreaterEqual(reward, e.completion_bonus)
+                if i < len(games.SML_ALL_LEVELS) - 1:
+                    self.assertFalse(term, lvl)
+                    self.assertEqual(info["marathon_next_level"], games.SML_ALL_LEVELS[i + 1])
+                    self.assertEqual(info["marathon_clears"], i + 1)
+                    self.assertEqual(info["time_used"], 0)             # the timer starts afresh
+                else:
+                    self.assertTrue(term and info["marathon_done"], info)
+                    self.assertEqual(info["marathon_clears"], 12)
+                    self.assertGreaterEqual(reward, 4 * e.completion_bonus)
+            e.reset()
+            self.assertEqual(tuple(e.gw.world), (1, 1))
+        finally:
+            pb.stop(save=False)
+
+    @unittest.skipUnless((games.ROM_DIR / "mario.gb").exists(), "needs ROMs/mario.gb")
+    def test_vehicle_levels_play_through_the_env(self):
+        """2-3 and 4-3: the game runs in its auto-scroll state, UP moves the
+        vehicle up and DOWN down, a crash is a death, and the time budget
+        counts there too."""
+        import numpy as np
+        from pyboy import PyBoy
+        games.prepare_level_states("marathon")
+        pb = PyBoy(str(games.ROM_DIR / "mario.gb"), window_type="null", game_wrapper=True,
+                   disable_renderer=True)
+        try:
+            for lvl in sorted(games.SML_VEHICLE_LEVELS):
+                e = env.MarioEnv(pb, obs_type="tiles", start_level=lvl, time_budget=0)
+                obs, _ = e.reset()
+                self.assertEqual(tuple(e.gw.world), lvl)
+                self.assertEqual(int((obs == -1.0).sum()), 4)          # the vehicle is Mario
+                rows = []
+                for action in [11] * 12 + [10] * 12:                  # UP, then DOWN
+                    obs, _, term, trunc, info = e.step(action)
+                    self.assertFalse(term or trunc, info)
+                    rows.append(int(np.argwhere(obs[1:, :, 0] == -1.0)[:, 0].min()))
+                self.assertLess(rows[11], rows[0])
+                self.assertGreater(rows[-1], rows[11])
+                self.assertEqual(info["game_state"], 0x0D)
+                self.assertGreater(info["x"], 284)                    # the level scrolls by itself
+                # time budget: counted while playing the vehicle level
+                e = env.MarioEnv(pb, obs_type="tiles", start_level=lvl, time_budget=2)
+                e.reset()
+                for _ in range(300):
+                    _, _, term, trunc, info = e.step(11 if _ % 2 else 10)
+                    if term or trunc:
+                        break
+                self.assertTrue(info["time_budget_exceeded"] or info["died"], info)
         finally:
             pb.stop(save=False)
 

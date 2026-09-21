@@ -77,15 +77,14 @@ DEFAULT_CONFIG: dict = {
 #                       advances to next level on clear, restarts at 1-1
 #                       when all lives are exhausted. Episodes span
 #                       multiple levels / deaths.
-#   - "random"       → each episode picks a random level from the 10
-#                       usable ones (1-1 … 4-2, skipping 2-3 and 4-3 which
-#                       PyBoy's SML wrapper cannot boot). Death or level
-#                       clear ends the episode → next episode = new level.
-#                       Best for generalisation across worlds.
-#   - "sequential"   → cycles through all 10 usable levels. The cursor
+#   - "random"       → each episode picks a random level from the twelve
+#                       (1-1 … 4-3). Death or level clear ends the episode
+#                       → next episode = new level. Best for generalisation
+#                       across worlds.
+#   - "sequential"   → cycles through all twelve levels. The cursor
 #                       advances ONLY on a real clear; death retries the
 #                       same level with fresh lives.
-#   - "marathon"     → one life from 1-1 through every usable level in one
+#   - "marathon"     → one life from 1-1 through all twelve levels in one
 #                       episode. Level-end cutscene is skipped by
 #                       force-loading the next level's state the instant
 #                       Mario clears. ANY death ends the episode; the next
@@ -129,20 +128,20 @@ _HARDCODED_BUILTINS: dict[str, dict] = {
         "default", 8_000_000, checkpoint_freq=250_000, eval_freq=100_000),
     "Mario — Campaign, overnight (~8 h)": _mario(
         "default", 60_000_000, checkpoint_freq=500_000, eval_freq=250_000),
-    # ---- Random-level training (generalises across 10 usable levels).
+    # ---- Random-level training (generalises across all twelve levels).
     #      Slightly higher entropy (0.02) helps in every multi-level mode
     #      because the state distribution is wider than the campaign's. ----
     "Mario — Random levels (~1 h)": _mario(
         "random", 10_000_000, checkpoint_freq=250_000, eval_freq=100_000, ent_coef=0.02),
     "Mario — Random levels, overnight (~8 h)": _mario(
         "random", 60_000_000, checkpoint_freq=500_000, eval_freq=250_000, ent_coef=0.02),
-    # ---- Sequential: cycle through all 10 usable levels. Death retries
+    # ---- Sequential: cycle through all twelve levels. Death retries
     #      the same level; a clear advances to the next. ----
     "Mario — No return, cycle levels (~1 h)": _mario(
         "sequential", 10_000_000, checkpoint_freq=250_000, eval_freq=100_000, ent_coef=0.02),
     "Mario — No return, overnight (~8 h)": _mario(
         "sequential", 60_000_000, checkpoint_freq=500_000, eval_freq=250_000, ent_coef=0.02),
-    # ---- Marathon: one life from 1-1 through all 10 usable levels; the
+    # ---- Marathon: one life from 1-1 through all twelve levels; the
     #      level-end cutscene is skipped by loading the next level's state.
     #      Any death ends the episode and the next one starts at 1-1. ----
     "Mario — Marathon, all levels (~1 h)": _mario(

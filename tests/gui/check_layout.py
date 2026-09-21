@@ -39,17 +39,34 @@ app.tune_vars["trying"].set("curiosity 0.03 · learning speed 0.0003 · rollout 
 app.tune_vars["best"].set("curiosity 0.03 · learning speed 0.0003 (score 1234 ± 12)")
 class _Live:                      # a "running" trainer, so the preview boxes are shown
     def poll(self): return None
-for act, preview, human in (("none", False, False), ("train", False, False), ("train", True, False),
-                            ("tune", False, False), ("play", False, False), ("human", False, True)):
+# The agent's view (a 16 x 20 table) is shown while an agent plays and its
+# checkbox is on: with the preview during training and with playback.
+import numpy as np
+app.view_var.set(False)
+for act, preview, human, view in (
+        ("none", False, False, False), ("train", False, False, False),
+        ("train", True, False, False), ("train", True, False, True),
+        ("tune", False, False, False), ("play", False, False, False),
+        ("play", False, False, True), ("human", False, True, True)):
     app._train_preview_on = preview
     app.train_proc = _Live() if preview else None
+    app.view_var.set(view)
     app.set_live_mode("human" if human else "agent")
     app.set_activity(act, f"Testing {act}"); root.update()
+    if view and act != "human":
+        grid = np.zeros((16, 20), np.float32); grid[12, 4:6] = -1; grid[14:, :] = 0.5; grid[13, 9] = 1
+        grid[0, :7] = (2 / 9, 0.05, 0.97, 0.2, 0, 0.5, 0)
+        app._show_agent_view(grid); root.update()
+        assert app.agent_view.itemcget(app.agent_view._texts[13][9], "text") == "1"
+        assert app.agent_view.itemcget(app.agent_view._texts[0][2], "text") == ".97"
     th = app.tracking_frame.winfo_reqheight()
     shown = [k for k, v in app.tracking_layout().items() if v]
+    if act == "human":
+        assert "view" not in shown and not app.view_check.winfo_ismapped()
     fits = th <= small_limit; ok &= fits
-    say(f"tracking {act:5s}{' +preview' if preview else ''}: {th} high / {small_limit} "
-        f"({', '.join(shown)}) {'ok' if fits else 'OVERFLOW'}")
+    say(f"tracking {act:5s}{' +preview' if preview else ''}{' +view' if view else ''}: {th} "
+        f"high / {small_limit} ({', '.join(shown)}) {'ok' if fits else 'OVERFLOW'}")
+app.view_var.set(False)
 app.train_proc = None; app.set_live_mode("agent"); app.set_activity("none", "Nothing running"); root.update()
 # The buttons light up for the agent's actions and clear for none; the LED follows playback.
 app.gameboy.show("RIGHT+RUN+JUMP"); assert app.gameboy.pressed == {"right", "b", "a"}

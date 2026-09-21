@@ -43,6 +43,7 @@ from aiboy import APP_NAME, presets, runs, settings, tuning
 from aiboy.experience import Experience, Record
 from aiboy.games import (GAMES, OBS_TYPES, SML_ALL_LEVELS, RomInfo, check_start_level,
                          discover_roms, display_name, level_choices, probe_rom)
+from aiboy.gui.agent_view import AgentView, legend as agent_view_legend
 from aiboy.gui.controls import ControlMap, Gamepad, HeldButtons, KeyboardInput
 from aiboy.gui.controls_dialog import ControlsDialog
 from aiboy.gui.experience_tab import ExperienceTab
@@ -743,6 +744,7 @@ class AIboyGUI:
                       "something else starts (Clear empties it).")
         self._track_boxes = {
             "live": self._build_live_box(parent),
+            "view": self._build_view_box(parent),
             "rounds": self._build_rounds_box(parent),
             "train": self._build_train_box(parent),
             "tune": self._build_search_box(parent),
@@ -777,8 +779,57 @@ class AIboyGUI:
                             anchor="w")
             self._live_labels[key], self._live_values[key] = lbl, val
             tooltip(lbl, lambda k=key: self._live_help.get(k, ""), val)
+        # The agent's view: the table of numbers it plays from (see _build_view_box).
+        self.view_var = tk.BooleanVar(value=bool(settings.get("show_agent_view")))
+        self.view_check = ttk.Checkbutton(stats, text="Show what the agent sees",
+                                          variable=self.view_var, command=self._on_view_toggled)
+        tooltip(self.view_check, "Show, under this box, the numbers the agent gets instead of "
+                                 "the picture: one per tile of the screen, tinted by what they "
+                                 "mean. Hover the table for how to read it.")
         self.set_live_mode("agent")
         return stats
+
+    def _build_view_box(self, parent: ttk.Frame) -> ttk.LabelFrame:
+        """The agent's observation as a 16 x 20 table (see agent_view.py),
+        shown while an agent plays and the checkbox is on."""
+        head = ttk.Frame(parent)
+        ttk.Label(head, text="What the agent sees").pack(side="left")
+        info_icon(head, lambda: agent_view_legend(self.game)).pack(side="left", padx=(4, 0))
+        box = ttk.LabelFrame(parent, labelwidget=head, padding=(4, 2))
+        self.agent_view = AgentView(box, self.game)
+        self.agent_view.pack()
+        tooltip(self.agent_view, lambda: agent_view_legend(self.game))
+        self.view_note_var = tk.StringVar(value="")
+        self.view_note = ttk.Label(box, textvariable=self.view_note_var, foreground=THEME.muted,
+                                   wraplength=TRACK_W - 20, justify="left")
+        self._pending_view = None       # newest grid from the player, drawn once per pump
+        if self.view_var.get():
+            self.player.view_wanted.set()
+        return box
+
+    def _on_view_toggled(self) -> None:
+        on = bool(self.view_var.get())
+        settings.put("show_agent_view", on)
+        if on:
+            self.player.view_wanted.set()
+        else:
+            self.player.view_wanted.clear()
+            self._pending_view = None
+        self._layout_tracking()
+
+    def _show_agent_view(self, grid) -> None:
+        """Draw the newest grid (None: a pixel model, which sees the picture)."""
+        if grid is None:
+            self.agent_view.pack_forget()
+            self.view_note_var.set("This agent sees the screen's pixels, the picture itself, "
+                                   "so there is no table of numbers.")
+            self.view_note.pack(fill="x")
+            return
+        if not self.agent_view.winfo_ismapped():
+            self.view_note.pack_forget()
+            self.agent_view.pack()
+        self.agent_view.set_game(self.game)
+        self.agent_view.show(grid)
 
     def _build_rounds_box(self, parent: ttk.Frame) -> ttk.LabelFrame:
         """Finished rounds of the agent being watched (or previewed)."""
@@ -990,13 +1041,17 @@ class AIboyGUI:
         # The live preview matters while the run trains; afterwards its best
         # model is selected under "Watch an agent".
         preview = act == "train" and self._train_preview_on and self.training_active()
+        view = (act == "play" or preview) and bool(self.view_var.get())
         return {
             "live": act in ("play", "human") or preview,
+            "view": view,
             "rounds": act == "play" or preview,
             "train": act == "train",
             "tune": act == "tune",
             "watch": act == "play" or not running,
-            "you": act == "human" or not running,
+            # The agent's table takes the room of "Play yourself" while an
+            # agent's game is on the panel (Clear brings it back).
+            "you": act == "human" or (not running and not (act == "play" and view)),
         }
 
     def _layout_tracking(self) -> None:
@@ -1009,6 +1064,7 @@ class AIboyGUI:
         self._track_shown = show
         for name, box in self._track_boxes.items():
             box.pack_forget()
+        self.rounds_tree.configure(height=3 if show["view"] else 4)   # room for the table
         for name, box in self._track_boxes.items():
             if show[name]:
                 box.pack(fill="x", pady=(0, 6))
@@ -1103,6 +1159,11 @@ class AIboyGUI:
                                             padx=(0 if col == 0 else 12, 4))
                 self._live_values[key].config(width=7 if col == 0 else 14)
                 self._live_values[key].grid(row=row, column=col * 2 + 1, sticky="w")
+        # A person has no observation; the checkbox is for watching an agent.
+        if human:
+            self.view_check.grid_forget()
+        else:
+            self.view_check.grid(row=len(left), column=0, columnspan=4, sticky="w", pady=(2, 0))
 
     def clear_rounds(self) -> None:
         self.play_rounds.clear()
@@ -1129,6 +1190,8 @@ class AIboyGUI:
         self.gameboy.show(None)
         self.clear_rounds()
         self._pending_stats.clear()
+        self._pending_view = None
+        self.agent_view.clear()
         for v in self.play_stat_vars.values():
             v.set("—")
         self.play_status_var.set("idle")
@@ -2211,6 +2274,8 @@ class AIboyGUI:
         self.clear_rounds()
         self.set_live_mode("agent")
         self._pending_stats.clear()
+        self._pending_view = None
+        self.agent_view.clear()
         for v in self.play_stat_vars.values():
             v.set("—")
         raw_level = cfg["start_level"]
@@ -2298,6 +2363,8 @@ class AIboyGUI:
                               text="■ Stop playing" if mode == "human" else "🎮 Play yourself")
         self.clear_rounds()
         self._pending_stats.clear()
+        self._pending_view = None
+        self.agent_view.clear()
         for v in self.play_stat_vars.values():
             v.set("—")
 
@@ -2362,6 +2429,10 @@ class AIboyGUI:
                 if self.play_stat_vars[key].get() != val:
                     self.play_stat_vars[key].set(val)
             self._pending_stats.clear()
+        if self._pending_view is not None:
+            grid, self._pending_view = self._pending_view, None
+            if self._track_shown.get("view"):
+                self._show_agent_view(grid[0])
 
         latest = self.frames.take()
         if latest is not None:
@@ -2451,6 +2522,8 @@ class AIboyGUI:
                 self._pending_stats[key] = val
             if key == "action":
                 self.gameboy.show(val)
+        elif kind == "agent_view":
+            self._pending_view = (item[1],)     # a tuple: None is a valid grid (pixel model)
         elif kind == "play_stats":
             for key, val in item[1].items():
                 if key in self.play_stat_vars:

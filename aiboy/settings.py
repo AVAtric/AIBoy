@@ -20,6 +20,8 @@ DEFAULTS: dict = {
     # Change presets to the settings AIboy has measured to be clearly better
     # (see experience.Experience.improvements). Off = only report them.
     "auto_improve_presets": True,
+    # Show the agent's observation as a table of numbers under Tracking.
+    "show_agent_view": False,
 }
 
 

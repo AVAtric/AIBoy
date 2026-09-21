@@ -23,8 +23,11 @@ ROM_DIR = Path("ROMs")
 #   mario-1  first version
 #   mario-2  marathon training episodes start at 1-1 (were: a random level)
 #   mario-3  tile 319 reads as empty (decoration PyBoy files under the blocks)
+#   mario-4  all twelve levels (2-3 and 4-3, the submarine and the plane,
+#            are in the marathon), UP actions for them, and the hazards
+#            PyBoy's lists miss (SML_HAZARD_TILES) read 1.0
 #   kirby-1  first version: scroll progress, score, health, lives
-ENV_VERSIONS = {"mario": "mario-3", "kirby": "kirby-1"}
+ENV_VERSIONS = {"mario": "mario-4", "kirby": "kirby-1"}
 ENV_VERSION = ENV_VERSIONS["mario"]          # the first game's; prefer env_version(game)
 
 
@@ -32,48 +35,49 @@ def env_version(game: str) -> str:
     """The task version of `game` ("generic-1" for a ROM without an AIboy env)."""
     return ENV_VERSIONS.get(str(game), "generic-1")
 
-# Super Mario Land has 4 worlds × 3 levels = 12 total levels. PyBoy's
-# `set_world_level(w, l)` docstring is wrong — it says args are 0-indexed
-# (0-3 world, 0-2 level) but the actual SML memory encoding is 1-INDEXED:
-# byte 0x11 = 1-1, 0x21 = 2-1, 0x43 = 4-3. Writing invalid values (0x00,
-# 0x10, 0x20, 0x30, 0x40, 0x01…) silently loads a default fallback level
-# while `game_wrapper.world` still reports the (wrong) patched tuple. So
-# we always pass w, l as 1-indexed to `start_game(world_level=…)`.
+# Super Mario Land has 4 worlds x 3 levels = 12 levels. PyBoy's
+# `set_world_level(w, l)` docstring is wrong: it says the arguments are
+# 0-indexed, but the game's level byte (RAM 0xFFB4, `hWorldAndLevel` in the
+# disassembly) is 1-indexed: 0x11 = 1-1, 0x21 = 2-1, 0x43 = 4-3. Writing an
+# invalid value silently loads a fallback level while `game_wrapper.world`
+# still reports the patched tuple, so w, l are always passed 1-indexed.
 #
-# Even with 1-indexed values, levels 2-3 and 4-3 don't load correctly —
-# `start_game(world_level=(2,3))` also falls through to the default level.
-# Those are the truly-broken level values in the wrapper.
-SML_BROKEN_LEVELS = frozenset({(2, 3), (4, 3)})
-SML_ALL_LEVELS = tuple(
-    (w, l) for w in range(1, 5) for l in range(1, 4)
-    if (w, l) not in SML_BROKEN_LEVELS
-)
+# The third level of worlds 2 and 4 is a vehicle level (2-3 the submarine
+# "Marine Pop", 4-3 the plane "Sky Pop", with Tatanga at the end). They boot
+# and play like the others (verified 2026-09-21 with level_state_worker: the
+# level byte reads 0x23 / 0x43, the timer runs, the vehicle moves); an
+# earlier note that they could not be started was wrong. The game runs them
+# in its auto-scroll state (SML_PLAY_STATES) and the vehicle needs UP to
+# move up, which is why MarioEnv has UP actions.
+SML_ALL_LEVELS = tuple((w, l) for w in range(1, 5) for l in range(1, 4))
+SML_VEHICLE_LEVELS = frozenset({(2, 3), (4, 3)})
 
-# SML's game-state byte (mapped empirically by logging RAM transitions
-# across clears / enemy deaths / pit deaths / game over on several levels):
-#   0x00  playing
-#   0x07 → 0x05 → 0x06  level-clear sequence: goal touched, walk-off,
-#                       bonus-timer countdown (~70 env-steps at frame_skip 4
-#                       before PyBoy's `world` tuple finally flips)
-#   0x04 → 0x01  dying animation → waiting for respawn (pit deaths jump
-#                straight to 0x01; 0x03 sometimes precedes 0x04 for one step)
-#   0x02 / 0x08  next level / respawn loading (transient)
+# SML's game-state byte (`hGameState` at 0xFFB3 in the disassembly, mapped
+# there and by logging RAM transitions across clears / deaths / game over):
+#   0x00  playing (walking levels)
+#   0x0D  playing, auto-scroll (the vehicle levels 2-3 and 4-3)
+#   0x07 -> 0x05 -> 0x06  level-clear sequence: goal touched (also the boss
+#                       switch of an x-3 level: "Mario wins"), score
+#                       countdown, winning (~70 env-steps at frame_skip 4
+#                       before PyBoy's `world` tuple finally flips); after
+#                       4-3 it goes on to 0x27 (Tatanga dying) and the ending
+#   0x03 -> 0x04 -> 0x01  pre-dying, dying animation, waiting for respawn
+#   0x02 / 0x08  respawn / next-level loading (transient)
+#   0x09 .. 0x0C  pipe warps (not deaths)
+#   0x12  the bonus game (reaching the top exit of a goal gate)
 #   0x3A  game-over screen (PyBoy's game_over() checks 0xC0A4 == 0x39)
 # Reading it lets the env credit a clear or a death the step it happens
-# instead of ~20-70 steps later — a large training-throughput win since
+# instead of ~20-70 steps later, a large training-throughput win since
 # every step in a cutscene / death animation is a wasted sample.
-# Not yet observed (no trained agent enters pipes): whether a pipe
-# transition uses one of the death values. The life-counter fallback
-# would not fire in that case, so a pipe entry would end a fixed/random
-# episode as a "death". If that ever shows up, narrow SML_DEATH_STATES.
 ADDR_GAME_STATE = 0xFFB3
+SML_PLAY_STATES = frozenset({0x00, 0x0D})
 SML_CLEAR_STATES = frozenset({0x05, 0x06, 0x07})
 SML_DEATH_STATES = frozenset({0x01, 0x04})
 
 # What is solid in Super Mario Land, checked against the game rather than
-# PyBoy's lists (tools/mario_tile_survey.py logs, over every usable level,
-# the background tile under Mario whenever he stands still and the tiles
-# his body overlaps while alive):
+# PyBoy's lists (tools/mario_tile_survey.py logs, over every level, the
+# background tile under Mario whenever he stands still and the tiles his
+# body overlaps while alive):
 #   - everything Mario ever stands on is on PyBoy's block / pipe lists
 #     (352-362, 142-143, 368-371, 383) or is a lift sprite (230, 238, 239),
 #     so the tile observation already shows all the ground there is;
@@ -85,6 +89,27 @@ SML_DEATH_STATES = frozenset({0x01, 0x04})
 #     empty so the agent does not see a wall that is not there.
 # Changing this changes what a trained model sees: bump ENV_VERSIONS["mario"].
 SML_BACKGROUND_TILES = frozenset({319})
+
+# Sprites PyBoy's enemy lists miss (the same survey, `--sprites`: every tile
+# a sprite on screen used, per level, with where it was seen). Without
+# these the observation showed the thing as empty, or, for a two-tile
+# sprite with one tile listed, as half an enemy:
+#   200            the bomb a stomped Nokobon leaves behind (1-2; 201 is
+#                  listed, 200 was not, so the bomb was half visible)
+#   168, 169, 184, 185   an enemy's other animation frames (1-1 at x 1500-
+#                  2200 next to the moth 160-163; 2-3)
+#   170, 171, 186, 187, 173   the enemy at the start of 3-1 and what it
+#                  throws (172 is listed)
+#   98             a sinking pair of enemies in the submarine level, also
+#                  seen in 4-3
+#   250, 251       the other frames of the bullet (249 is listed), 4-3
+#   216            the other frame of the enemy at the start of 2-2 (198,
+#                  199, 214, 215 are listed as big_sphinx; 216 was not)
+# Harmless sprites stay empty: the score numbers that float up after a kill
+# or a coin (88-93, 145), a block bouncing after a hit (246-248, 254), the
+# submarine's torpedo (122) and the plane's missile (110).
+SML_HAZARD_TILES = frozenset({98, 168, 169, 170, 171, 173, 184, 185, 186, 187, 200, 216, 250, 251})
+SML_HARMLESS_SPRITES = frozenset({88, 89, 90, 91, 92, 93, 145, 246, 247, 248, 254, 122, 110})
 
 # Mario's power-up, mapped by writing values and watching the sprite:
 #   0xFF99  power-up state machine: 0 small, 1 growing, 2 super,
@@ -132,7 +157,7 @@ MULTI_LEVEL_MODES = ("random", "sequential", "marathon")
 
 
 def level_choices() -> list[str]:
-    """Every valid `--start-level` value: the four modes, then each usable level."""
+    """Every valid `--start-level` value: the four modes, then each level."""
     return list(LEVEL_MODES) + [f"{w}-{l}" for (w, l) in SML_ALL_LEVELS]
 
 
@@ -149,8 +174,6 @@ def _bootstrap_level_state(rom_path: Path, world: int, level: int,
     state_file = _level_state_path(world, level)
     if state_file.exists() and state_file.stat().st_size > 1000:
         return True
-    if (world, level) in SML_BROKEN_LEVELS:
-        return False
     state_file.parent.mkdir(parents=True, exist_ok=True)
     import subprocess
     try:
@@ -183,7 +206,7 @@ def level_state_worker(rom_path: str, world: int, level: int, out_file: str) -> 
 
 def ensure_level_states(rom_path: Path, targets=None) -> list[tuple[int, int]]:
     """Bootstrap save-state files for the given levels. If targets is None,
-    bootstraps every usable level. Returns list of levels that succeeded.
+    bootstraps every level. Returns list of levels that succeeded.
     """
     if targets is None:
         targets = list(SML_ALL_LEVELS)
@@ -243,11 +266,6 @@ def parse_start_level(spec):
         w, l = int(parts[0]), int(parts[1])
     else:
         raise ValueError(f"invalid start_level {spec!r}")
-    if (w, l) in SML_BROKEN_LEVELS:
-        raise ValueError(
-            f"level {w}-{l} cannot be started via PyBoy's SML wrapper "
-            f"(known upstream bug — start_game hangs). Pick a different level."
-        )
     if (w, l) not in SML_ALL_LEVELS:
         raise ValueError(f"level {w}-{l} not in Super Mario Land (worlds 1-4, levels 1-3)")
     return (w, l)
