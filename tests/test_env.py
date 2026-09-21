@@ -102,7 +102,7 @@ class ObservationTests(unittest.TestCase):
         for tile in (88, 89, 145, 246, 254, 122, 110):                          # score numbers, torpedo
             self.assertEqual(lut[tile], 0.0, tile)
         self.assertEqual(lut[112], -1.0)                                         # the submarine
-        self.assertEqual(games.env_version("mario"), "mario-4")
+        self.assertEqual(games.env_version("mario"), "mario-5")
 
     def test_mario_has_up_actions_appended(self):
         names = env.MarioEnv.ACTION_NAMES
@@ -178,30 +178,45 @@ class ObservationTests(unittest.TestCase):
             pb.stop(save=False)
 
     @unittest.skipUnless((games.ROM_DIR / "mario.gb").exists(), "needs ROMs/mario.gb")
-    def test_time_budget_truncates_and_stall_rule_is_off_by_default(self):
+    def test_time_budget_and_stall_end_the_attempt_like_a_death(self):
+        """Standing still is not free: an exhausted time budget or a stall
+        ends the episode (terminal, not truncated) with the death penalty,
+        and the stall limit is on by default (games.DEFAULT_STALL_STEPS)."""
         from pyboy import PyBoy
         pb = PyBoy(str(games.ROM_DIR / "mario.gb"), window_type="null", game_wrapper=True,
                    disable_renderer=True)
         try:
-            e = env.MarioEnv(pb, obs_type="tiles", start_level="1-1", time_budget=3)
-            self.assertEqual(e.stuck_steps, 0)                     # stall rule off by default
+            e = env.MarioEnv(pb, obs_type="tiles", start_level="1-1", time_budget=3, stuck_steps=0)
             e.reset()
             for step in range(600):                                 # stand still (NOOP)
-                _, _, term, trunc, info = e.step(0)
+                _, r, term, trunc, info = e.step(0)
                 if term or trunc:
                     break
-            self.assertTrue(trunc and info["time_budget_exceeded"], info)
-            self.assertFalse(info["died"] or info["stalled"])
+            self.assertTrue(term and info["time_budget_exceeded"], info)
+            self.assertFalse(trunc or info["died"] or info["stalled"])
+            self.assertLessEqual(r, -e.death_penalty)
             self.assertGreaterEqual(info["time_used"], 3)
             self.assertLess(step, 600)
-            # stall rule when enabled
-            e2 = env.MarioEnv(pb, obs_type="tiles", start_level="1-1", time_budget=0, stuck_steps=20)
+            # the stall rule: on by default, the same ending
+            e2 = env.MarioEnv(pb, obs_type="tiles", start_level="1-1", time_budget=0)
+            self.assertEqual(e2.stuck_steps, games.DEFAULT_STALL_STEPS)
+            self.assertGreater(games.DEFAULT_STALL_STEPS, 0)
+            e2.stuck_steps = 20
             e2.reset()
             for step in range(200):
-                _, _, term, trunc, info = e2.step(0)
+                _, r, term, trunc, info = e2.step(0)
                 if term or trunc:
                     break
-            self.assertTrue(trunc and info["stalled"], info)
+            self.assertTrue(term and info["stalled"], info)
+            self.assertFalse(trunc or info["time_budget_exceeded"])
+            self.assertLessEqual(r, -e2.death_penalty)
+            self.assertEqual(step, 19)                             # the 20th step (0-based)
+            # walking keeps the stall counter at zero
+            e2.reset()
+            for _ in range(25):
+                _, _, term, trunc, info = e2.step(e2.ACTION_NAMES.index("RIGHT"))
+                self.assertFalse(term or trunc, info)
+            self.assertLess(info["stuck"], 5)
         finally:
             pb.stop(save=False)
 
@@ -224,14 +239,17 @@ class ObservationTests(unittest.TestCase):
             e.reset()
             self.assertEqual(tuple(e.gw.world), (1, 1))         # and the next one starts over
             self.assertEqual(e._marathon_idx, 0)
-            # an exhausted time budget ends the run the same way (truncation)
-            e = env.MarioEnv(pb, obs_type="tiles", start_level="marathon", time_budget=3)
+            # an exhausted time budget ends the run the same way (a terminal
+            # state with the death penalty, see test_time_budget_and_stall_...)
+            e = env.MarioEnv(pb, obs_type="tiles", start_level="marathon", time_budget=3,
+                             stuck_steps=0)
             e.reset()
             for _ in range(600):
-                _, _, term, trunc, info = e.step(0)
+                _, r, term, trunc, info = e.step(0)
                 if term or trunc:
                     break
-            self.assertTrue(trunc and info["time_budget_exceeded"], info)
+            self.assertTrue(term and info["time_budget_exceeded"], info)
+            self.assertLessEqual(r, -e.death_penalty)
             e.reset()
             self.assertEqual(tuple(e.gw.world), (1, 1))
         finally:
@@ -343,12 +361,19 @@ class ObservationTests(unittest.TestCase):
             self.assertGreater(total, 0.0)
             self.assertIn("health", info)
             self.assertEqual(info["lives"], 4)
-            # standing still trips the stall rule (no timer in this game)
+            # standing still trips the stall rule (no timer in this game),
+            # which ends the attempt like a death
             for _ in range(200):
                 _, r, term, trunc, info = e.step(0)
                 if term or trunc:
                     break
-            self.assertTrue(trunc and info["stalled"], info)
+            self.assertTrue(term and info["stalled"], info)
+            self.assertFalse(trunc)
+            self.assertLessEqual(r, -e.death_penalty)
+            # the grid a person's game would show: the same tile numbers
+            grid = e.view()
+            self.assertEqual(grid.shape, (16, 20))
+            self.assertEqual(grid[0, 2], min(e.progress(), 8192) / 8192.0)
             obs, _ = e.reset()                                     # back to the start
             self.assertEqual(e.progress(), int(obs[0, 2, 0] * 8192))
             self.assertLess(e.progress(), 100)

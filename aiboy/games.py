@@ -26,8 +26,15 @@ ROM_DIR = Path("ROMs")
 #   mario-4  all twelve levels (2-3 and 4-3, the submarine and the plane,
 #            are in the marathon), UP actions for them, and the hazards
 #            PyBoy's lists miss (SML_HAZARD_TILES) read 1.0
+#   mario-5  an attempt that stalls or uses up its time budget ends like a
+#            death (the same penalty, the episode over), and the stall
+#            limit is on by default. Before, standing still until the
+#            budget ran out was free while trying a hard jump risked the
+#            death penalty, and long marathon runs learned to stand at the
+#            gap in 1-2 (x 1050-1200) instead of jumping it.
 #   kirby-1  first version: scroll progress, score, health, lives
-ENV_VERSIONS = {"mario": "mario-4", "kirby": "kirby-1"}
+#   kirby-2  a stalled attempt ends like a death (as for Mario)
+ENV_VERSIONS = {"mario": "mario-5", "kirby": "kirby-2"}
 ENV_VERSION = ENV_VERSIONS["mario"]          # the first game's; prefer env_version(game)
 
 
@@ -118,9 +125,18 @@ SML_HARMLESS_SPRITES = frozenset({88, 89, 90, 91, 92, 93, 145, 246, 247, 248, 25
 # The level timer starts at 400 units; one unit is 38.8 frames (0.65 s),
 # measured in the emulator, so a full timer is ~258 s or ~3860 env steps
 # at action repeat 4.
+#
+# Two limits end an attempt that is going nowhere, and both cost what a
+# death costs (running out of time kills Mario in the real game): the time
+# budget, and the stall limit, steps without a new furthest point. 300
+# steps is at least 20 s of game time (a jump step holds 10 frames, so
+# often more): long enough to wait for a lift or back up for a jump, short
+# enough that an agent standing at a hard spot does not burn the whole
+# budget (~2400 steps) per attempt and does not learn that standing there
+# is safe. 0 turns the limit off.
 TIMER_START = 400
-DEFAULT_TIME_BUDGET = 250      # timer units an attempt may use before it is truncated
-DEFAULT_STALL_STEPS = 0        # steps without new progress before truncation; 0 = off
+DEFAULT_TIME_BUDGET = 250      # timer units an attempt may use before it ends
+DEFAULT_STALL_STEPS = 300      # steps without new progress before the attempt ends; 0 = off
 ADDR_POWERUP_STATE = 0xFF99
 ADDR_SUPERBALL = 0xFFB5
 POWER_SMALL, POWER_SUPER, POWER_SUPERBALL = 0, 1, 2

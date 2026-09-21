@@ -38,7 +38,7 @@ PRESET_DEFAULTS: dict[str, float] = {
     "gae_lambda": 0.95,
     "clip_range": 0.2,
     "time_budget": 250,     # timer units (of 400) an attempt may use; 0 = whole timer
-    "stall_steps": 0,       # steps without progress before truncation; 0 = off
+    "stall_steps": 300,     # steps without a new furthest point before the attempt ends; 0 = off
 }
 
 # A complete configuration. `normalize()` fills any field a preset lacks

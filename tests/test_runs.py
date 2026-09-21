@@ -160,7 +160,7 @@ class RunDiscoveryTests(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--eval-freq") + 1], "500")
         self.assertEqual(cmd[cmd.index("--gamma") + 1], "0.99")
         self.assertEqual(cmd[cmd.index("--time-budget") + 1], "250")
-        self.assertEqual(cmd[cmd.index("--stall-steps") + 1], "0")
+        self.assertEqual(cmd[cmd.index("--stall-steps") + 1], "300")   # presets.PRESET_DEFAULTS
         self.assertEqual(cmd[cmd.index("--run-name") + 1], "run1")
         self.assertNotIn("--resume", runs.build_train_cmd(cfg, "run1"))
         self.assertNotIn("--source", cmd)

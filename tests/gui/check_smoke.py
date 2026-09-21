@@ -100,8 +100,10 @@ try:
     assert not app.btn_track_train_stop.winfo_ismapped()          # nothing to stop
     app.set_live_mode("human"); root.update()
     assert app._live_labels["reward"].cget("text") == "score:" and app._live_labels["steps"].cget("text") == "time:"
-    assert app._live_labels["x"].winfo_manager() == "" and app._live_labels["episode"].winfo_manager() == ""
+    assert app._live_labels["x"].winfo_manager() == "grid" and app._live_labels["episode"].winfo_manager() == ""
+    assert app.view_check.cget("text") == "Show what an agent would see" and app.view_check.winfo_manager() == "grid"
     app.set_live_mode("agent"); root.update()
+    assert app.view_check.cget("text") == "Show what the agent sees"
     assert app._live_labels["x"].cget("text") == "position:" and app._live_labels["x"].winfo_manager() == "grid"
     assert app._live_labels["action"].cget("text") == "pressing:"
     # The trainer's evaluation lines become table rows and the Tracking numbers.

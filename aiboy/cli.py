@@ -582,10 +582,10 @@ def _add_common(p: argparse.ArgumentParser) -> None:
                    help="tiles = 16x20 tile grid + HUD + power-up (fast, MLP; default); "
                         "pixels = 144x160x3 RGB (slow, CNN)")
     p.add_argument("--time-budget", type=int, default=DEFAULT_TIME_BUDGET,
-                   help="Timer units (of 400) an attempt may use before it is truncated "
+                   help="Timer units (of 400) an attempt may use before it ends like a death "
                         "(0 = the whole in-game timer)")
     p.add_argument("--stall-steps", type=int, default=DEFAULT_STALL_STEPS,
-                   help="Steps without new progress before an attempt is truncated (0 = off)")
+                   help="Steps without new progress before an attempt ends like a death (0 = off)")
     p.add_argument("--start-level", default="default", choices=level_choices(),
                    help="Level mode: 'default' (campaign, respect lives), "
                         "'random' (new random level per episode), "

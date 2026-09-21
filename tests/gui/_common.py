@@ -33,14 +33,14 @@ os.environ.setdefault("AIBOY_NO_INTRO", "1")           # no boot video / sound d
 import tempfile
 EXPERIENCE_FILE = Path(tempfile.gettempdir()) / "aiboy-e2etest-experience.jsonl"
 os.environ.setdefault("AIBOY_EXPERIENCE_FILE", str(EXPERIENCE_FILE))
-# Their own settings too, with automatic preset improvements off: a check
-# must never rewrite the user's presets from a 4000-step test result. The
+# Their own settings too, with automatic preset improvements off (a check
+# must never rewrite the user's presets from a 4000-step test result; the
 # experience check exercises the improvement explicitly and restores the
-# preset afterwards.
+# preset afterwards) and without sound, since the checks run unattended.
 SETTINGS_FILE = Path(tempfile.gettempdir()) / "aiboy-e2etest-settings.json"
 os.environ.setdefault("AIBOY_SETTINGS_FILE", str(SETTINGS_FILE))
 if os.environ["AIBOY_SETTINGS_FILE"] == str(SETTINGS_FILE):
-    SETTINGS_FILE.write_text('{"auto_improve_presets": false}')
+    SETTINGS_FILE.write_text('{"auto_improve_presets": false, "sound": false}')
 
 TEST_PRESETS = ("__check_preset", "__check_copy", "__check_copy2", "__check_new",
                 "__check_e2e_preset")

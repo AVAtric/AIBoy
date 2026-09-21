@@ -152,7 +152,10 @@ own game. The D-pad, A and B light up with every button
 pressed, hovering a button tells what it does (and which key it is), and
 the battery LED is on while the boot video, a playback or the live preview
 runs. Under the device a status line says what is playing and how each
-round ended.
+round ended. **Sound**, in the panel's header, plays the game's own sound
+while you play yourself or an agent plays at real speed (1×); faster or
+slower playback and the training preview stay silent, since the sound
+cannot follow them. It also covers the boot video, and is remembered.
 
 The photo (`assets/gb_interface.png`) is scaled so the 160 × 144 frame sits
 on the LCD at 2× when the display has room for the window, else 1.75× or
@@ -191,8 +194,11 @@ names the activity, and only the boxes that matter for it are shown:
   every finished round (score, steps, how it ended), and the
   **Watch an agent** box with **■ Stop** and **Clear**.
 - *You play*: the live game shows what matters to a person, the level,
-  power-up, lives, coins, score, the game's clock and what you are pressing,
-  plus the **Play yourself** box, whose button now stops the game.
+  power-up, lives, coins, score, position, the game's clock and what you
+  are pressing, plus the **Play yourself** box, whose button now stops the
+  game. **Show what an agent would see** adds the table of numbers an agent
+  gets for the game you are playing, a way to check what the agent can and
+  cannot tell apart at any spot.
 
 Rest the pointer on any number for what it means. The status bar at the
 bottom repeats the activity in one line.
@@ -404,7 +410,7 @@ from. Every `train` is recorded in `experience.jsonl` when it ends.
 | `--eval-freq`        | 10000   | Env steps between evaluations                                     |
 | `--n-eval-episodes`  | 3       | Mario evals are deterministic; 1 episode is run                   |
 | `--time-budget`      | 250     | Timer units (of 400) an attempt may use; 0 = whole timer          |
-| `--stall-steps`      | 0       | Steps without progress before truncation; 0 = off                 |
+| `--stall-steps`      | 300     | Steps without a new furthest point before the attempt ends; 0 = off |
 | `--learning-rate`    | 2.5e-4  |                                                                   |
 | `--n-steps`          | 256     | PPO rollout length per env                                        |
 | `--batch-size`       | 128     | Shipped presets use 256                                           |
@@ -480,7 +486,8 @@ first three cells.
   (`tools/mario_tile_survey.py`, also `--sprites`): decoration PyBoy files
   as a block reads empty, and the enemies, bombs and projectiles PyBoy's
   lists miss read as hazards. Under Tracking, **Show what the agent sees**
-  displays this grid as a table of numbers while an agent plays.
+  displays this grid as a table of numbers while an agent plays, and while
+  you play yourself (the grid an agent would get for your game).
 - **Reward per step.** `3 × new forward distance` (backtracking cannot
   farm) `+ 5 × coins` `+ 0.05 × score gained` `− 0.03` per step. A death is
   `− 500`, a level clear `+ 1000` (`+ 3000` more for finishing a marathon).
@@ -491,8 +498,12 @@ first three cells.
   are wasted in cutscenes.
 - **Time per attempt.** A level has 400 timer units (about 4 min 18 s). An
   attempt may use a **time budget** of 250 (about 2 min 42 s, ≈ 2 400
-  steps); after that it is truncated without a death penalty. An optional
-  **stall limit** (steps without a new furthest x) is off by default.
+  steps), and a **stall limit** of 300 steps without a new furthest x (at
+  least 20 s of game time; 0 turns it off). Reaching either ends the attempt
+  the way a death does: the same `− 500`, the episode over. In the real game
+  the timer running out kills Mario; and while standing still was free, a
+  long marathon run learned to stand at the gap in 1-2 rather than risk the
+  jump, and its evaluations scored the standing above the trying.
 
 Any change here changes what a score means: bump the game's entry in
 `ENV_VERSIONS` in `aiboy/games.py`.
@@ -514,8 +525,9 @@ with Tatanga), which the game runs in its auto-scroll state.
 
 **A marathon is one continuous run from 1-1.** The moment Mario touches the
 goal the next level's save-state is loaded and play continues in the same
-life. The episode ends at the first death, when the time budget is used up,
-or after 4-3 (with a large bonus). Training, evaluation and playback all
+life. The episode ends at the first death, when the time budget is used up
+or Mario stops getting further (both count as a death), or after 4-3 (with
+a large bonus). Training, evaluation and playback all
 play exactly this marathon, so a training reward, an evaluation score and
 what you watch mean the same thing. Completing all twelve levels in one
 life is a long project: `Marathon, all levels (~1 h)` is a start, the
@@ -670,6 +682,7 @@ and writes screenshots of the window mid-play into it (macOS).
 | Symptom | What to do |
 |---------|------------|
 | `ROM not found: ROMs/mario.gb` | Place your ROM there (see Install). |
+| No sound | Tick **Sound** in the Preview header; sound plays only at 1× (your own game, an agent at *1× (real time)*), never during the training preview or at other speeds. The built app needs the SDL2 library, the same one the controller uses. |
 | Game shows amber | You can play it yourself; only Super Mario Land and Kirby's Dream Land can be trained. If it *is* one of those, check that `mario.gb` / `kirby.gb` is the original cartridge. |
 | Game shows red | The ROM does not boot in PyBoy; the text says why. |
 | The wizard says every variation is already known | Raise *Effort* (longer trials are a new task), pick a fixed set under *Vary*, or **Forget all…** on the Experience tab. |

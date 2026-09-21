@@ -18,13 +18,23 @@ using the GUI's `_pump` protocol:
     ("agent_view", grid | None)   what the agent sees: the newest 16x20 frame
                                   of its tile observation (a float array),
                                   or None for a pixel model; only while
-                                  `view_wanted` is set, at most VIEW_HZ a second
+                                  `view_wanted` is set, at most VIEW_HZ a second.
+                                  While a person plays a supported game it
+                                  is the grid an agent would get (env.view())
 
 Pacing is done per emulator frame with `time.sleep()` because PyBoy's own
 speed setting only paces when it owns an SDL2 window. Per-frame (not
 per-step) pacing matters: a jump step holds the button for 10 frames while
 a walk step takes 4, so pacing per step would make jumps run 2.5x too fast
 and the canvas would only ever show the last frame of each step.
+
+Sound: a session at real speed opens PyBoy with its sound on (PyBoy 1.6
+queues the emulated audio to SDL2 every frame; our per-frame pacing keeps
+the queue steady), and `SoundGate` mutes and unmutes it while it plays,
+following `sound_wanted` (the Sound checkbox). Other speeds and the
+unthrottled preview run without a sound device: the audio could not follow
+them. PyBoy keeps its SDL audio device private, so the gate finds the open
+device(s) by asking SDL for the status of the first few ids.
 
 Three entry points share one engine:
   - `play()`        plays a fixed model for N episodes (Play tab, wizard step 4)
@@ -48,12 +58,57 @@ import numpy as np
 
 from aiboy.games import (DEFAULT_STALL_STEPS, DEFAULT_TIME_BUDGET, GAMES, POWER_NAMES, ROM_DIR,
                          _level_state_path, display_name, power_state, prepare_level_states)
-from aiboy.gui.controls import BUTTONS, HeldButtons, action_name, diff_presses
+from aiboy.gui.controls import BUTTONS, HeldButtons, _load_sdl, action_name, diff_presses
 from aiboy.paths import ASSET_DIR, LOCAL_ASSET_DIR, local_or_shipped
 
 GB_FPS = 60.0
 VIEW_HZ = 8.0               # the agent's-view table is refreshed at most this often
 RESYNC_AFTER = 0.25         # if pacing falls this far behind, drop the backlog instead of racing
+AUDIO_DEVICE_IDS = range(2, 10)     # SDL numbers audio devices from 2; a few is all we ever open
+
+
+def open_audio_devices(sdl2) -> list[int]:
+    """The SDL audio devices open in this process (their ids). SDL reports
+    SDL_AUDIO_STOPPED for an id that is not open."""
+    found = []
+    for dev in AUDIO_DEVICE_IDS:
+        try:
+            if sdl2.SDL_GetAudioDeviceStatus(dev) != sdl2.SDL_AUDIO_STOPPED:
+                found.append(dev)
+        except Exception:
+            break
+    return found
+
+
+class SoundGate:
+    """Mutes and unmutes the emulator's sound while a session plays.
+
+    `wanted` is the Sound checkbox (an Event any thread may set or clear);
+    `apply()` runs on the emulator thread, once per frame, and only acts
+    when the wish changed: it pauses or resumes every open SDL audio device
+    and drops what was queued meanwhile, so unmuting does not replay stale
+    sound. PyBoy clears its own queue whenever it grows past a few frames,
+    so a paused device does not pile up audio either. Without PySDL2 (no
+    sound possible) it does nothing."""
+
+    def __init__(self, wanted: threading.Event, sdl2=None):
+        self.wanted = wanted
+        self.sdl2 = sdl2
+        self._on: bool | None = None
+
+    def apply(self) -> None:
+        on = self.wanted.is_set()
+        if on == self._on:
+            return
+        self._on = on
+        if self.sdl2 is None:
+            return
+        for dev in open_audio_devices(self.sdl2):
+            try:
+                self.sdl2.SDL_ClearQueuedAudio(dev)
+                self.sdl2.SDL_PauseAudioDevice(dev, 0 if on else 1)
+            except Exception:
+                pass
 
 
 def _single_threaded_torch() -> None:
@@ -170,11 +225,13 @@ class IntroVideo:
     def idle_frame(self) -> np.ndarray:
         return self.frames[self.idle_index]
 
-    def play(self, frames: LatestFrame, stop: threading.Event, on_done) -> threading.Thread:
+    def play(self, frames: LatestFrame, stop: threading.Event, on_done,
+             with_sound: bool = True) -> threading.Thread:
         """Push frames at `fps` until the end or `stop`; then call `on_done()`
-        from this thread (the GUI hands it to the Tk thread via its queue)."""
+        from this thread (the GUI hands it to the Tk thread via its queue).
+        `with_sound` False shows the video silently."""
         def _run():
-            sound = play_sound(self.sound_path)
+            sound = play_sound(self.sound_path) if with_sound else None
             t0 = time.perf_counter()
             for i, frame in enumerate(self.frames):
                 if stop.is_set():
@@ -262,12 +319,15 @@ class _Session:
     """One emulator + wrapped vec-env for a given observation setup.
 
     `speed_mult` paces every emulator frame to that multiple of a real
-    Game Boy's speed; 0 runs unthrottled.
+    Game Boy's speed; 0 runs unthrottled. At real speed (1.0) the emulator
+    is opened with its sound on and `sound` gates it (see SoundGate); at
+    any other speed the session is silent.
     """
 
     def __init__(self, game: str, obs_type: str, action_repeat: int, frame_stack: int,
                  start_level, frames: LatestFrame, speed_mult: float = 0.0,
-                 time_budget: int = DEFAULT_TIME_BUDGET, stall_steps: int = DEFAULT_STALL_STEPS):
+                 time_budget: int = DEFAULT_TIME_BUDGET, stall_steps: int = DEFAULT_STALL_STEPS,
+                 sound: SoundGate | None = None):
         # Heavy imports (PyBoy, SB3 / torch) happen here, on the playback
         # thread, so the GUI window opens without loading them.
         from pyboy import PyBoy
@@ -281,9 +341,10 @@ class _Session:
             raise FileNotFoundError(f"ROM not found: {rom_path}")
         self.game = game
         self.action_repeat = action_repeat
+        self.sound = sound if sound is not None and sound_possible(speed_mult) else None
         # Rendering stays on even for tile obs: the canvas shows pixels.
         self.pyboy = PyBoy(str(rom_path), window_type="null", game_wrapper=True,
-                           disable_renderer=False)
+                           disable_renderer=False, sound=self.sound is not None)
         self.pyboy.set_emulation_speed(0)
         self._frames = frames
         self.pacer = FramePacer.for_speed(speed_mult)
@@ -302,9 +363,12 @@ class _Session:
         self._frames.set(screen_frame(self.pyboy))
 
     def on_tick(self) -> None:
-        """Called by the env after every emulator frame: publish it, then hold
-        the frame until its wall-clock slot so playback runs at game speed."""
+        """Called by the env after every emulator frame: publish it, follow
+        the Sound checkbox, then hold the frame until its wall-clock slot so
+        playback runs at game speed."""
         self.push_frame()
+        if self.sound is not None:
+            self.sound.apply()
         self.pacer.wait()
 
     def close(self) -> None:
@@ -328,6 +392,12 @@ def agent_view(obs) -> np.ndarray | None:
     return np.array(arr[0, :, :, -1], dtype=np.float32)
 
 
+def sound_possible(speed_mult: float) -> bool:
+    """Sound only makes sense at a real Game Boy's speed: faster or slower
+    the audio queue would run dry or pile up, unthrottled it is noise."""
+    return speed_mult == 1.0
+
+
 class EmbeddedPlayer:
     def __init__(self, frames: LatestFrame, event_queue: queue.Queue):
         self.frames = frames
@@ -336,6 +406,23 @@ class EmbeddedPlayer:
         # the grids are only built and sent then.
         self.view_wanted = threading.Event()
         self._view_sent = 0.0
+        # The Sound checkbox: a session at real speed follows it live.
+        self.sound_wanted = threading.Event()
+        self._sdl2 = None
+        self._sdl_loaded = False
+
+    def set_sound(self, on: bool) -> None:
+        if on:
+            self.sound_wanted.set()
+        else:
+            self.sound_wanted.clear()
+
+    def _sound_gate(self) -> SoundGate:
+        """A gate for one session (PySDL2 loaded once, on the playback thread)."""
+        if not self._sdl_loaded:
+            self._sdl2, _why = _load_sdl()
+            self._sdl_loaded = True
+        return SoundGate(self.sound_wanted, self._sdl2)
 
     # ---------- public entry points ----------
 
@@ -374,16 +461,21 @@ class EmbeddedPlayer:
     def _emit(self, *item) -> None:
         self.events.put(item)
 
-    def _report_view(self, obs, force: bool = False) -> None:
-        """Send the agent's view when it is wanted, at most VIEW_HZ a second
-        (`force`: now, e.g. the first frame of a round)."""
+    def _view_due(self, force: bool = False) -> bool:
+        """Whether a view should be sent now: only when wanted, at most
+        VIEW_HZ a second (`force`: now, e.g. the first frame of a round)."""
         if not self.view_wanted.is_set():
-            return
+            return False
         now = time.monotonic()
         if not force and now - self._view_sent < 1.0 / VIEW_HZ:
-            return
+            return False
         self._view_sent = now
-        self._emit("agent_view", agent_view(obs))
+        return True
+
+    def _report_view(self, obs, force: bool = False) -> None:
+        """Send the agent's view of a (stacked) observation when it is due."""
+        if self._view_due(force):
+            self._emit("agent_view", agent_view(obs))
 
     def _report_step(self, game: str, action, info, ep_reward: float, ep_steps: int) -> None:
         from aiboy.env import ENV_CLASSES
@@ -420,7 +512,8 @@ class EmbeddedPlayer:
                 # wedge the GUI thread.
                 prepare_level_states(start_level)
             session = _Session(game, obs_type, action_repeat, frame_stack, start_level,
-                               self.frames, speed_mult, time_budget, stall_steps)
+                               self.frames, speed_mult, time_budget, stall_steps,
+                               sound=self._sound_gate())
             self._emit("play_status", f"loaded {model_path.name}")
             model, vec = load_model(model_path, session.vec)
 
@@ -538,12 +631,16 @@ class EmbeddedPlayer:
                     speed_mult) -> None:
         """The plain game, paced per frame like `play()`, pressing whatever
         `held` says. The HUD numbers of a supported game go to the live
-        panel; other ROMs only show the buttons. Ends when `stop` is set."""
+        panel, and so does the tile grid an agent would see when the panel
+        asks for it (`view_wanted`); other ROMs only show the buttons. Sound
+        follows the Sound checkbox. Ends when `stop` is set."""
         from pyboy import PyBoy
+        from aiboy.env import ENV_CLASSES
         pyboy = None
         events = _button_events()
         pressed: frozenset[str] = frozenset()
         pacer = FramePacer.for_speed(speed_mult)
+        sound = self._sound_gate() if sound_possible(speed_mult) else None
         summary: list[dict] = []
         try:
             rom_path = Path(rom_path)
@@ -551,9 +648,18 @@ class EmbeddedPlayer:
                 raise FileNotFoundError(f"ROM not found: {rom_path}")
             title = display_name(game)
             pyboy = PyBoy(str(rom_path), window_type="null", game_wrapper=True,
-                          disable_renderer=False)
+                          disable_renderer=False, sound=sound is not None)
             pyboy.set_emulation_speed(0)
             gw = pyboy.game_wrapper() if GAMES.get(game) and GAMES[game].supported else None
+            # The game's environment, never stepped: its `view()` is the
+            # grid of numbers an agent would get for this game right now.
+            viewer = None
+            if gw is not None and game in ENV_CLASSES:
+                try:
+                    viewer = ENV_CLASSES[game](pyboy, obs_type="tiles")
+                    viewer._begin_attempt()         # its trackers start from here
+                except Exception:           # an unexpected cartridge: no table, the game still plays
+                    viewer = None
             if game == "mario" and gw is not None and start_level is not None:
                 # The same save-states the agent trains from (made once, in
                 # a subprocess with a timeout).
@@ -592,6 +698,10 @@ class EmbeddedPlayer:
                     elif not over and game_over_seen:
                         self._emit("play_status", f"you play {title}")
                     game_over_seen = over
+                if viewer is not None and self._view_due():
+                    self._emit("agent_view", viewer.view())
+                if sound is not None:
+                    sound.apply()
                 pacer.wait()
             if gw is not None and best["world"] is not None:
                 w = best["world"]

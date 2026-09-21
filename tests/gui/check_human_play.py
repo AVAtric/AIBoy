@@ -2,10 +2,11 @@
 "Play yourself" from the title screen, feed the Game Boy synthetic key
 events (Enter to start, then hold → and X), and check that frames reach the
 LCD, the LED is on, the held buttons light up, Mario's numbers appear in
-the live panel, and that stopping puts everything to rest. ~15 s. The key
-events are handed to the key handlers directly: Tk delivers generated key
-events to the focused window only, and the app is not necessarily the
-active application while the check runs.
+the live panel, the table of what an agent would see refreshes with Mario
+(-1) and ground (.5) in it, and that stopping puts everything to rest.
+~15 s. The key events are handed to the key handlers directly: Tk delivers
+generated key events to the focused window only, and the app is not
+necessarily the active application while the check runs.
 
 Needs ROMs/mario.gb. No controller is needed; if one is connected its name
 is printed."""
@@ -16,12 +17,18 @@ from aiboy.gui import app as gui
 
 rec = silence_dialogs(gui)
 root = tk.Tk(); app = gui.AIboyGUI(root)
-state = {"s": "start", "frames0": 0, "lit": 0, "led": 0, "t0": 0.0, "worlds": set(), "x": 0}
+state = {"s": "start", "frames0": 0, "lit": 0, "led": 0, "t0": 0.0, "worlds": set(), "x": 0,
+         "tables": 0, "last_table": None, "seen": set()}
 
 
 def fail(msg):
     say(f"FAIL: {msg} (status: {app.play_status_var.get()!r}, errors: {rec['errors']})")
     app._on_close(); sys.exit(1)
+
+
+def cells():
+    v = app.agent_view
+    return [[v.itemcget(v._texts[r][c], "text") for c in range(20)] for r in range(16)]
 
 
 class _Key:                       # what KeyboardInput / the dialog read from a Tk key event
@@ -43,6 +50,9 @@ def tick():
         assert app.play_mode == "human" and app.playing_active()
         assert app.btn_human.cget("text").startswith("■"), "button did not turn into Stop"
         assert app._live_labels["reward"].cget("text") == "score:", "live panel not in human wording"
+        assert app.view_check.cget("text") == "Show what an agent would see", app.view_check.cget("text")
+        app.view_var.set(True); app._on_view_toggled(); root.update()
+        if not app._track_shown.get("view"): fail("the table is not shown while a person plays")
         root.lift()
         state["s"] = "booting"; state["t0"] = time.time(); state["frames0"] = app.frames_painted
     elif s == "booting":
@@ -59,10 +69,23 @@ def tick():
         w = app.play_stat_vars["world"].get()
         if w != "—": state["worlds"].add(w)
         if app.play_stat_vars["x"].get().isdigit(): state["x"] = max(state["x"], int(app.play_stat_vars["x"].get()))
+        table = cells()
+        if table != state["last_table"]:
+            state["tables"] += 1; state["last_table"] = table
+            flat = [x for row in table[1:] for x in row]     # row 0 holds the HUD numbers
+            state["seen"] |= {"-1"} & set(flat) | {".5"} & set(flat)
         if time.time() - state["t0"] > 4.0:
             held = app.held.held()
             if held != {"right", "a"}: fail(f"held buttons {set(held)} != {{right, a}}")
             if app.play_stat_vars["action"].get() != "RIGHT+A": fail("action stat not RIGHT+A")
+            if state["tables"] < 5: fail(f"the table refreshed only {state['tables']} times")
+            if state["seen"] != {"-1", ".5"}:            # Mario and the ground, at some point
+                for row in table: say(" ".join(f"{x:>3}" for x in row))
+                fail(f"the table never showed both Mario (-1) and ground (.5): saw {state['seen']} "
+                     f"(x {app.play_stat_vars['x'].get()}, world {app.play_stat_vars['world'].get()})")
+            say(f"table refreshed {state['tables']} times; HUD row: {table[0][:7]}")
+            app.view_var.set(False); app._on_view_toggled(); root.update()
+            if app._track_shown.get("view"): fail("the table stayed after unchecking")
             key("Right", False); key("x", False)
             app.held.set("mouse", frozenset({"b"}))       # a click on the picture's B
             state["s"] = "mouse"; state["t0"] = time.time()

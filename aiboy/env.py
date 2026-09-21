@@ -132,6 +132,13 @@ class GameBoyEnv(gym.Env):
     Two generic attempt limits: `stuck_steps` steps without new progress
     (the furthest-point tracker `_progress`; 0 = off) and, for Mario, the
     in-game timer budget `time_budget` (games without a timer ignore it).
+    Reaching either ends the attempt the way a death does: the same
+    penalty, the episode over. Otherwise standing still at a hard spot is
+    free while trying it risks the death penalty, and a long run learns to
+    stand still (a marathon run did, at the gap in 1-2).
+
+    `view()` is the tile grid an agent would see right now; the window
+    shows it while a person plays, from an env that is never stepped.
     """
 
     metadata = {"render_modes": []}
@@ -212,6 +219,11 @@ class GameBoyEnv(gym.Env):
             # score and the rest from the pixels.
             return self._screen()
         return self._tiles()[..., np.newaxis]
+
+    def view(self) -> np.ndarray:
+        """The (16, 20) tile grid an agent would get for the game as it is
+        right now, whoever is playing (see agent_view.py)."""
+        return self._tiles()
 
     def _progress(self, x: float, *, restart: bool = False, count: bool = True) -> float:
         """Feed the furthest-point tracker. Returns the new territory gained
@@ -371,12 +383,11 @@ class MarioEnv(GameBoyEnv):
                          tick_callback=tick_callback, stuck_steps=stuck_steps,
                          time_budget=time_budget, time_penalty=time_penalty,
                          death_penalty=death_penalty)
-        # Two ways an attempt can be cut short without a death:
+        # Two ways an attempt ends without Mario dying on screen, both
+        # costing the death penalty (see the class docstring):
         #   time_budget  timer units (of TIMER_START) an attempt may use;
         #                0 = the whole in-game timer
-        #   stuck_steps  steps without a new furthest x before truncation;
-        #                0 = off (default). Only the time budget then limits
-        #                an attempt, so Mario can use his time.
+        #   stuck_steps  steps without a new furthest x; 0 = off
         self.progress_weight = progress_weight
         self.coin_weight = coin_weight
         self.score_weight = score_weight
@@ -578,11 +589,20 @@ class MarioEnv(GameBoyEnv):
         # the level-end countdown, which drains the timer into score, cannot
         # trigger it. Every attempt starts with the timer at TIMER_START
         # (level start, respawn and marathon level loads all reset it).
-        # Stall: steps without a new furthest x (off by default).
+        # Stall: steps without a new furthest x. Either one ends the
+        # attempt like a death: the timer running out kills Mario in the
+        # real game, and an attempt that stopped getting anywhere is over.
+        # Without the penalty, standing at a hard spot until the budget ran
+        # out was free while trying the jump risked -death_penalty, so a
+        # long run learned to stand still, and its evaluations (which
+        # choose best_model.zip) scored the standing higher than the trying.
         time_used = max(0, TIMER_START - int(self.gw.time_left))
         in_play = game_state in SML_PLAY_STATES and not (died or level_cleared)
         over_budget = in_play and self.time_budget > 0 and time_used >= self.time_budget
         stalled = in_play and self._stalled()
+        cut_off = over_budget or stalled
+        if cut_off:
+            reward -= self.death_penalty
 
         def info(**extra) -> dict:
             base = {
@@ -626,22 +646,26 @@ class MarioEnv(GameBoyEnv):
             return reward, True, False, info(marathon_clears=self._marathon_clears,
                                              marathon_missing_state=next_target)
 
-        # Termination by mode.
+        # Termination by mode. A cut-off attempt (budget, stall) ends the
+        # episode in every mode, as a terminal state: SB3 would bootstrap
+        # the value of a truncated one, and the point is that nothing good
+        # follows from standing there.
         if self._campaign_mode:
             # Death and level clear are transitions within the same episode;
             # only game over ends it, and a death on the last life IS game
             # over, so end right there instead of sitting through the
             # game-over screen. (`death_now`, not `died`: on the fallback path
             # `lives` has already dropped, so 0 there means "now on the last life".)
-            terminated = is_game_over or (death_now and lives == 0)
+            terminated = is_game_over or (death_now and lives == 0) or cut_off
         elif self.start_level == "marathon":
-            terminated = died                  # the next reset() starts over at 1-1
+            terminated = died or cut_off       # the next reset() starts over at 1-1
         else:
-            terminated = died or level_cleared # fixed / random / sequential
+            terminated = died or level_cleared or cut_off   # fixed / random / sequential
 
         # A truncation is only reported when the episode did not already end
-        # for a real reason; SB3 bootstraps the value of truncated states.
-        truncated = not terminated and (stalled or over_budget or is_game_over)
+        # for a real reason (a game over outside campaign mode cannot happen
+        # with the fresh lives of a save-state, but is caught all the same).
+        truncated = not terminated and is_game_over
         result = info()
         self._remember(x, lives, world, score, coins)
         return reward, terminated, truncated, result
@@ -677,8 +701,9 @@ class KirbyEnv(GameBoyEnv):
       and -death_penalty on a death. Every attempt starts at the beginning
       of the game (PyBoy's saved start); a death or the game over ends the
       episode. Kirby has no timer, so `time_budget` does nothing here; the
-      stall rule (`stuck_steps`) and a hard cap of KIRBY_ATTEMPT_STEPS steps
-      make sure an evaluation episode always ends.
+      stall rule (`stuck_steps`, ending the attempt like a death) and a
+      hard cap of KIRBY_ATTEMPT_STEPS steps (a plain truncation) make sure
+      an evaluation episode always ends.
 
     Tiles: PyBoy's `game_area()` (the 16 rows of the play field; Kirby,
     enemies and items are drawn in as their tile identifiers), scaled into
@@ -751,10 +776,18 @@ class KirbyEnv(GameBoyEnv):
         self._last_health = int(self.gw.health)
         self._last_lives = int(self.gw.lives_left)
 
-    def _evaluate(self, action: int) -> tuple[float, bool, bool, dict]:
+    def _update_scroll(self) -> None:
+        """Add the screen's movement since the last look to the scroll count."""
         scx = self._scroll_x()
         self._scroll += (scx - self._last_scx + 128) % 256 - 128      # unwind the 256 px wrap
         self._last_scx = scx
+
+    def view(self) -> np.ndarray:
+        self._update_scroll()          # the progress cell follows the screen
+        return self._tiles()
+
+    def _evaluate(self, action: int) -> tuple[float, bool, bool, dict]:
+        self._update_scroll()
         self._steps += 1
         x = self.progress()
         score, health, lives = int(self.gw.score), int(self.gw.health), int(self.gw.lives_left)
@@ -775,10 +808,14 @@ class KirbyEnv(GameBoyEnv):
                 reward -= self.health_weight * lost
             reward -= self.time_penalty
 
-        terminated = died
+        # A stalled attempt is over, and costs what a death costs (see
+        # GameBoyEnv); the step cap is only there to end an evaluation.
         stalled = not died and self._stalled()
-        capped = not died and self._steps >= self.max_steps
-        truncated = not terminated and (stalled or capped)
+        if stalled:
+            reward -= self.death_penalty
+        terminated = died or stalled
+        capped = not terminated and self._steps >= self.max_steps
+        truncated = capped
         info = {
             "x": x, "max_x": self._max_x, "lives": lives, "score": score, "health": health,
             "stuck": self._stuck, "game_over": is_game_over, "died": died,

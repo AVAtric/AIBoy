@@ -113,12 +113,12 @@ REGIONS: dict[str, tuple[str, tuple[int, int, int, int]]] = {
     "start": ("oval", (212, 596, 270, 621)),
 }
 LABELS = {
-    "up": "D-pad up (not used by the agent)",
+    "up": "D-pad up: the submarine and the plane rise (levels 2-3 and 4-3); Kirby flies",
     "down": "D-pad down: duck / enter a pipe",
     "left": "D-pad left: walk left",
     "right": "D-pad right: walk right",
     "a": "A: jump (held longer = higher)",
-    "b": "B: run, and fire when Mario has a flower",
+    "b": "B: run, and fire when Mario has a flower; Kirby inhales",
     "select": "SELECT (not used by the agent)",
     "start": "START: pauses the game (not used by the agent)",
 }

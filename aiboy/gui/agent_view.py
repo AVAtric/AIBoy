@@ -56,7 +56,7 @@ def format_cell(v: float) -> str:
 
 def legend(game: str) -> str:
     """The hover text: how to read the table for `game`."""
-    head = ("The numbers this agent gets instead of the picture: one per 8 x 8 tile of the "
+    head = ("The numbers an agent gets instead of the picture: one per 8 x 8 tile of the "
             "play field, the newest of the frames it sees. ")
     if game == "mario":
         kinds = "; ".join(f"{format_cell(v)} {text}" for v, _, text in MARIO_MEANINGS)

@@ -151,10 +151,11 @@ FIELDS: tuple[FieldSpec, ...] = (
               help="Test rounds per evaluation. More give a steadier score but take longer."),
     FieldSpec("time_budget", "Time budget /400", "int", "run", 0, 400, 10,
               help="Game-clock units (of the 400 a level starts with) an attempt may use "
-                   "before it is cut off. 0 = the game's own timer."),
+                   "before it ends, which counts as a death. 0 = the game's own timer."),
     FieldSpec("stall_steps", "Stall limit (0=off)", "int", "run", 0, 5000, 50,
-              help="End the attempt after this many steps without getting further right. "
-                   "0 = never."),
+              help="End the attempt, counted as a death, after this many steps without "
+                   "getting further. 300 is at least 20 s of game time: standing at a "
+                   "hard spot must not be the safe choice. 0 = never."),
 )
 GROUP_TITLES = {"basic": "Basic", "ppo": "PPO", "run": "Input & cadence"}
 FIELD_BY_KEY = {f.key: f for f in FIELDS}

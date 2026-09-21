@@ -70,11 +70,10 @@ TRACKED_STATS = ("total_timesteps", "ep_rew_mean", "ep_len_mean", "fps", "time_e
 EVAL_LINE = re.compile(r"Eval num_timesteps=(\d+), episode_reward=(-?[\d.]+) \+/- ([\d.]+)")
 EVAL_LEN_LINE = re.compile(r"Episode length: (-?[\d.]+) \+/-")
 EVAL_BEST_LINE = "New best mean reward!"
-# Live-game cells, in display order. A person playing sees fewer of them
-# (see set_live_mode): the round counter and the agent's position are for
-# watching an agent.
+# Live-game cells, in display order. A person playing has no round counter
+# (see set_live_mode).
 LIVE_KEYS = ("episode", "world", "power", "lives", "coins", "reward", "x", "steps", "action")
-HUMAN_HIDDEN_KEYS = ("episode", "x")
+HUMAN_HIDDEN_KEYS = ("episode",)
 # What the Tracking panel follows: nothing, a training run, a search
 # (tune sweep or wizard search), an agent playing, or the person playing.
 ACTIVITIES = ("none", "train", "tune", "play", "human")
@@ -274,12 +273,14 @@ class AIboyGUI:
         self.refresh_presets()
         self._pump()
         if self.intro is not None:
-            # Boot video with sound once the window is up; ends on the idle
-            # frame ("No video") unless something else takes the screen.
+            # Boot video (with sound when Sound is on) once the window is up;
+            # ends on the idle frame ("No video") unless something else takes
+            # the screen.
             self.gameboy.set_power(True)
             self.root.after(300, lambda: self.intro.play(
                 self.frames, self.intro_stop,
-                on_done=lambda: self.stats_queue.put(("intro_done",))))
+                on_done=lambda: self.stats_queue.put(("intro_done",)),
+                with_sound=bool(self.sound_var.get())))
 
     # ---------- game selection ----------
 
@@ -415,7 +416,21 @@ class AIboyGUI:
         main.rowconfigure(0, weight=1)
         self.nb = ttk.Notebook(main)
         self.nb.grid(row=0, column=0, sticky="nsew")
-        self.preview_frame = ttk.LabelFrame(main, text="Preview", padding=8)
+        # The Preview's header carries the Sound checkbox: the game's own
+        # sound while something plays at real speed (see player.SoundGate).
+        preview_head = ttk.Frame(main)
+        ttk.Label(preview_head, text="Preview").pack(side="left")
+        self.sound_var = tk.BooleanVar(value=bool(settings.get("sound")))
+        self.sound_check = ttk.Checkbutton(preview_head, text="Sound", variable=self.sound_var,
+                                           command=self._on_sound_toggled)
+        self.sound_check.pack(side="left", padx=(14, 0))
+        tooltip(self.sound_check, "Play the game's sound while you play yourself or an agent "
+                                  "plays at real speed (1×), and the boot video's. Faster or "
+                                  "slower playback and the live preview of a training run stay "
+                                  "silent: the sound cannot follow them. Remembered for next "
+                                  "time.")
+        self.player.set_sound(bool(self.sound_var.get()))
+        self.preview_frame = ttk.LabelFrame(main, labelwidget=preview_head, padding=8)
         self.preview_frame.grid(row=0, column=1, sticky="ns", padx=(10, 0))
         self.tracking_frame = ttk.LabelFrame(main, text="Tracking", padding=8)
         self.tracking_frame.grid(row=0, column=2, sticky="ns", padx=(10, 0))
@@ -503,6 +518,13 @@ class AIboyGUI:
         """Idle screen ("No video") when nothing else is on the LCD; LED off."""
         self.gameboy.set_screen(idle_screen(self.intro, self.gameboy.screen_size))
         self.gameboy.set_power(False)
+
+    def _on_sound_toggled(self) -> None:
+        """The Sound checkbox: remembered, and a game playing at real speed
+        follows it at once (the emulator thread mutes or unmutes)."""
+        on = bool(self.sound_var.get())
+        settings.put("sound", on)
+        self.player.set_sound(on)
 
     # ---------- Train tab ----------
 
@@ -779,21 +801,27 @@ class AIboyGUI:
                             anchor="w")
             self._live_labels[key], self._live_values[key] = lbl, val
             tooltip(lbl, lambda k=key: self._live_help.get(k, ""), val)
-        # The agent's view: the table of numbers it plays from (see _build_view_box).
+        # The agent's view: the table of numbers it plays from (see
+        # _build_view_box); for a person, what an agent would get for their game.
         self.view_var = tk.BooleanVar(value=bool(settings.get("show_agent_view")))
+        self.view_title_var = tk.StringVar(value="What the agent sees")   # the table's header
         self.view_check = ttk.Checkbutton(stats, text="Show what the agent sees",
                                           variable=self.view_var, command=self._on_view_toggled)
-        tooltip(self.view_check, "Show, under this box, the numbers the agent gets instead of "
-                                 "the picture: one per tile of the screen, tinted by what they "
-                                 "mean. Hover the table for how to read it.")
+        tooltip(self.view_check, lambda: (
+            "Show, under this box, the numbers an agent gets instead of the picture, for the "
+            "game you are playing: one per tile of the screen, tinted by what they mean. A way "
+            "to check what an agent can and cannot tell apart at any spot. Hover the table for "
+            "how to read it." if self.play_mode == "human" else
+            "Show, under this box, the numbers the agent gets instead of the picture: one per "
+            "tile of the screen, tinted by what they mean. Hover the table for how to read it."))
         self.set_live_mode("agent")
         return stats
 
     def _build_view_box(self, parent: ttk.Frame) -> ttk.LabelFrame:
         """The agent's observation as a 16 x 20 table (see agent_view.py),
-        shown while an agent plays and the checkbox is on."""
+        shown while an agent plays, or a person does, and the checkbox is on."""
         head = ttk.Frame(parent)
-        ttk.Label(head, text="What the agent sees").pack(side="left")
+        ttk.Label(head, textvariable=self.view_title_var).pack(side="left")
         info_icon(head, lambda: agent_view_legend(self.game)).pack(side="left", padx=(4, 0))
         box = ttk.LabelFrame(parent, labelwidget=head, padding=(4, 2))
         self.agent_view = AgentView(box, self.game)
@@ -1041,7 +1069,7 @@ class AIboyGUI:
         # The live preview matters while the run trains; afterwards its best
         # model is selected under "Watch an agent".
         preview = act == "train" and self._train_preview_on and self.training_active()
-        view = (act == "play" or preview) and bool(self.view_var.get())
+        view = (act in ("play", "human") or preview) and bool(self.view_var.get())
         return {
             "live": act in ("play", "human") or preview,
             "view": view,
@@ -1050,7 +1078,8 @@ class AIboyGUI:
             "tune": act == "tune",
             "watch": act == "play" or not running,
             # The agent's table takes the room of "Play yourself" while an
-            # agent's game is on the panel (Clear brings it back).
+            # agent's game is on the panel (Clear brings it back); a person's
+            # game has no Rounds table, so the table fits next to their box.
             "you": act == "human" or (not running and not (act == "play" and view)),
         }
 
@@ -1126,7 +1155,7 @@ class AIboyGUI:
     def set_live_mode(self, mode: str) -> None:
         """Word the live panel for who is playing ("agent" or "human") and
         show only the cells that mean something for them: a person has no
-        round counter and no position readout."""
+        round counter."""
         human = mode == "human"
         names = {"episode": "round", "reward": "score", "x": "position", "action": "pressing",
                  "steps": "time" if human else "steps"}
@@ -1141,7 +1170,9 @@ class AIboyGUI:
             "lives": "Lives left.", "coins": "Coins collected in this game.",
             "reward": ("The game's score." if human else
                        "Score the agent has earned in this round so far (its reward)."),
-            "x": "How far right Mario is in the level, and the furthest he got.",
+            "x": ("How far right Mario is in the level (the number the agent's table shows "
+                  "in its fourth HUD cell, divided by 4096)." if human else
+                  "How far right Mario is in the level, and the furthest he got."),
             "steps": ("Time left on the game's clock, and how long you have been playing."
                       if human else "Decisions the agent has made in this round."),
             "action": ("What you are pressing right now (also lit on the buttons)." if human
@@ -1159,11 +1190,12 @@ class AIboyGUI:
                                             padx=(0 if col == 0 else 12, 4))
                 self._live_values[key].config(width=7 if col == 0 else 14)
                 self._live_values[key].grid(row=row, column=col * 2 + 1, sticky="w")
-        # A person has no observation; the checkbox is for watching an agent.
-        if human:
-            self.view_check.grid_forget()
-        else:
-            self.view_check.grid(row=len(left), column=0, columnspan=4, sticky="w", pady=(2, 0))
+        # The table of numbers: the agent's own while one plays, what an
+        # agent would get while a person plays (a supported game only).
+        self.view_check.config(text="Show what an agent would see" if human else
+                               "Show what the agent sees")
+        self.view_title_var.set("What an agent would see" if human else "What the agent sees")
+        self.view_check.grid(row=len(left), column=0, columnspan=4, sticky="w", pady=(2, 0))
 
     def clear_rounds(self) -> None:
         self.play_rounds.clear()
@@ -2796,6 +2828,11 @@ class AIboyGUI:
         self.play_stop.set()
         self.preview_stop.set()
         self.tune_stop.set()
+        # The emulator thread closes its PyBoy (and its SDL audio device)
+        # before the controller thread shuts SDL down.
+        for thread in (self.play_thread, self.preview_thread):
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=3)
         self.gamepad.stop()
         for proc in (self.tune_proc, self.train_proc):
             if proc is not None and proc.poll() is None:
