@@ -35,8 +35,9 @@ from aiboy.games import (  # noqa: F401
     ADDR_GAME_STATE, ADDR_KIRBY_X, ADDR_POWERUP_STATE, ADDR_SUPERBALL, DEFAULT_STALL_STEPS,
     DEFAULT_TIME_BUDGET, GAMES, KIRBY_ATTEMPT_STEPS, KIRBY_MAX_HEALTH, LEVEL_MODES,
     LEVEL_STATES_DIR, TIMER_START, MULTI_LEVEL_MODES, OBS_TYPES, POWER_NAMES, POWER_SMALL,
-    POWER_SUPER, POWER_SUPERBALL, ROM_DIR, ROM_SUFFIXES, SML_ALL_LEVELS, SML_BROKEN_LEVELS,
-    SML_CLEAR_STATES, SML_DEATH_STATES, SUPPORTED_GAMES, GameSpec, RomInfo, _level_state_path,
+    POWER_SUPER, POWER_SUPERBALL, ROM_DIR, ROM_SUFFIXES, SML_ALL_LEVELS, SML_BACKGROUND_TILES,
+    SML_BROKEN_LEVELS, SML_CLEAR_STATES, SML_DEATH_STATES, SUPPORTED_GAMES, GameSpec, RomInfo,
+    _level_state_path,
     check_start_level, discover_roms, ensure_level_states, level_choices, level_targets,
     parse_start_level, power_state, prepare_level_states, probe_rom,
 )
@@ -76,10 +77,12 @@ def mario_tile_lut() -> np.ndarray:
         enemies, easy and hard, and projectiles   1.0
         everything else (sky, background)         0.0
 
-    These are exactly the values of the `custom_minimal_enemy()` method a
-    locally patched PyBoy used to provide, so models trained before this
-    table existed see the same observation. Changing a value here changes
-    what a trained model sees: bump ENV_VERSIONS["mario"].
+    with one correction: SML_BACKGROUND_TILES (decoration PyBoy files under
+    the blocks; see games.py for how that was measured) read 0.0.
+
+    Otherwise these are exactly the values of the `custom_minimal_enemy()`
+    method a locally patched PyBoy used to provide. Changing a value here
+    changes what a trained model sees: bump ENV_VERSIONS["mario"].
     """
     from pyboy.plugins import game_wrapper_super_mario_land as sml
     categories = (
@@ -96,6 +99,7 @@ def mario_tile_lut() -> np.ndarray:
     lut = np.zeros(int(sml.TILES), dtype=np.float32)
     for tiles, value in categories:
         lut[list(tiles)] = value
+    lut[list(SML_BACKGROUND_TILES)] = 0.0
     return lut
 
 

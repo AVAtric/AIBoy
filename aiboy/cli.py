@@ -41,6 +41,29 @@ from aiboy.paths import DATA_DIR, FROZEN, recommended_n_envs
 from aiboy.runs import (KEEP_CHECKPOINTS, cpu_count, latest_checkpoint, prune_checkpoints,
                   read_run_config, resolve_model_path, run_paths, write_run_config)
 
+# PPO stability. A policy that has become nearly deterministic can be pushed
+# by one large update into a state it never leaves: every emulator then
+# plays the very same short episode, the policy's entropy is ~0 and so is
+# its gradient (a marathon run collapsed that way at 70 M steps, to "jump
+# into the first goomba", and stayed there for 80 M more while the eval
+# score read -128 every time). Two safeguards:
+#   - `target_kl` ends a PPO update early once it has moved the policy too
+#     far (SB3 stops at 1.5x the value);
+#   - the exploration guard (`_exploration_guard`) measures the policy's
+#     entropy after every rollout; when it has been below ENTROPY_FLOOR for
+#     COLLAPSE_PATIENCE rollouts and the last COLLAPSE_EPISODES finished
+#     episodes are all identical and below the run's best evaluation, the
+#     run is repaired: weights and optimizer go back to `best_model.zip`
+#     and ent_coef (curiosity) is raised, ENT_COEF_AFTER_REPAIR. At most
+#     MAX_REPAIRS times per run, then the run stops with a message.
+TARGET_KL = 0.03
+ENTROPY_FLOOR = 0.01            # nats; a uniform Discrete(11) policy has ln(11) = 2.4
+COLLAPSE_PATIENCE = 3           # rollouts below the floor before a collapse is declared
+COLLAPSE_EPISODES = 20          # identical finished episodes that make a collapse
+GUARD_COOLDOWN = 20             # rollouts after a repair before the guard looks again
+MAX_REPAIRS = 3
+ENT_COEF_AFTER_REPAIR = (4.0, 0.02, 0.1)    # ent_coef x factor, at least, at most
+
 
 # ------------------------- vec-env plumbing -------------------------
 
@@ -99,6 +122,104 @@ def pick_policy(obs_type: str) -> tuple[str, dict]:
         return "CnnPolicy", {}
     # Tiles: 16x20 grid, so a moderately sized MLP is plenty.
     return "MlpPolicy", dict(net_arch=dict(pi=[256, 256], vf=[256, 256]))
+
+
+def is_collapsed(episodes, best_reward: float, min_episodes: int = COLLAPSE_EPISODES) -> bool:
+    """True when the last `min_episodes` finished episodes (score, length)
+    are all the same, one deterministic trajectory in a deterministic game,
+    and that score is below `best_reward`, the run's best evaluation.
+    Identical episodes at the best score are a solved task, not a collapse;
+    without an evaluation yet (`best_reward` -inf) nothing is decided."""
+    import math
+    recent = list(episodes)[-min_episodes:]
+    if len(recent) < min_episodes or not math.isfinite(best_reward):
+        return False
+    if len({(round(float(r), 1), int(l)) for r, l in recent}) > 1:
+        return False
+    return float(recent[-1][0]) < best_reward
+
+
+def _exploration_guard(eval_cb, best_path: Path):
+    """The exploration guard (see TARGET_KL above). `eval_cb` is the run's
+    EvalCallback (its `best_mean_reward` says what the run once reached);
+    `best_path` the model that scored it. Defined inside a function so
+    importing this module does not import torch."""
+    import numpy as np
+    import torch as th
+    from stable_baselines3.common.callbacks import BaseCallback
+
+    class ExplorationGuard(BaseCallback):
+        def __init__(self):
+            super().__init__()
+            self.below_floor = 0        # consecutive rollouts with entropy under the floor
+            self.cooldown = 0
+            self.repairs = 0
+            self.stop = False
+
+        def policy_entropy(self) -> float:
+            """Mean entropy of the current policy over (a sample of) the
+            observations of the rollout just collected."""
+            # (n_steps, n_envs, *obs) before the update, flattened after it.
+            obs = np.asarray(self.model.rollout_buffer.observations)
+            obs = obs.reshape(-1, *self.model.observation_space.shape)
+            if len(obs) > 512:
+                pick = np.random.default_rng(self.num_timesteps).choice(len(obs), 512, replace=False)
+                obs = obs[pick]
+            with th.no_grad():
+                obs_t, _ = self.model.policy.obs_to_tensor(obs)
+                return float(self.model.policy.get_distribution(obs_t).entropy().mean())
+
+        def _on_rollout_end(self) -> None:
+            entropy = self.policy_entropy()
+            self.logger.record("train/policy_entropy", entropy)
+            self.below_floor = self.below_floor + 1 if entropy < ENTROPY_FLOOR else 0
+            if self.cooldown > 0:
+                self.cooldown -= 1
+                return
+            episodes = [(float(e["r"]), int(e["l"])) for e in self.model.ep_info_buffer]
+            best = float(eval_cb.best_mean_reward)
+            if self.below_floor < COLLAPSE_PATIENCE or not is_collapsed(episodes, best):
+                return
+            reward, length = episodes[-1]
+            what = (f"the agent stopped exploring: every attempt ends the same way "
+                    f"({length} steps, score {reward:.0f}) while its best evaluation "
+                    f"scored {best:.0f}")
+            if self.repairs >= MAX_REPAIRS or not best_path.exists():
+                why = ("there is no best model to go back to" if not best_path.exists()
+                       else f"it was repaired {self.repairs} times already")
+                print(f"[train] warning: {what}; {why}, so training stops here. Start a new "
+                      f"run with a higher ent_coef (curiosity).", flush=True)
+                self.stop = True
+                return
+            self.model.set_parameters(str(best_path), exact_match=True, device=self.model.device)
+            factor, at_least, at_most = ENT_COEF_AFTER_REPAIR
+            old = float(self.model.ent_coef)
+            self.model.ent_coef = min(max(old * factor, at_least), at_most)
+            self.model.ep_info_buffer.clear()
+            self.repairs += 1
+            self.below_floor = 0
+            self.cooldown = GUARD_COOLDOWN
+            print(f"[train] warning: {what}. Restored the best model and raised curiosity "
+                  f"(ent_coef {old:g} -> {self.model.ent_coef:g}) so it explores again "
+                  f"(repair {self.repairs} of {MAX_REPAIRS}).", flush=True)
+
+        def _on_step(self) -> bool:
+            return not self.stop
+
+    return ExplorationGuard()
+
+
+def _apply_resume_overrides(model, args: argparse.Namespace) -> None:
+    """The mutable settings of a continued run come from the flags. A loaded
+    model built its learning-rate schedule from the saved value, so the
+    schedule is rebuilt as well (before, a new learning rate only took
+    effect at the resume after the next one)."""
+    from stable_baselines3.common.utils import get_schedule_fn
+    model.ent_coef = args.ent_coef
+    model.learning_rate = args.learning_rate
+    model.lr_schedule = get_schedule_fn(args.learning_rate)
+    model.n_epochs = args.n_epochs
+    model.target_kl = TARGET_KL
 
 
 def _tune_torch_threads(obs_type: str, device: str) -> None:
@@ -229,9 +350,7 @@ def cmd_train(args: argparse.Namespace) -> None:
               "Mutable overrides (ent_coef, learning_rate, n_epochs) are applied, "
               "but architecture / n_steps / batch_size come from the saved model.")
         model = PPO.load(str(resumed_from), env=env, device=args.device, tensorboard_log=tb_log)
-        model.ent_coef = args.ent_coef
-        model.learning_rate = args.learning_rate
-        model.n_epochs = args.n_epochs
+        _apply_resume_overrides(model, args)
     else:
         policy, policy_kwargs = pick_policy(args.obs_type)
         print(f"[train] policy={policy} policy_kwargs={policy_kwargs}")
@@ -252,8 +371,12 @@ def cmd_train(args: argparse.Namespace) -> None:
             ent_coef=args.ent_coef,
             vf_coef=0.5,
             max_grad_norm=0.5,
+            target_kl=TARGET_KL,
             seed=args.seed,
         )
+    print(f"[train] safety: an update stops once it moves the policy more than KL {TARGET_KL}; "
+          f"a run whose agent stops exploring goes back to its best model with more curiosity "
+          f"(up to {MAX_REPAIRS} times)")
 
     # SB3 counts callback frequency in vec-env steps; the flags are env steps.
     per_env = max(1, args.n_envs)
@@ -274,12 +397,13 @@ def cmd_train(args: argparse.Namespace) -> None:
     )
     if resumed_from is not None:
         _continue_eval_history(eval_cb, paths["logs"] / "evaluations.npz")
+    guard_cb = _exploration_guard(eval_cb, paths["logs"] / "best_model.zip")
 
     completed = False
     try:
         model.learn(
             total_timesteps=args.timesteps,
-            callback=[checkpoint_cb, eval_cb],
+            callback=[checkpoint_cb, eval_cb, guard_cb],
             reset_num_timesteps=resumed_from is None,
             progress_bar=False,
         )

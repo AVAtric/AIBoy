@@ -82,6 +82,19 @@ class LevelSpecTests(unittest.TestCase):
 
 
 class ObservationTests(unittest.TestCase):
+    def test_tile_lut_shows_all_the_ground_and_no_decoration(self):
+        # Measured with tools/mario_tile_survey.py (see games.SML_BACKGROUND_TILES).
+        lut = env.MARIO_TILE_LUT
+        for tile in (352, 353, 357, 358, 360, 361, 362, 142, 143, 383, 368, 239):  # stood on, lifts
+            self.assertEqual(lut[tile], 0.5, tile)
+        for tile in games.SML_BACKGROUND_TILES:                                   # walked through
+            self.assertEqual(lut[tile], 0.0, tile)
+        for tile in (300, 305, 306, 307, 311, 310, 350, 320, 325):               # sky, palms, hills, clouds
+            self.assertEqual(lut[tile], 0.0, tile)
+        self.assertEqual(lut[144], 1.0)                                          # goomba
+        self.assertEqual(lut[0], -1.0)                                           # Mario
+        self.assertEqual(games.env_version("mario"), "mario-3")
+
     def test_obs_types(self):
         self.assertEqual(games.OBS_TYPES, ("tiles", "pixels"))
         self.assertEqual(games.POWER_NAMES[games.POWER_SUPERBALL], "superball")

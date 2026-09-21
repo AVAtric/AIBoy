@@ -288,6 +288,17 @@ output in its own window for troubleshooting.
   keeps its earlier evaluations, and only replaces `best_model.zip` with a
   score above the best it had reached. The hint under the run name says
   which will happen.
+- **Exploration guard.** A long run can collapse: the agent settles on one
+  fixed way of playing, every attempt ends the same way (same steps, same
+  score) far below its best evaluation, and since nothing varies any more
+  nothing can be learned. The trainer measures the policy's entropy after
+  every rollout; when it has been ~0 for a few rollouts and the last 20
+  attempts are identical and below the best evaluation, it restores
+  `best_model.zip`, raises `ent_coef` (×4, at least 0.02) and says so in
+  *Messages*. This happens at most three times per run, then the run
+  stops. Continuing a collapsed run repairs it on the first rollout. An
+  update is also cut short once it moves the policy further than a KL of
+  0.03, which is what usually starts a collapse.
 - A **modified** marker appears under the preset selector as soon as a field
   differs from the preset.
 - **Live preview while training** plays each new `best_model.zip` on the
@@ -649,6 +660,8 @@ and writes screenshots of the window mid-play into it (macOS).
 | Game shows red | The ROM does not boot in PyBoy; the text says why. |
 | The wizard says every variation is already known | Raise *Effort* (longer trials are a new task), pick a fixed set under *Vary*, or **Forget all…** on the Experience tab. |
 | Training plateaus | Raise `ent_coef` to 0.02–0.05, sweep `ent_coef × learning_rate` on Tune, or try `pixels`. |
+| Every attempt ends the same way, the evaluation score is stuck at one value | The agent stopped exploring. The trainer repairs this itself from the best model (see *Exploration guard* under Train) and says so in *Messages*; a run that stops after three repairs needs a new run with a higher `ent_coef`. |
+| Mario dies at the same spot every time when playing | Playback is deterministic, so the best model replays one trajectory. Only more training gets him past it; check *Messages* for a collapse first. |
 | Slow training | Keep `obs_type=tiles`, `device=cpu`, `n_envs` near your core count; turn the live preview off. |
 | TensorBoard button does nothing | From source: `pip install tensorboard`. Otherwise a dialog says why it stopped (a busy port 6006 is the usual reason); its output is in `tensorboard.log` next to the app. |
 | Something went wrong in the window | Unexpected errors go to a dialog and `gui_errors.log`; a running training or sweep is not affected. |

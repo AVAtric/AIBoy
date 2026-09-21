@@ -22,8 +22,9 @@ ROM_DIR = Path("ROMs")
 # they would measure a different game.
 #   mario-1  first version
 #   mario-2  marathon training episodes start at 1-1 (were: a random level)
+#   mario-3  tile 319 reads as empty (decoration PyBoy files under the blocks)
 #   kirby-1  first version: scroll progress, score, health, lives
-ENV_VERSIONS = {"mario": "mario-2", "kirby": "kirby-1"}
+ENV_VERSIONS = {"mario": "mario-3", "kirby": "kirby-1"}
 ENV_VERSION = ENV_VERSIONS["mario"]          # the first game's; prefer env_version(game)
 
 
@@ -68,6 +69,22 @@ SML_ALL_LEVELS = tuple(
 ADDR_GAME_STATE = 0xFFB3
 SML_CLEAR_STATES = frozenset({0x05, 0x06, 0x07})
 SML_DEATH_STATES = frozenset({0x01, 0x04})
+
+# What is solid in Super Mario Land, checked against the game rather than
+# PyBoy's lists (tools/mario_tile_survey.py logs, over every usable level,
+# the background tile under Mario whenever he stands still and the tiles
+# his body overlaps while alive):
+#   - everything Mario ever stands on is on PyBoy's block / pipe lists
+#     (352-362, 142-143, 368-371, 383) or is a lift sprite (230, 238, 239),
+#     so the tile observation already shows all the ground there is;
+#   - the many tiles PyBoy does not list (palm trees 305-307 and 311, hills
+#     310 / 350, clouds 320-327, the sky 300, ...) are decoration Mario
+#     walks through, correctly shown as empty;
+#   - tile 319 is on PyBoy's `neutral_blocks` list but is decoration too
+#     (overlapped in 2-1, 3-1 and 4-2, never stood on). It is shown as
+#     empty so the agent does not see a wall that is not there.
+# Changing this changes what a trained model sees: bump ENV_VERSIONS["mario"].
+SML_BACKGROUND_TILES = frozenset({319})
 
 # Mario's power-up, mapped by writing values and watching the sprite:
 #   0xFF99  power-up state machine: 0 small, 1 growing, 2 super,
