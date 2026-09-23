@@ -1,27 +1,29 @@
-"""The Game Boy in the Preview panel: a photo of a real one with the
+"""The Game Boy in the Preview panel: a picture of the device with the
 emulator's picture inside its LCD, its buttons lit up as the agent presses
-them, and the battery LED on while something is playing.
+them, and its ON light lit while something is playing.
 
-`assets/gb_interface.png` is the device photo (the repository's copy, with
-AIboy lettering, made by tools/make_interface.py; a local
-`orig_gb_interface.png` in the assets folder next to the app is used
-instead when present, see aiboy.paths.local_or_shipped). Its LCD is a
-10:9 window of
-242x218 px, so at the photo's native size it holds the 160x144 emulator
-frame at 1.5x; the photo is scaled so the frame lands on the LCD at the
-largest of LCD_SCALES the display has room for (`Geometry`; the window
-picks the scale, see app.choose_lcd_scale). `GameBoyView` is a frame of
-the photo's size holding three canvases: the device (the photo in bands,
-a drawn, exactly even dark rim around the LCD, the battery LED), the pad
-(the controls region, swapped for a version with a glow over the pressed
-buttons, composed with PIL once per action and cached) and the screen,
-each placed where it belongs. The photo's own shadow around the LCD
-window is uneven, so that area is repainted in the bezel colour under the
-drawn rim.
+The artwork is a pair of pictures, `assets/interface/aiboy_off.png` and
+`aiboy_on.png` (the AIboy design, transparent around the case; the two
+differ only at the ON light). A developer's originals, `gameboy_off.png`
+and `gameboy_on.png` in the same folder (or in the assets folder next to
+a built app), are shown instead when present and are never distributed
+(see aiboy.paths.local_or_shipped). tools/make_interface.py brings new
+pictures to PHOTO_W x PHOTO_H, the size every measurement below is in.
+
+The LCD window (LCD) is 568 x 512 px, 10:9 like the 160 x 144 emulator
+frame. The picture is scaled so that the frame plus a RIM-wide dark rim
+lands exactly on that window, at the largest of LCD_SCALES the display has
+room for (`Geometry`; the window picks the scale, see
+app.choose_lcd_scale). `GameBoyView` is a frame of the picture's size
+holding three canvases: the device (the picture in bands, the rim, the ON
+light as a swap between the two pictures' crops), the pad (the controls
+region, swapped for a version with a glow over the pressed buttons,
+composed with PIL once per action and cached) and the screen, each placed
+where it belongs.
 
 On macOS each of the three canvases lives in a borderless child window
 of its own (`own_windows`): Tk there redraws a whole window, every image
-in it, whenever anything in it changes, and the photo is big. With
+in it, whenever anything in it changes, and the picture is big. With
 everything in the main window a new frame or a lit button cost ~35 ms
 (the display fell to ~14 fps) and every live-panel number did the same.
 A child window redraws only itself and hides and shows with the main
@@ -39,7 +41,7 @@ video's idle screen, dark on light (`dmg_tint`). Hovering a button tells
 what it does; when a person plays, pressing a button with the mouse holds
 it (`on_buttons`) and a click gives the canvas the keyboard focus.
 
-Without the photo (a bundle built without the asset) a plain drawn device
+Without the pictures (a bundle built without them) a plain drawn device
 with the same geometry is used.
 """
 from __future__ import annotations
@@ -50,24 +52,26 @@ from pathlib import Path
 from tkinter import ttk
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
 from aiboy.gui.widgets import Tooltip
 from aiboy.paths import local_or_shipped
 
-PHOTO = local_or_shipped("gb_interface.png")
-PHOTO_W, PHOTO_H = 446, 737
+PHOTO_OFF = local_or_shipped("interface/aiboy_off.png")
+PHOTO_ON = local_or_shipped("interface/aiboy_on.png")
+PHOTO_W, PHOTO_H = 1000, 1659
 
 GAME_W, GAME_H = 160, 144
 LCD_SCALES = (2.0, 1.75, 1.5)                  # emulator pixel scales, largest first
 FOLLOW_MS = 16                                 # how often the child windows check where the frame is
 
-# Everything below is in the photo's own pixels (measured from the image).
-LCD = (109, 99, 351, 317)                      # the window behind the glass (blue in the photo)
-LCD_PATCH = (104, 95, 354, 321)                # the window plus the photo's uneven shadow round it
-BEZEL = (86, 78, 89)                           # the glass bezel's colour next to the window
-LCD_OFF = (12, 14, 24)                         # the drawn rim between bezel and screen
-RIM = 2.5                                      # its width, in photo pixels
+# Everything below is in the picture's own pixels (measured from aiboy_off.png).
+LCD = (228, 208, 796, 720)                     # the dark window behind the glass (568 x 512)
+LCD_OFF = (16, 21, 33)                         # its colour: the rim the view draws round the screen
+RIM = 4                                        # the rim's width, in window pixels at every scale
+LED_BOX = (96, 353, 172, 429)                  # the ON light with its glow; the "on" picture differs only here
+BEZEL_BOX = (18, 114, 929, 834)                # the glass around the LCD (the drawn fallback)
+PAD_BOX = (40, 980, 965, 1435)                 # region that holds every button
 
 # The screen's four shades, lightest first, for PyBoy's four greys: the
 # boot video's idle screen (pale green paper, near-black ink, sampled from
@@ -98,27 +102,18 @@ def dmg_tint(frame: np.ndarray) -> np.ndarray:
             and np.array_equal(sample[..., 1], sample[..., 2])):
         return frame
     return _DMG_LUT[frame[..., 0]]
-# The battery LED. The photo has its hole at LED_SOURCE (measured: the dark
-# disc's centre (60.8, 174.8), radius 5.8 px), which is left of where it
-# belongs: the bezel strip between the case and the LCD spans x 39..104 and
-# the BATTERY label under it x 48..91, both centred near x 70. `load_photo`
-# moves the hole there (`relocate_led`), and the lit LED is drawn at LED.
-LED_SOURCE = (61, 175)
-LED = (70, 175)
-LED_R = 6
-BODY_LEVEL = 205                               # grey level of the case next to the backdrop
-PAD_BOX = (28, 440, 420, 650)                  # region that holds every button
+
 
 # Button shapes: (kind, (x0, y0, x1, y1)); "rect" = D-pad arm, "oval" = button.
 REGIONS: dict[str, tuple[str, tuple[int, int, int, int]]] = {
-    "up": ("rect", (72, 447, 113, 484)),
-    "down": ("rect", (72, 520, 113, 557)),
-    "left": ("rect", (38, 482, 74, 522)),
-    "right": ("rect", (111, 482, 147, 522)),
-    "b": ("oval", (286, 487, 338, 539)),
-    "a": ("oval", (358, 455, 410, 507)),
-    "select": ("oval", (136, 596, 204, 621)),
-    "start": ("oval", (212, 596, 270, 621)),
+    "up": ("rect", (152, 1014, 247, 1097)),
+    "down": ("rect", (152, 1175, 247, 1264)),
+    "left": ("rect", (72, 1093, 156, 1177)),
+    "right": ("rect", (244, 1093, 330, 1177)),
+    "b": ("oval", (642, 1101, 761, 1221)),
+    "a": ("oval", (809, 1023, 928, 1144)),
+    "select": ("oval", (304, 1338, 437, 1405)),
+    "start": ("oval", (480, 1342, 611, 1409)),
 }
 LABELS = {
     "up": "D-pad up: the submarine and the plane rise (levels 2-3 and 4-3); Kirby flies",
@@ -137,8 +132,9 @@ GLOW = (255, 214, 60)             # the highlight colour (alpha added per layer)
 
 
 def photo_scale(lcd_scale: float) -> float:
-    """Photo scale that puts GAME_W * lcd_scale pixels across the LCD."""
-    return lcd_scale * GAME_W / (LCD[2] - LCD[0])
+    """Picture scale that puts GAME_W * lcd_scale pixels plus the rim on
+    both sides exactly across the LCD window."""
+    return (lcd_scale * GAME_W + 2 * RIM) / (LCD[2] - LCD[0])
 
 
 def photo_size(lcd_scale: float) -> tuple[int, int]:
@@ -150,18 +146,18 @@ class Geometry:
     """Every position of the view for one LCD scale, in canvas pixels."""
 
     def __init__(self, lcd_scale: float):
-        f = self.factor = photo_scale(lcd_scale)
+        self.factor = photo_scale(lcd_scale)
         self.lcd_scale = lcd_scale
         self.width, self.height = photo_size(lcd_scale)
         self.screen_w, self.screen_h = round(GAME_W * lcd_scale), round(GAME_H * lcd_scale)
-        patch = self.box(LCD_PATCH)
-        self.screen_x = (patch[0] + patch[2] - self.screen_w) // 2
-        self.screen_y = (patch[1] + patch[3] - self.screen_h) // 2
-        self.rim = max(2, round(RIM * f))
-        self.rim_box = (self.screen_x - self.rim, self.screen_y - self.rim,
-                        self.screen_x + self.screen_w + self.rim,
-                        self.screen_y + self.screen_h + self.rim)
-        self.led = (round(LED[0] * f), round(LED[1] * f))
+        lcd = self.box(LCD)
+        self.screen_x = (lcd[0] + lcd[2] - self.screen_w) // 2
+        self.screen_y = (lcd[1] + lcd[3] - self.screen_h) // 2
+        self.rim = RIM
+        self.rim_box = (self.screen_x - RIM, self.screen_y - RIM,
+                        self.screen_x + self.screen_w + RIM,
+                        self.screen_y + self.screen_h + RIM)
+        self.led_box = self.box(LED_BOX)
         self.pad_box = self.box(PAD_BOX)
         self.regions = {key: (kind, self.box(b)) for key, (kind, b) in REGIONS.items()}
 
@@ -206,108 +202,52 @@ def tiles(width: int, height: int, holes: list[tuple[int, int, int, int]]
     return out
 
 
-def _draw_fallback() -> Image.Image:
-    """A plain device with the photo's geometry, for bundles without it."""
-    img = Image.new("RGB", (PHOTO_W, PHOTO_H), (205, 203, 196))
+def _draw_fallback(lit: bool) -> Image.Image:
+    """A plain device with the pictures' geometry, for bundles without
+    them: a black case, the glass, the LCD window, the ON light (`lit`),
+    the buttons and their labels. RGBA, transparent around the case."""
+    img = Image.new("RGBA", (PHOTO_W, PHOTO_H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.rounded_rectangle((6, 6, PHOTO_W - 7, PHOTO_H - 7), radius=24, outline=(120, 120, 116),
-                        width=2)
-    d.rounded_rectangle((40, 62, 410, 350), radius=10, fill=(96, 92, 104))
-    d.rectangle(LCD_PATCH, fill=BEZEL)
-    d.ellipse((LED[0] - LED_R, LED[1] - LED_R, LED[0] + LED_R, LED[1] + LED_R), fill=(90, 20, 20))
-    d.text((40, 372), "GAME BOY", fill=(40, 40, 140))
-    dark = (40, 40, 44)
-    d.rectangle(REGIONS["up"][1][:2] + REGIONS["down"][1][2:], fill=dark)
-    d.rectangle(REGIONS["left"][1][:2] + REGIONS["right"][1][2:], fill=dark)
-    for key, colour in (("a", (150, 40, 110)), ("b", (150, 40, 110)),
-                        ("select", (120, 120, 120)), ("start", (120, 120, 120))):
+    d.rounded_rectangle((8, 8, PHOTO_W - 9, PHOTO_H - 9), radius=60, fill=(18, 22, 28))
+    d.rounded_rectangle(BEZEL_BOX, radius=24, fill=(54, 62, 78))
+    d.rectangle(LCD, fill=LCD_OFF)
+    x0, y0, x1, y1 = LED_BOX
+    cx, cy, r = (x0 + x1) // 2, (y0 + y1) // 2, 14
+    d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(40, 190, 120) if lit else (20, 40, 34))
+    d.text((cx - 10, cy + 24), "ON", fill=(170, 176, 190))
+    d.text((40, 870), "AI BOY", fill=(235, 235, 240))
+    pad = (22, 24, 30)
+    d.rectangle(REGIONS["up"][1][:2] + REGIONS["down"][1][2:], fill=pad)
+    d.rectangle(REGIONS["left"][1][:2] + REGIONS["right"][1][2:], fill=pad)
+    for key, colour in (("a", (40, 60, 170)), ("b", (40, 60, 170)),
+                        ("select", (120, 120, 128)), ("start", (120, 120, 128))):
         d.ellipse(REGIONS[key][1], fill=colour)
-    d.text((150, 626), "SELECT", fill=(40, 40, 140))
-    d.text((228, 626), "START", fill=(40, 40, 140))
-    d.text((305, 545), "B", fill=(40, 40, 140))
-    d.text((378, 512), "A", fill=(40, 40, 140))
+    grey = (170, 176, 190)
+    d.text((330, 1420), "SELECT", fill=grey)
+    d.text((510, 1424), "START", fill=grey)
+    d.text((740, 1235), "B", fill=grey)
+    d.text((905, 1158), "A", fill=grey)
     return img
 
 
-def device_mask(img: Image.Image) -> Image.Image:
-    """Where the device is (255) and where the white backdrop is (0), with
-    a soft edge: the backdrop is whatever a flood fill reaches from the
-    corners; in a band a few pixels wide around it the photo's own
-    anti-aliasing decides, a pixel counting as device by how far it is
-    from white (the case reads about BODY_LEVEL, a half-blended edge pixel
-    in between). A hard cut there left the big curve at the lower right a
-    staircase with a pale halo."""
-    probe = img.copy()
-    sentinel = (255, 0, 255)
-    w, h = probe.size
-    for corner in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
-        if min(probe.getpixel(corner)) > 200:                # white-ish: outside the device
-            ImageDraw.floodfill(probe, corner, sentinel, thresh=70)
-    arr = np.asarray(probe)
-    backdrop = (arr[..., 0] == 255) & (arr[..., 1] == 0) & (arr[..., 2] == 255)
-    if not backdrop.any():                                    # a photo without a backdrop
-        return Image.new("L", img.size, 255)
-    band = np.asarray(Image.fromarray(backdrop.astype(np.uint8) * 255)
-                      .filter(ImageFilter.MaxFilter(7))) > 0
-    level = np.asarray(img).astype(np.float32).mean(axis=2)
-    soft = np.clip((255.0 - level) / (255.0 - BODY_LEVEL), 0.0, 1.0)
-    alpha = np.ones(level.shape, dtype=np.float32)
-    alpha[band] = soft[band]
-    alpha[backdrop] = 0.0
-    rim = 10                                                  # white specks the fill missed
-    edge = np.zeros(level.shape, dtype=bool)
-    edge[:rim, :] = edge[-rim:, :] = edge[:, :rim] = edge[:, -rim:] = True
-    alpha[edge & (arr.min(axis=2) > 225)] = 0.0
-    return Image.fromarray((alpha * 255).round().astype(np.uint8))
-
-
-def _disc_mask(size: int, radius: float) -> Image.Image:
-    """An "L" mask of `size` x `size` with a disc of `radius` at its centre,
-    one soft pixel at the edge."""
-    yy, xx = np.mgrid[0:size, 0:size]
-    d = np.hypot(xx - (size - 1) / 2, yy - (size - 1) / 2)
-    return Image.fromarray((np.clip(radius - d + 0.5, 0.0, 1.0) * 255).round().astype(np.uint8))
-
-
-def relocate_led(img: Image.Image, source: tuple[int, int] = LED_SOURCE,
-                 target: tuple[int, int] = LED) -> Image.Image:
-    """The photo with its battery LED hole moved from `source` to `target`
-    (photo pixels): the hole and its red glint are lifted as a small disc,
-    the spot they leave is painted in the bezel's colour around it, and the
-    disc is set down centred on `target`."""
-    if source == target:
-        return img
-    img = img.copy()
-    reach = LED_R + 3
-    size = 2 * reach + 1
-    sx, sy = source
-    box = (sx - reach, sy - reach, sx - reach + size, sy - reach + size)
-    patch = img.crop(box)
-    ring = np.asarray(patch).reshape(-1, 3)
-    d = np.hypot(*np.mgrid[0:size, 0:size][::-1] - reach).reshape(-1)
-    bezel = tuple(int(v) for v in np.median(ring[(d > LED_R + 1) & (d <= reach)], axis=0))
-    img.paste(bezel, box, _disc_mask(size, LED_R + 2))
-    tx, ty = target
-    img.paste(patch, (tx - reach, ty - reach), _disc_mask(size, LED_R + 1.5))
-    return img
-
-
-def load_photo(path: Path = PHOTO, background: tuple[int, int, int] = (34, 34, 34),
-               size: tuple[int, int] = (PHOTO_W, PHOTO_H)) -> Image.Image:
-    """The device photo at `size` (or the drawn fallback), laid on
-    `background` (the window colour) with the photo's white backdrop
-    removed, so the device sits on the window and not on a white card."""
+def load_photo(path: Path = PHOTO_OFF, background: tuple[int, int, int] = (34, 34, 34),
+               size: tuple[int, int] = (PHOTO_W, PHOTO_H), lit: bool = False) -> Image.Image:
+    """The device picture at `size` (or the drawn fallback, with its ON
+    light `lit`), laid on `background` (the window colour) through its
+    transparency, so the case sits on the window and not on a card. The
+    LCD window is flattened to the rim's colour: the view draws its own,
+    exactly even rim under the screen and no sliver of the glass' reflection
+    may show beside it."""
     try:
-        img = Image.open(path).convert("RGB")
+        img = Image.open(path).convert("RGBA")
         if img.size != (PHOTO_W, PHOTO_H):
-            img = img.resize((PHOTO_W, PHOTO_H), Image.LANCZOS)
-        img = relocate_led(img)               # the photo's LED sits left of the middle
+            img = img.convert("RGBa").resize((PHOTO_W, PHOTO_H), Image.LANCZOS).convert("RGBA")
     except (OSError, ValueError):
-        img = _draw_fallback()
-    # The window and the uneven shadow the photo has around it become plain
-    # bezel; the view draws its own, even rim under the screen.
-    ImageDraw.Draw(img).rectangle(LCD_PATCH, fill=BEZEL)
-    img = Image.composite(img, Image.new("RGB", img.size, background), device_mask(img))
+        img = _draw_fallback(lit)
+    inset = 3                                                 # keep the window's soft edge
+    ImageDraw.Draw(img).rectangle((LCD[0] + inset, LCD[1] + inset, LCD[2] - inset, LCD[3] - inset),
+                                  fill=LCD_OFF + (255,))
+    img = Image.alpha_composite(Image.new("RGBA", img.size, background + (255,)), img).convert("RGB")
     if img.size != tuple(size):
         img = img.resize(size, Image.LANCZOS)
     return img
@@ -367,7 +307,7 @@ class GameBoyView(tk.Frame):
     `screen_image` is the `screen_size` PhotoImage on the LCD: paste each
     new frame into it (`set_screen`). `show(action_name)` lights that
     action's buttons (None or "NOOP" clears them); `set_power(on)` drives
-    the battery LED; hovering a button shows its label (plus the keys that
+    the ON light; hovering a button shows its label (plus the keys that
     press it, see `set_key_hints`); `on_buttons(callback)` reports the
     buttons held down with the mouse. Click anywhere on it to give it the
     keyboard focus."""
@@ -378,7 +318,9 @@ class GameBoyView(tk.Frame):
         bg = "#%02x%02x%02x" % rgb
         lcd_bg = "#%02x%02x%02x" % LCD_OFF
         super().__init__(parent, width=geo.width, height=geo.height, bg=bg, **kw)
-        self.photo = load_photo(background=rgb, size=(geo.width, geo.height))
+        size = (geo.width, geo.height)
+        self.photo = load_photo(PHOTO_OFF, background=rgb, size=size)
+        photo_on = load_photo(PHOTO_ON, background=rgb, size=size, lit=True)
         self.own_windows = self.tk.call("tk", "windowingsystem") == "aqua"
         self._windows: list[tuple[tk.Toplevel, int, int, int, int]] = []
         self._placed: dict[tk.Toplevel, str] = {}
@@ -393,23 +335,20 @@ class GameBoyView(tk.Frame):
         self.screen = self._canvas(geo.screen_x, geo.screen_y, geo.screen_w, geo.screen_h, lcd_bg,
                                    over)
 
-        # The device: the photo in bands that leave out the rim box and the
-        # pad box (so nothing large sits under what changes), the rim, the LED.
+        # The device: the picture in bands that leave out the rim box, the
+        # pad box and the ON light (so nothing large sits under what
+        # changes), the rim, and the light: the same spot of the "off" and
+        # the "on" picture, swapped by `set_power`.
         self._tiles: list[ImageTk.PhotoImage] = []
-        for box in tiles(geo.width, geo.height, [geo.rim_box, geo.pad_box]):
+        for box in tiles(geo.width, geo.height, [geo.rim_box, geo.pad_box, geo.led_box]):
             img = ImageTk.PhotoImage(self.photo.crop(box))
             self._tiles.append(img)
             self.device.create_image(box[0], box[1], anchor="nw", image=img)
         self.device.create_rectangle(*geo.rim_box, fill=lcd_bg, outline="")
-        # The lit LED: a red dot in a dark ring; the ring covers the whole
-        # hole (its glint included) so nothing of the unlit LED shows.
-        x, y = geo.led
-        r = max(4, round(4 * geo.factor))
-        ring = max(r + 3, round((LED_R + 2) * geo.factor))
-        self._led_halo = self.device.create_oval(x - ring, y - ring, x + ring, y + ring,
-                                                 fill="#7a1010", outline="", state="hidden")
-        self._led = self.device.create_oval(x - r, y - r, x + r, y + r, fill="#ff3030",
-                                            outline="", state="hidden")
+        self._led_off = ImageTk.PhotoImage(self.photo.crop(geo.led_box))
+        self._led_on = ImageTk.PhotoImage(photo_on.crop(geo.led_box))
+        self._led = self.device.create_image(geo.led_box[0], geo.led_box[1], anchor="nw",
+                                             image=self._led_off)
         self._power = False
 
         # The pad: the controls region, with a glow over the pressed buttons.
@@ -556,7 +495,7 @@ class GameBoyView(tk.Frame):
         """Show a PIL `image` (`screen_size`) on the LCD, in place."""
         self.screen_image.paste(image)
 
-    # ----- battery LED -----
+    # ----- the ON light -----
 
     @property
     def power(self) -> bool:
@@ -566,9 +505,7 @@ class GameBoyView(tk.Frame):
         if on == self._power:
             return
         self._power = on
-        state = "normal" if on else "hidden"
-        self.device.itemconfig(self._led_halo, state=state)
-        self.device.itemconfig(self._led, state=state)
+        self.device.itemconfig(self._led, image=self._led_on if on else self._led_off)
 
     # ----- buttons -----
 

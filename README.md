@@ -14,8 +14,8 @@ learner, and a desktop app wraps the whole workflow in plain language.
 - **AIboy remembers.** Every test and training run goes into its experience
   file. Searches skip what is known, explore around the best, borrow from
   related goals, and improve the presets themselves.
-- **A real Game Boy on screen.** The emulator plays on the LCD of a photo of a
-  Game Boy, the buttons light up as the agent presses them, and the live
+- **A Game Boy on screen.** The emulator plays on the LCD of a Game Boy
+  picture, the buttons light up as the agent presses them, and the live
   numbers sit next to it.
 - **Expert tabs for everything else.** Training runs with their evaluations
   and messages, sweeps with a best-first table, presets, and the complete
@@ -147,13 +147,13 @@ away: rest the pointer on a field, a checkbox or a ⓘ.
 
 <img src="assets/screenshot_play.png" width="300" align="right" alt="The Game Boy playing, with RIGHT, B and A lit">
 
-**Preview.** A photo of a real Game Boy with the emulator's picture on its
-LCD, in the pale green of its idle screen behind an even dark rim. Whatever
+**Preview.** A Game Boy with the emulator's picture on its LCD, in the
+pale green of its idle screen behind an even dark rim. Whatever
 produces something to watch shows here without switching tabs: a finished
 model, the live preview of a training run, the wizard's Watch step, your
 own game. The D-pad, A and B light up with every button
 pressed, hovering a button tells what it does (and which key it is), and
-the battery LED is on while the boot video, a playback or the live preview
+the ON light is lit while the boot video, a playback or the live preview
 runs. Under the device a status line says what is playing and how each
 round ended. **Sound**, in the panel's header, plays the game's own sound
 while you play yourself or an agent plays at real speed (1×); faster or
@@ -161,21 +161,25 @@ slower playback and the training preview stay silent, since the sound
 cannot follow them. It is off until you tick it and then remembered; the
 boot video's jingle plays regardless.
 
-The photo (`assets/gb_interface.png`) is scaled so the 160 × 144 frame sits
-on the LCD at 2× when the display has room for the window, else 1.75× or
-1.5×. At start-up the screen plays the boot video from `assets/` with its
-sound (`AIBOY_NO_INTRO=1` starts silently; `python tools/build_intro.py`
-makes the frames from `assets/gb_intro.mp4`, ffmpeg needed).
+The device is a pair of pictures, `assets/interface/aiboy_off.png` and
+`aiboy_on.png` (the same picture with the ON light off and on, transparent
+around the case). It is scaled so the 160 × 144 frame sits on the LCD at 2×
+when the display has room for the window, else 1.75× or 1.5×. At start-up
+the screen plays the boot video from `assets/` with its sound
+(`AIBOY_NO_INTRO=1` starts silently; `python tools/build_intro.py` makes the
+frames from `assets/gb_intro.mp4`, ffmpeg needed).
 
-The photo and the boot video in the repository carry AIboy lettering and no
-maker's marks (`tools/make_interface.py` and `tools/make_intro.py` produce
-them). If you own the real thing, put it into the `assets/` folder under the
-same name with an `orig_` prefix (`assets/orig_gb_interface.png`,
-`assets/orig_gb_intro.npz`, `.wav`) and AIboy uses it instead. In the source
-tree that is the repository's `assets/`; for a built app it is the `assets/`
-folder next to the app (the shipped files stay inside the bundle). Those
-files are ignored by git and left out of release builds;
-`AIBOY_SHIPPED_ASSETS=1` ignores them for one start.
+The pictures and the boot video in the repository are AIboy's own design and
+carry no maker's marks (`tools/make_interface.py` brings new pictures to the
+size the GUI measures them in, `tools/make_intro.py` makes the video). If you
+own the real thing, put it into the `assets/` folder as
+`interface/gameboy_off.png` and `interface/gameboy_on.png` (the device),
+`orig_gb_intro.npz` and `orig_gb_intro.wav` (the video) and AIboy uses it
+instead. In the source tree that is the repository's `assets/`; for a built
+app it is the `assets/` folder next to the app (the shipped files stay inside
+the bundle). Those files are ignored by git and left out of release builds
+(`aiboy/paths.py` lists the pairs); `AIBOY_SHIPPED_ASSETS=1` ignores them
+for one start.
 
 **Tracking.** The panel follows what the app is doing. Its first line
 names the activity, and only the boxes that matter for it are shown:
@@ -631,7 +635,7 @@ build_release.py        Packages a standalone app for this machine (PyInstaller)
 requirements.txt        Libraries, pinned to the tested major versions (requirements-build.txt adds PyInstaller)
 environment.yml         The conda environment AIboy is developed in (Python 3.11, Tk 8.6.13, pip)
 builtin_presets.json    Shipped presets (hand-editable)
-assets/                 Game Boy photo, boot video, README screenshots
+assets/                 Game Boy pictures (interface/), boot video, README screenshots
 aiboy/
   cli.py                Command line, the trainer and the player
   paths.py              Where the program and its data live (source tree vs frozen release)
@@ -643,13 +647,13 @@ aiboy/
   tuning.py             Sweep templates, grid / random / list expansion, metrics, estimates
   experience.py         What AIboy has learned: records, reuse, best-known settings, suggestions, improvements
   gui/app.py            The window: Train / Tune tabs, Preview and Tracking, status bar, event pump
-  gui/gameboy.py        The Game Boy: photo, emulator on its LCD, lit buttons, battery LED
+  gui/gameboy.py        The Game Boy: the pictures, emulator on its LCD, lit buttons, ON light
   gui/wizard.py         Wizard tab (Set up → Save → Train → Watch, "Let AIboy choose")
   gui/presets_tab.py    Presets tab
   gui/experience_tab.py Experience tab
   gui/widgets.py        Shared Tk pieces: parameter form, tables, tooltips, theme
   gui/player.py         Embedded playback / live preview engine, boot video
-tools/                  Artwork generators: photo (make_interface.py), boot video (make_intro.py, build_intro.py), README screenshots (readme_shots.py)
+tools/                  Artwork: device pictures (make_interface.py), boot video (make_intro.py, build_intro.py), README screenshots (readme_shots.py)
 tests/                  Unit tests; tests/gui/ GUI checks
 ```
 

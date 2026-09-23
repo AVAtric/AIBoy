@@ -19,9 +19,14 @@ def fail(msg):
     app._on_close(); cleanup([RUN]); sys.exit(1)
 
 def shot(name):
+    """A screenshot of the window, and where the Game Boy is in it (for
+    tools/readme_shots.py, which cuts the device out)."""
     if OUT and sys.platform == "darwin":
         x, y, w, h = root.winfo_rootx(), root.winfo_rooty(), root.winfo_width(), root.winfo_height()
         subprocess.run(["screencapture", "-x", "-R", f"{x},{y},{w},{h}", f"{OUT}/{name}.png"])
+        gb = app.gameboy
+        with open(f"{OUT}/{name}.rect", "w") as f:
+            f.write(f"{gb.winfo_rootx() - x} {gb.winfo_rooty() - y} {gb.winfo_width()} {gb.winfo_height()}\n")
 
 def tick():
     if time.time() - __import__("_common").T0 > 420: fail(f"timeout in {state['s']}")

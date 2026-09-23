@@ -1,15 +1,19 @@
-"""Make the shipped Game Boy photo, assets/gb_interface.png, from a local
-assets/orig_gb_interface.png: the maker's name and logo on the LCD are
-replaced by plain screen colour and the "GAME BOY" label under the screen
-by "AIBOY", so the repository ships no trademark artwork. Everything the
-GUI measures (LCD window, LED, buttons, see aiboy/gui/gameboy.py) is
-untouched: the two files have the same size and geometry.
+"""Prepare the Game Boy artwork the Preview shows (assets/interface/): each
+PNG in the folder is brought to the size the GUI measures its geometry in
+(aiboy/gui/gameboy.py: PHOTO_W x PHOTO_H) and re-saved with its transparency,
+optimized. The pictures are drawn at 1317 x 2185; the window never shows
+the device wider than about 600 px, so the shipped copies are smaller and
+compress to about half.
 
-    python tools/make_interface.py
+    python tools/make_interface.py            # assets/interface/*.png, in place
+    python tools/make_interface.py <folder>   # another folder of pictures
 
-Like the boot video (tools/make_intro.py), the original is not distributed
-(.gitignore: assets/orig_gb*) but is used instead of the shipped file by
-anyone who puts one there (aiboy.paths.local_or_shipped).
+The shipped pair is aiboy_off.png / aiboy_on.png (the AIboy design, LED off
+and on); gameboy_off.png / gameboy_on.png are the developer's originals,
+never distributed (.gitignore, build_release.py) but shown instead when
+present (aiboy.paths.local_or_shipped). For each picture the LCD window it
+finds (the big dark rectangle behind the glass) is printed next to
+gameboy.LCD, as a check that the geometry still matches.
 """
 from __future__ import annotations
 
@@ -17,99 +21,53 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image
 
-ASSETS = Path(__file__).resolve().parents[1] / "assets"
-ORIG = ASSETS / "orig_gb_interface.png"
-OUT = ASSETS / "gb_interface.png"
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
-LCD = (109, 99, 351, 317)          # the screen window, as in gameboy.py
-LABEL = (26, 354, 300, 392)        # "Nintendo GAME BOY(tm)" under the screen
-LABEL_INK = (45, 35, 86)           # the label's blue-purple, measured
-FONTS = ["/System/Library/Fonts/Supplemental/Arial Black.ttf",
-         "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-         "C:/Windows/Fonts/ariblk.ttf", "C:/Windows/Fonts/arialbd.ttf",
-         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]
+from aiboy.gui.gameboy import LCD, PHOTO_H, PHOTO_W  # noqa: E402
 
 
-def font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    for path in FONTS:
-        if Path(path).exists():
-            return ImageFont.truetype(path, size)
-    return ImageFont.load_default()
+def scaled(img: Image.Image, size: tuple[int, int]) -> Image.Image:
+    """`img` at `size`, resampled with premultiplied alpha so the soft edge
+    of the case picks up no fringe from the transparent pixels' colour."""
+    if img.size == size:
+        return img
+    return img.convert("RGBa").resize(size, Image.LANCZOS).convert("RGBA")
 
 
-def fill_from_neighbours(img: Image.Image, box: tuple[int, int, int, int],
-                         donor_x: tuple[int, int] = (305, 425)) -> None:
-    """Paint `box` with case plastic taken from the same rows just to the
-    right of it (`donor_x`), so the moulding's top-to-bottom shading is kept:
-    each row gets the donor's tone, and the donor's grain is mirror-tiled
-    across the width so the patch has the same texture as its surroundings."""
-    x0, y0, x1, y1 = box
-    a = np.asarray(img).astype(np.float32)
-    donor = a[y0:y1, donor_x[0]:donor_x[1]]
-    tone = donor.mean(axis=1, keepdims=True)                  # per-row colour
-    grain = donor - tone
-    tiles = [grain, grain[:, ::-1]]
-    strip = np.concatenate(tiles * ((x1 - x0) // (2 * grain.shape[1]) + 1), axis=1)[:, :x1 - x0]
-    a[y0:y1, x0:x1] = np.clip(tone + strip, 0, 255)
-    img.paste(Image.fromarray(a.astype(np.uint8)))
+def edge_near(profile: np.ndarray, expected: int, reach: int = 12) -> int:
+    """Where the sharpest change of `profile` within `reach` of `expected` is."""
+    g = np.abs(np.diff(profile))
+    lo, hi = max(0, expected - reach), min(len(g), expected + reach)
+    return lo + int(np.argmax(g[lo:hi])) + 1
 
 
-def clear_lcd(img: Image.Image, inset: int = 2) -> None:
-    """Replace the LCD's printed logo (and the dither the photo picked up
-    from it) with a clean, evenly shaded screen: each row takes the median
-    colour of its unprinted pixels, smoothed down the screen, with a little
-    grain so it still reads as glass and not as a flat fill."""
-    x0, y0, x1, y1 = (LCD[0] + inset, LCD[1] + inset, LCD[2] - inset, LCD[3] - inset)
-    a = np.asarray(img).astype(np.float32)
-    lcd = a[y0:y1, x0:x1]
-    ink = lcd.sum(axis=2) < 300
-    ink = np.asarray(Image.fromarray(ink.astype(np.uint8) * 255).filter(ImageFilter.MaxFilter(7))) > 0
-    rows = np.array([np.median(lcd[y][~ink[y]], axis=0) if (~ink[y]).sum() > 20 else np.nan * np.ones(3)
-                     for y in range(lcd.shape[0])])
-    for c in range(3):                                        # fill rows that were all print
-        col = rows[:, c]
-        bad = np.isnan(col)
-        col[bad] = np.interp(np.flatnonzero(bad), np.flatnonzero(~bad), col[~bad])
-    k = np.exp(-0.5 * (np.arange(-12, 13) / 5.0) ** 2); k /= k.sum()
-    pad = np.pad(rows, ((12, 12), (0, 0)), mode="edge")
-    smooth = np.stack([np.convolve(pad[:, c], k, mode="valid") for c in range(3)], axis=1)
-    grain = np.random.default_rng(3).normal(0.0, 2.0, lcd.shape)
-    a[y0:y1, x0:x1] = np.clip(smooth[:, None, :] + grain, 0, 255)
-    img.paste(Image.fromarray(a.astype(np.uint8)))
+def measure_lcd(img: Image.Image) -> tuple[int, int, int, int]:
+    """The LCD window's edges: the sharpest changes near gameboy.LCD's,
+    along a row profile through a strip just inside the window's top and a
+    column profile just inside its left (clear of anything printed on the
+    middle of an original's screen; works for a dark and a light window)."""
+    lum = np.asarray(img.convert("RGB")).astype(np.float32).mean(axis=2)
+    x0, y0, x1, y1 = LCD
+    rows = lum[y0 + 15:y0 + 45].mean(axis=0)
+    cols = lum[:, x0 + 15:x0 + 45].mean(axis=1)
+    return edge_near(rows, x0), edge_near(cols, y0), edge_near(rows, x1), edge_near(cols, y1)
 
 
-def write_label(img: Image.Image, text: str = "AIBOY") -> None:
-    """The product name where "GAME BOY" was: same ink, same height,
-    slightly widened like the original lettering, with the print's soft edge."""
-    x0, y0, x1, y1 = LABEL
-    f = font(30)
-    layer = Image.new("L", img.size, 0)
-    d = ImageDraw.Draw(layer)
-    bbox = d.textbbox((0, 0), text, font=f)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    d.text((x0 + 8 - bbox[0], (y0 + y1) // 2 - th // 2 - bbox[1] + 1), text, font=f, fill=255)
-    # stretch the lettering horizontally (the original logo is wide) then soften
-    stretched = layer.crop((x0, y0, x0 + tw + 16, y1)).resize((int((tw + 16) * 1.2), y1 - y0), Image.LANCZOS)
-    layer.paste(0, (0, 0, *layer.size))
-    layer.paste(stretched, (x0, y0))
-    layer = layer.filter(ImageFilter.GaussianBlur(0.6))
-    ink = Image.new("RGB", img.size, LABEL_INK)
-    img.paste(ink, (0, 0), layer)
-
-
-def make(src: Path = ORIG, dst: Path = OUT) -> Image.Image:
-    img = Image.open(src).convert("RGB")
-    fill_from_neighbours(img, LABEL)
-    write_label(img)
-    clear_lcd(img)
-    img.save(dst, optimize=True)
-    return img
+def prepare(folder: Path) -> None:
+    for path in sorted(folder.glob("*.png")):
+        img = scaled(Image.open(path).convert("RGBA"), (PHOTO_W, PHOTO_H))
+        img.save(path, optimize=True)
+        found = measure_lcd(img)
+        # the constants are measured on the shipped pair; an original may
+        # frame its window differently (a printed border, say)
+        shipped = path.name.startswith("aiboy_")
+        note = "" if not shipped or all(abs(a - b) <= 6 for a, b in zip(found, LCD)) else "   <-- differs from gameboy.LCD"
+        print(f"{path.name}: {img.size[0]}x{img.size[1]}, {path.stat().st_size // 1024} KB, "
+              f"LCD window {found} (gameboy.LCD {LCD}){note}")
 
 
 if __name__ == "__main__":
-    if not ORIG.exists():
-        sys.exit(f"missing {ORIG}")
-    out = make()
-    print(f"wrote {OUT} ({out.size[0]}x{out.size[1]})")
+    prepare(Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "assets" / "interface")

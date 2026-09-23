@@ -47,6 +47,8 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+from aiboy.paths import ARTWORK  # noqa: E402  (stdlib only)
 APP_NAME = "AIboy"
 PACKAGE = "aiboy"
 BUILD_DIR = ROOT / "build"
@@ -147,15 +149,18 @@ def ensure_pyinstaller():
 
 
 def shipped_assets(sep: str) -> list[str]:
-    """`--add-data` pairs for assets/: the shipped files only. A local
-    `orig_*` original (the real device photo or boot video, see
-    aiboy.paths.local_or_shipped) is for the developer's own window and must
-    never travel in a release; whoever owns one puts it into the assets/
-    folder next to the built app."""
+    """`--add-data` pairs for assets/: the files the app reads (the device
+    pictures and the boot video, aiboy.paths.ARTWORK), nothing else. A
+    developer's original (the real device pictures or boot video, the
+    values of that table) is for their own window and must never travel in
+    a release; whoever owns one puts it into the assets/ folder next to the
+    built app."""
     args: list[str] = []
-    for f in sorted((ROOT / "assets").iterdir()):
-        if f.is_file() and not f.name.startswith("orig_") and not f.name.startswith("."):
-            args += ["--add-data", f"{f}{sep}assets"]
+    for name in ARTWORK:
+        f = ROOT / "assets" / name
+        if not f.exists():
+            sys.exit(f"[build] missing shipped asset {f}")
+        args += ["--add-data", f"{f}{sep}{os.path.join('assets', *Path(name).parts[:-1])}"]
     return args
 
 
@@ -236,10 +241,11 @@ README = """AIboy — teach an AI to play Super Mario Land
    the next search skips what it already knows and explores what it doesn't,
    and the Experience tab shows everything it has learned so far.
 4. The other tabs (Train, Tune, Presets) show and control the same runs in full.
-5. The Game Boy on the screen carries AIboy lettering and plays an AIboy boot
+5. The Game Boy on the screen is the AIboy design and plays an AIboy boot
    video. If you own the real artwork, put it into the assets folder next to
-   the app as orig_gb_interface.png (the photo), orig_gb_intro.npz and
-   orig_gb_intro.wav (the boot video and its chime); AIboy shows those instead.
+   the app: interface/gameboy_off.png and interface/gameboy_on.png (the
+   device with its light off and on), orig_gb_intro.npz and orig_gb_intro.wav
+   (the boot video and its chime); AIboy shows those instead.
 
 Built {built_at} on {chip}: {cores} cores, {memory_gb} GB memory.
 This build runs {n_envs} game emulators in parallel while training. It is made
@@ -257,7 +263,8 @@ def assemble_release(built: Path, profile: dict, with_roms: bool) -> Path:
     RELEASE_DIR.mkdir(parents=True)
     shutil.copytree(built, RELEASE_DIR / built.name, symlinks=True)
     (RELEASE_DIR / "models").mkdir()
-    (RELEASE_DIR / "assets").mkdir()          # for the user's own artwork (paths.LOCAL_ASSET_DIR)
+    # for the user's own artwork (paths.LOCAL_ASSET_DIR, the ARTWORK originals)
+    (RELEASE_DIR / "assets" / "interface").mkdir(parents=True)
     roms = RELEASE_DIR / "ROMs"
     roms.mkdir()
     if with_roms and (ROOT / "ROMs").exists():

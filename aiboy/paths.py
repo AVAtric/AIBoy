@@ -40,22 +40,48 @@ ASSET_DIR = BUNDLE_DIR / "assets"            # the shipped artwork (inside the b
 LOCAL_ASSET_DIR = DATA_DIR / "assets"        # the user's own artwork, next to the app
 
 
+# The artwork the repository ships, each file with the original it stands
+# in for: an original (the developer's real Game Boy pictures, the real
+# boot video) is never distributed (.gitignore, build_release.py) but is
+# shown instead when someone has put one there. Paths relative to assets/.
+ARTWORK = {
+    "interface/aiboy_off.png": "interface/gameboy_off.png",   # the device, ON light off
+    "interface/aiboy_on.png": "interface/gameboy_on.png",     # the same with the light on
+    "gb_intro.npz": "orig_gb_intro.npz",                      # the boot video's frames
+    "gb_intro.wav": "orig_gb_intro.wav",                      # and its chime
+}
+
+
+def original_name(name: str) -> str:
+    """The original that stands in for the shipped asset `name`: from
+    ARTWORK, else `orig_<file>` in the same folder."""
+    if name in ARTWORK:
+        return ARTWORK[name]
+    path = Path(name)
+    return str(path.with_name(f"orig_{path.name}")).replace(os.sep, "/")
+
+
+def is_original(name: str) -> bool:
+    """True for a path (relative to assets/) that is never distributed."""
+    name = name.replace(os.sep, "/")
+    return name in ARTWORK.values() or Path(name).name.startswith("orig_")
+
+
 def local_or_shipped(name: str, assets: Path = ASSET_DIR, local: Path = LOCAL_ASSET_DIR) -> Path:
     """Path of an asset that exists in two versions: the one the repository
-    ships as `assets/<name>` (the AIboy artwork: the photo made by
-    tools/make_interface.py, the boot video by tools/make_intro.py) and an
-    original, `orig_<name>`, that is never distributed (.gitignore,
-    build_release.py) but is used instead when someone has put one there:
-    in `local` (the assets folder next to the app, where a release's user
-    can reach it) or in `assets` (the shipped folder; in the source tree the
-    two are the same folder). AIBOY_SHIPPED_ASSETS=1 ignores the originals
-    (README screenshots, tests)."""
+    ships as `assets/<name>` and its original (`original_name`), used
+    instead when someone has put one there: in `local` (the assets folder
+    next to the app, where a release's user can reach it) or in `assets`
+    (the shipped folder; in the source tree the two are the same folder).
+    AIBOY_SHIPPED_ASSETS=1 ignores the originals (README screenshots,
+    tests)."""
     if not os.environ.get("AIBOY_SHIPPED_ASSETS"):
+        orig = original_name(name)
         for folder in (local, assets):
-            orig = folder / f"orig_{name}"
-            if orig.exists():
-                return orig
+            if (folder / orig).exists():
+                return folder / orig
     return assets / name
+
 
 # Everything AIboy has learned from its trials and runs (see experience.py).
 # Tests point this at a scratch file so they never touch the real memory.

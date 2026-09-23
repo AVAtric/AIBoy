@@ -15,6 +15,7 @@ gui_errors.log
 tensorboard.log
 
 assets/orig_gb*
+assets/interface/gameboy_*
 
 # Release builds (build_release.py)
 build/
@@ -22,8 +23,6 @@ dist/
 release/
 system_profile.json
 *.spec
-# a local reference picture, never shipped
-assets/img.png
 
 # Release folder (build_release.py assembles it next to build/)
 release/

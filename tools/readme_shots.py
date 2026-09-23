@@ -3,8 +3,9 @@ the boot video has ended, written to assets/screenshot.png at half the
 Retina size. Shows the repository's artwork (AIBOY_SHIPPED_ASSETS), never a
 local original, so the README carries no maker's marks. The boot video
 plays once, with sound. With a window screenshot as argument (one written by
-`AIBOY_SHIPPED_ASSETS=1 python tests/gui/check_play_visual.py <dir>`) the
-Game Boy is cut out of it instead, into assets/screenshot_play.png.
+`AIBOY_SHIPPED_ASSETS=1 python tests/gui/check_play_visual.py <dir>`, which
+also notes where the Game Boy is) the device is cut out of it instead, into
+assets/screenshot_play.png.
 
     python tools/readme_shots.py                          # assets/screenshot.png
     python tools/readme_shots.py <dir>/play-2-a+b+right.png   # assets/screenshot_play.png
@@ -25,19 +26,17 @@ OUT = ROOT / "assets" / "screenshot.png"
 OUT_PLAY = ROOT / "assets" / "screenshot_play.png"
 
 
-def cut_gameboy(shot: Path, margin: int = 24) -> None:
-    """The device out of a whole-window screenshot: the bounding box of the
-    case's beige, at window pixels (a Retina capture is halved)."""
-    import numpy as np
+def cut_gameboy(shot: Path, margin: int = 12, below: int = 28) -> None:
+    """The device out of a whole-window screenshot, with the status line
+    under it: check_play_visual.py writes the Game Boy's place in the window
+    next to each screenshot (`<name>.rect`: x y w h, window pixels; a Retina
+    capture is twice that)."""
     from PIL import Image
     img = Image.open(shot).convert("RGB")
-    a = np.asarray(img).astype(int)
-    r, g, b = a[..., 0], a[..., 1], a[..., 2]
-    case = (r > 150) & (g > 140) & (b > 110) & (r - b > 12) & (r - b < 60)
-    cols = np.flatnonzero(case.sum(axis=0) > img.height // 6)
-    rows = np.flatnonzero(case.sum(axis=1) > img.width // 12)
-    crop = img.crop((cols.min() - margin, rows.min() - margin, cols.max() + margin, rows.max() + margin))
-    if img.width >= 3000:
+    x, y, w, h = (int(v) for v in shot.with_suffix(".rect").read_text().split())
+    k = 2 if img.width >= 2 * (x + w) else 1
+    crop = img.crop(((x - margin) * k, (y - margin) * k, (x + w + margin) * k, (y + h + below) * k))
+    if k == 2:
         crop = crop.resize((crop.width // 2, crop.height // 2), Image.LANCZOS)
     crop.save(OUT_PLAY, optimize=True)
     print(f"wrote {OUT_PLAY} ({crop.width}x{crop.height})")
