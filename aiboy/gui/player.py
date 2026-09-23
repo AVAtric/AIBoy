@@ -211,7 +211,8 @@ class IntroVideo:
     """The start-up boot video: frames from assets/gb_intro.npz (or a local
     orig_gb_intro.npz, see `intro_asset`) shown on the canvas in step
     with the wall clock while the WAV plays. `idle_frame()` is the last frame
-    with the logo visible, used as the "No video" screen."""
+    with the logo visible, used as the "No video" screen; `blank_frame()`
+    the empty screen before the logo, shown until the video starts."""
 
     def __init__(self, frames_path: Path = INTRO_FRAMES, sound_path: Path = INTRO_SOUND):
         data = np.load(frames_path)
@@ -226,6 +227,11 @@ class IntroVideo:
 
     def idle_frame(self) -> np.ndarray:
         return self.frames[self.idle_index]
+
+    def blank_frame(self) -> np.ndarray:
+        """The first frame: the empty screen a Game Boy shows before its
+        boot logo comes in."""
+        return self.frames[0]
 
     def play(self, frames: LatestFrame, stop: threading.Event, on_done) -> threading.Thread:
         """Push frames at `fps` until the end or `stop`; then call `on_done()`

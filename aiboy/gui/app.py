@@ -281,6 +281,10 @@ class AIboyGUI:
             # Boot video with its jingle once the window is up (always, like
             # a real Game Boy; the Sound checkbox is for the games); ends on
             # the idle frame ("No video") unless something else takes the screen.
+            # Until it starts the LCD is empty, as a Game Boy's is when it is
+            # switched on: the logo must not sit there before the video draws it.
+            self.gameboy.set_screen(Image.fromarray(self.intro.blank_frame())
+                                    .resize(self.gameboy.screen_size, Image.NEAREST))
             self.gameboy.set_power(True)
             self.root.after(300, lambda: self.intro.play(
                 self.frames, self.intro_stop,
