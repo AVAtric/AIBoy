@@ -87,4 +87,7 @@ def cleanup(extra_runs=()):
     if str(EXPERIENCE_FILE) == os.environ.get("AIBOY_EXPERIENCE_FILE"):
         EXPERIENCE_FILE.unlink(missing_ok=True)
     if str(SETTINGS_FILE) == os.environ.get("AIBOY_SETTINGS_FILE"):
-        SETTINGS_FILE.unlink(missing_ok=True)
+        # Rewritten, never removed: a missing file means the defaults, and
+        # the default turns automatic preset improvements on (a check used
+        # to write an "improved" smoke-test preset into the user's file).
+        SETTINGS_FILE.write_text('{"auto_improve_presets": false}')

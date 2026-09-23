@@ -12,9 +12,11 @@ using the GUI's `_pump` protocol:
     ("play_stats", {key: value})  the per-step stats, one event per step
     ("play_episode", {...})       a round finished: {"episode", "reward",
                                   "steps", "end"} (playback and preview)
-    ("play_done", summary)        playback finished; summary = list of
-                                  {"reward", "steps"} per completed episode
-    ("play_error", traceback)
+    ("play_done", summary)        playback finished and its emulator is closed;
+                                  summary = list of {"reward", "steps"} per
+                                  completed episode
+    ("play_error", traceback)     playback failed (emulator closed as well)
+    ("preview_done",)             the live preview of a training run ended
     ("agent_view", grid | None)   what the agent sees: the newest 16x20 frame
                                   of its tile observation (a float array),
                                   or None for a pixel model; only while
@@ -504,6 +506,7 @@ class EmbeddedPlayer:
         _single_threaded_torch()
         session = None
         summary: list[dict] = []
+        outcome: tuple = ("play_error", "playback ended without a report")
         try:
             if game == "mario":
                 # Subprocess with timeout, so a level that cannot boot cannot
@@ -550,12 +553,16 @@ class EmbeddedPlayer:
                                             "end": reason})
                 self._emit("play_status",
                            f"Round {ep + 1}: reward {total:.0f}, {steps} steps, {reason}")
-            self._emit("play_done", summary)
+            outcome = ("play_done", summary)
         except Exception:
-            self._emit("play_error", traceback.format_exc())
+            outcome = ("play_error", traceback.format_exc())
         finally:
+            # Closing the emulator (and its sound device) can take a moment;
+            # the GUI hears "done" only afterwards, so what it does then
+            # (re-enable Play, start the next playback) finds the thread gone.
             if session is not None:
                 session.close()
+        self._emit(*outcome)
 
     # ---------- preview ----------
 
@@ -620,7 +627,7 @@ class EmbeddedPlayer:
             if session is not None:
                 session.close()
             self._emit("log", "[preview] stopped\n")
-            self._emit("play_status", "idle")
+        self._emit("preview_done")
 
 
     # ---------- a person plays ----------
@@ -640,6 +647,7 @@ class EmbeddedPlayer:
         pacer = FramePacer.for_speed(speed_mult)
         sound = self._sound_gate() if sound_possible(speed_mult) else None
         summary: list[dict] = []
+        outcome: tuple = ("play_error", "playback ended without a report")
         try:
             rom_path = Path(rom_path)
             if not rom_path.exists():
@@ -715,9 +723,9 @@ class EmbeddedPlayer:
                                           f"score {best['score']}")
             else:
                 self._emit("play_status", f"you played {frame / GB_FPS:.0f} s")
-            self._emit("play_done", summary)
+            outcome = ("play_done", summary)
         except Exception:
-            self._emit("play_error", traceback.format_exc())
+            outcome = ("play_error", traceback.format_exc())
         finally:
             if pyboy is not None:
                 for b in BUTTONS:
@@ -729,6 +737,7 @@ class EmbeddedPlayer:
                     pyboy.stop(save=False)
                 except Exception:
                     pass
+        self._emit(*outcome)         # after the emulator is closed (see _play_loop)
 
     @staticmethod
     def _kirby_human_stats(pyboy, gw, frame: int, best: dict) -> dict:

@@ -493,7 +493,9 @@ class WizardTab:
             best = self._best_model()
             self.model_var.set(f"Model file: {best}" if best is not None else "—")
             self.watch_result_var.set("")
-            if best is not None and self.phase == "idle" and not self.app.playing_active():
+            # Plays at once unless another game (a person's) has the screen;
+            # a playback that is only closing its emulator is waited for.
+            if best is not None and self.phase == "idle" and self.app.claim_screen():
                 self.start_watch()
 
     def restart(self) -> None:

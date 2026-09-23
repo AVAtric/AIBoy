@@ -225,6 +225,11 @@ class AIboyGUI:
         self.play_thread: threading.Thread | None = None
         self.play_mode = "agent"                # "agent" (a model plays) or "human"
         self.play_rounds: list[dict] = []       # finished rounds of the current playback
+        # A playback is in progress as far as the window is concerned: from
+        # `_begin_playback` until its end event (`play_done` / `play_error`)
+        # has been handled. Its thread may outlive this by a moment while it
+        # closes its emulator; `claim_screen` waits for that.
+        self._play_open = False
         self.preview_stop = threading.Event()
         self.preview_thread: threading.Thread | None = None
         self.tune_stop = threading.Event()
@@ -341,17 +346,20 @@ class AIboyGUI:
     def _update_start_buttons(self) -> None:
         """Start buttons are only enabled for a runnable game (and no run active)."""
         ok, _ = self.game_runnable()
-        state = "normal" if ok and not self.busy() else "disabled"
+        busy = self.busy()
+        state = "normal" if ok and not busy else "disabled"
         self.btn_train_start.config(state=state)
         self.btn_tune_start.config(state=state)
         if not self.playing_active():
             self.btn_play_start.config(state=state)
             # Anyone can play a ROM that boots, supported for training or not.
             info = self.current_rom()
-            can_play = info is not None and info.playable and not self.busy()
+            can_play = info is not None and info.playable and not busy
             self.btn_human.config(state="normal" if can_play else "disabled")
+            # Locked with the other inputs while training or tuning runs
+            # (a ROM probe finishing mid-run must not unlock it).
             self.human_start_combo.config(
-                state="readonly" if self.game == DEFAULT_GAME else "disabled")
+                state="readonly" if self.game == DEFAULT_GAME and not busy else "disabled")
         if self.wizard is not None:
             self.wizard.on_game_changed(ok)
 
@@ -371,7 +379,8 @@ class AIboyGUI:
         return self.tune_thread is not None and self.tune_thread.is_alive()
 
     def playing_active(self) -> bool:
-        return self.play_thread is not None and self.play_thread.is_alive()
+        """An agent or a person is playing on the screen (see `_play_open`)."""
+        return self._play_open
 
     def busy(self) -> bool:
         """A CPU-hungry subprocess (training or tuning) is running."""
@@ -1897,12 +1906,15 @@ class AIboyGUI:
         return dict(self._all_presets)
 
     def load_config_into_train(self, cfg: dict) -> None:
-        """Populate the Train tab (and the Play tab's obs / level / input
-        shape) from a preset-style dict. Optional fields missing from `cfg`
-        fall back to PRESET_DEFAULTS so applying a preset is deterministic."""
+        """Populate the Train tab from a preset-style dict. Optional fields
+        missing from `cfg` fall back to PRESET_DEFAULTS so applying a preset
+        is deterministic. Playback keeps following the selected model's own
+        run.json; only a model without one (an older run) takes its
+        observation setup from the Train tab."""
         self.form.set_config(cfg)
-        self.sync_play_options(cfg)
         self.refresh_models()
+        if self.selected_model_config() is None:
+            self.sync_play_options(cfg)
         self._on_train_form_changed()
 
     def sync_play_options(self, cfg: dict) -> None:
@@ -2143,6 +2155,18 @@ class AIboyGUI:
         if hasattr(self, "run_hint_var"):
             self._update_run_hint()
 
+    def selected_model_config(self) -> dict | None:
+        """The training settings recorded (run.json) for the model selected
+        under "Watch an agent"; None when no model is selected or its run
+        has no manifest."""
+        if not hasattr(self, "model_var"):
+            return None
+        path = self._model_paths.get(self.model_var.get())
+        if path is None:
+            return None
+        game_run = runs.run_of_model(path)
+        return runs.read_run_config(*game_run) if game_run else None
+
     def _on_model_selected(self) -> None:
         """Apply the selected model's recorded training settings to the Play
         options, so playback always uses the observation setup it needs."""
@@ -2303,14 +2327,30 @@ class AIboyGUI:
 
     # ---------- Playing ----------
 
+    def claim_screen(self) -> bool:
+        """Make sure no emulator thread still owns the screen before a new
+        playback starts: the thread of a playback that has already ended,
+        or the live preview of a finished training run, gets a moment to
+        close its emulator. False while a playback is still in progress."""
+        if self.playing_active():
+            return False
+        for thread, stop in ((self.play_thread, None), (self.preview_thread, self.preview_stop)):
+            if thread is not None and thread.is_alive():
+                if stop is not None:
+                    stop.set()
+                thread.join(timeout=5)
+                if thread.is_alive():
+                    return False
+        return True
+
     def start_playing(self) -> bool:
         """Play the selected model in the embedded canvas. True if started."""
-        if self.playing_active():
-            messagebox.showwarning("Play", "Playback already running.")
-            return False
         if self.busy():
             messagebox.showwarning(
                 "Play", "Training or tuning is running. Stop it first, or wait for it to finish.")
+            return False
+        if not self.claim_screen():
+            messagebox.showwarning("Play", "Playback already running.")
             return False
         ok, why = self.game_runnable()
         if not ok:
@@ -2367,6 +2407,7 @@ class AIboyGUI:
         """Take the screen for a playback of `mode` ("agent" / "human")."""
         self.intro_stop.set()
         self.play_stop.clear()
+        self._play_open = True
         self.play_mode = mode
         self.set_live_mode(mode)
         self.gameboy.set_power(True)
@@ -2393,12 +2434,12 @@ class AIboyGUI:
         """Run the plain game on the Game Boy with the person's own input
         (keyboard on the picture, clicks on its buttons, a game controller).
         True if started."""
-        if self.playing_active():
-            messagebox.showwarning("Play", "Playback already running. Stop it first.")
-            return False
         if self.busy():
             messagebox.showwarning(
                 "Play", "Training or tuning is running. Stop it first, or wait for it to finish.")
+            return False
+        if not self.claim_screen():
+            messagebox.showwarning("Play", "Playback already running. Stop it first.")
             return False
         info = self.current_rom()
         if info is None:
@@ -2452,6 +2493,13 @@ class AIboyGUI:
             self.gameboy.set_screen(
                 Image.fromarray(dmg_tint(latest)).resize(self.gameboy.screen_size, Image.NEAREST))
             self.frames_painted += 1
+        if self._play_open and self.stats_queue.empty() and not (
+                self.play_thread is not None and self.play_thread.is_alive()):
+            # The playback thread is gone without its end event (it reports
+            # before it returns, so this is a safety net): close the playback
+            # here, or the Play buttons would stay locked.
+            self.play_status_var.set("ended")
+            self._play_finished()
 
         self._update_status_bar()
         self._layout_tracking()
@@ -2526,9 +2574,13 @@ class AIboyGUI:
             self._on_train_done(item[1])
         elif kind == "play_status":
             self.play_status_var.set(item[1])
-            if item[1] == "idle":               # the preview loop ended
+        elif kind == "preview_done":
+            # The live preview ended; a playback that took over the screen
+            # meanwhile (the wizard's Watch step) keeps its status and LED.
+            if not self.playing_active():
+                self.play_status_var.set("idle")
                 self.gameboy.show(None)
-                self.gameboy.set_power(self.playing_active())
+                self.gameboy.set_power(False)
         elif kind == "play_stat":
             _, key, val = item
             if key in self.play_stat_vars:
@@ -2680,6 +2732,10 @@ class AIboyGUI:
             self.wizard.on_train_done(rc, self._train_stop_requested)
 
     def _play_finished(self) -> None:
+        """The playback reported its end (`play_done` / `play_error`, sent
+        once its emulator is closed): put the screen and the inputs to rest
+        and free the start buttons."""
+        self._play_open = False
         self.gameboy.show(None)
         self.gameboy.set_power(self.preview_thread is not None and self.preview_thread.is_alive())
         self.btn_play_stop.config(state="disabled")
