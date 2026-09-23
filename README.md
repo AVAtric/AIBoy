@@ -305,14 +305,20 @@ output in its own window for troubleshooting.
 - **Exploration guard.** A long run can collapse: the agent settles on one
   fixed way of playing, every attempt ends the same way (same steps, same
   score) far below its best evaluation, and since nothing varies any more
-  nothing can be learned. The trainer measures the policy's entropy after
-  every rollout; when it has been ~0 for a few rollouts and the last 20
-  attempts are identical and below the best evaluation, it restores
-  `best_model.zip`, raises `ent_coef` (×4, at least 0.02) and says so in
-  *Messages*. This happens at most three times per run, then the run
-  stops. Continuing a collapsed run repairs it on the first rollout. An
-  update is also cut short once it moves the policy further than a KL of
-  0.03, which is what usually starts a collapse.
+  nothing can be learned. The trainer looks at the finished attempts after
+  every rollout; when for three rollouts in a row the last 20 attempts are
+  identical (same steps, same score) and are not a mastered task (they do
+  not finish the level or the marathon, or score below the best
+  evaluation), it restores `best_model.zip`, raises `ent_coef` (×4, at
+  least 0.02) and
+  says so in *Messages*. This happens at most three times per run, then
+  the run stops. Continuing a collapsed run repairs it within its first
+  three rollouts. The policy's entropy is recorded in TensorBoard
+  (`train/policy_entropy`) but does not decide: a collapsed Mario policy
+  can keep a healthy-looking entropy by mixing JUMP and UP+JUMP, which are
+  the same move in a walking level. An update is also cut short once it
+  moves the policy further than a KL of 0.03, which is what usually starts
+  a collapse.
 - A **modified** marker appears under the preset selector as soon as a field
   differs from the preset.
 - **Live preview while training** plays each new `best_model.zip` on the

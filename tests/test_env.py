@@ -256,6 +256,33 @@ class ObservationTests(unittest.TestCase):
             pb.stop(save=False)
 
     @unittest.skipUnless((games.ROM_DIR / "mario.gb").exists(), "needs ROMs/mario.gb")
+    def test_a_fixed_level_reports_won_only_when_the_clear_ends_the_episode(self):
+        """info["won"] is what the exploration guard reads (through the
+        Monitor) to tell a mastered level from a collapse: the clear that
+        ends a fixed-level episode wins it, a death or a stall does not."""
+        from pyboy import PyBoy
+        games.prepare_level_states("1-1")
+        pb = PyBoy(str(games.ROM_DIR / "mario.gb"), window_type="null", game_wrapper=True,
+                   disable_renderer=True)
+        try:
+            e = env.MarioEnv(pb, obs_type="tiles", start_level="1-1", time_budget=0, stuck_steps=5)
+            e.reset()
+            _, _, term, _, info = e.step(0)
+            self.assertFalse(term or info["won"])
+            pb.set_memory_value(games.ADDR_GAME_STATE, 0x07)          # the goal is touched
+            _, _, term, _, info = e.step(0)
+            self.assertTrue(term and info["level_cleared"] and info["won"], info)
+            e.reset()
+            for _ in range(20):                                       # stand still into the stall
+                _, _, term, _, info = e.step(0)
+                if term:
+                    break
+            self.assertTrue(term and info["stalled"], info)
+            self.assertFalse(info["won"])
+        finally:
+            pb.stop(save=False)
+
+    @unittest.skipUnless((games.ROM_DIR / "mario.gb").exists(), "needs ROMs/mario.gb")
     def test_marathon_walks_all_twelve_levels_and_ends_after_tatanga(self):
         """Every clear (the game-state byte set to "goal touched") loads the
         next level's state in the same life, through the two vehicle levels,
@@ -278,12 +305,12 @@ class ObservationTests(unittest.TestCase):
                 self.assertTrue(info["level_cleared"], lvl)
                 self.assertGreaterEqual(reward, e.completion_bonus)
                 if i < len(games.SML_ALL_LEVELS) - 1:
-                    self.assertFalse(term, lvl)
+                    self.assertFalse(term or info["won"], lvl)
                     self.assertEqual(info["marathon_next_level"], games.SML_ALL_LEVELS[i + 1])
                     self.assertEqual(info["marathon_clears"], i + 1)
                     self.assertEqual(info["time_used"], 0)             # the timer starts afresh
                 else:
-                    self.assertTrue(term and info["marathon_done"], info)
+                    self.assertTrue(term and info["marathon_done"] and info["won"], info)
                     self.assertEqual(info["marathon_clears"], 12)
                     self.assertGreaterEqual(reward, 4 * e.completion_bonus)
             e.reset()

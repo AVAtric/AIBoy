@@ -612,6 +612,12 @@ class MarioEnv(GameBoyEnv):
                 "game_state": game_state, "died": died, "level_cleared": level_cleared,
                 "power": POWER_NAMES[self.power_state()],
                 "time_used": time_used, "time_budget_exceeded": over_budget, "stalled": stalled,
+                # The episode ended by finishing what the mode asks for: the
+                # level (fixed / random / sequential) or all twelve (marathon).
+                # Training's Monitor records it per episode ("won"), which is
+                # how the exploration guard tells a mastered task from a
+                # collapse (identical attempts that never get there).
+                "won": False,
             }
             base.update(extra)
             return base
@@ -632,7 +638,7 @@ class MarioEnv(GameBoyEnv):
             if self._marathon_idx >= len(SML_ALL_LEVELS):
                 reward += self.completion_bonus * 3.0             # every level in one run
                 self._remember(x, lives, world, score, coins)
-                return reward, True, False, info(marathon_done=True,
+                return reward, True, False, info(marathon_done=True, won=True,
                                                  marathon_clears=self._marathon_clears)
             next_target = SML_ALL_LEVELS[self._marathon_idx]
             if self._load_level_state(next_target):
@@ -666,7 +672,8 @@ class MarioEnv(GameBoyEnv):
         # for a real reason (a game over outside campaign mode cannot happen
         # with the fresh lives of a save-state, but is caught all the same).
         truncated = not terminated and is_game_over
-        result = info()
+        won = level_cleared and self.start_level is not None and self.start_level != "marathon"
+        result = info(won=won)
         self._remember(x, lives, world, score, coins)
         return reward, terminated, truncated, result
 
@@ -820,6 +827,7 @@ class KirbyEnv(GameBoyEnv):
             "x": x, "max_x": self._max_x, "lives": lives, "score": score, "health": health,
             "stuck": self._stuck, "game_over": is_game_over, "died": died,
             "level_cleared": False, "stalled": stalled, "step_cap_reached": capped,
+            "won": capped,      # Kirby has no goal here: going the distance is the win
         }
         self._last_score, self._last_health, self._last_lives = score, health, lives
         return reward, terminated, truncated, info
@@ -979,7 +987,9 @@ def env_factory(
     time_budget: int = DEFAULT_TIME_BUDGET,
     stall_steps: int = DEFAULT_STALL_STEPS,
 ) -> gym.Env:
-    """Picklable factory for SubprocVecEnv workers."""
+    """Picklable factory for SubprocVecEnv workers. The Monitor keeps each
+    episode's `won` flag next to its score and length, for the exploration
+    guard (see cli.is_collapsed)."""
     env = make_pyboy_env(
         game=game,
         window_type=window_type,
@@ -990,4 +1000,4 @@ def env_factory(
         time_budget=time_budget,
         stall_steps=stall_steps,
     )
-    return Monitor(env)
+    return Monitor(env, info_keywords=("won",))

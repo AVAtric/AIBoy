@@ -41,16 +41,28 @@ class TensorboardCommandTests(unittest.TestCase):
 class ExplorationGuardTests(unittest.TestCase):
     """The collapse detector and the repair it triggers (see cli.TARGET_KL)."""
 
-    def test_is_collapsed_needs_identical_episodes_below_the_best(self):
+    def test_is_collapsed_needs_identical_episodes_that_are_not_a_mastered_task(self):
         same = [(-128.3, 11)] * cli.COLLAPSE_EPISODES
         self.assertTrue(cli.is_collapsed(same, 10326.0))
         self.assertFalse(cli.is_collapsed(same, float("-inf")))          # no evaluation yet
-        self.assertFalse(cli.is_collapsed(same, -128.3))                  # identical AND the best: solved
         self.assertFalse(cli.is_collapsed(same[:-1] + [(-100.0, 11)], 10326.0))
         self.assertFalse(cli.is_collapsed(same[:-1] + [(-128.3, 12)], 10326.0))
         self.assertFalse(cli.is_collapsed(same[:5], 10326.0))             # too few episodes
         # Only the newest episodes count: an old different one is history.
         self.assertTrue(cli.is_collapsed([(500.0, 300)] + same, 10326.0))
+        # Identical attempts that never win are a collapse even at the best
+        # score: the marathon run that replayed one 677-step attempt ending
+        # at the lifts of 1-2 was stuck, whatever its evaluation said.
+        self.assertTrue(cli.is_collapsed(same, -128.3))
+        stuck = [(13202.7, 677, False)] * cli.COLLAPSE_EPISODES
+        self.assertTrue(cli.is_collapsed(stuck, 13202.7))
+        self.assertTrue(cli.is_collapsed(stuck, 13358.7))
+        # Identical wins at (or above) the best evaluation are a solved task.
+        cleared = [(4200.0, 310, True)] * cli.COLLAPSE_EPISODES
+        self.assertFalse(cli.is_collapsed(cleared, 4200.0))
+        self.assertFalse(cli.is_collapsed(cleared, 4100.0))
+        self.assertTrue(cli.is_collapsed(cleared, 4500.0))                # a slower clear than the best
+        self.assertTrue(cli.is_collapsed(cleared[:-1] + [(4200.0, 310, False)], 4200.0))
 
     @unittest.skipUnless(find_spec("stable_baselines3"), "needs Stable-Baselines3")
     def test_guard_restores_the_best_model_raises_curiosity_then_gives_up(self):
@@ -72,23 +84,38 @@ class ExplorationGuardTests(unittest.TestCase):
             eval_cb = types.SimpleNamespace(best_mean_reward=500.0)
             guard = cli._exploration_guard(eval_cb, best)
             guard.init_callback(model)
-            self.assertGreater(guard.policy_entropy(), 0.1)     # a real, exploring policy
-            guard.policy_entropy = lambda: 0.0                  # now pretend it collapsed
+            # The policy's entropy is not the criterion: a collapsed marathon
+            # policy kept 0.2-0.4 nats by splitting its mass between JUMP and
+            # UP+JUMP, which are the same move in a walking level. The guard
+            # acts on what the episodes did, so this healthy-looking entropy
+            # must not hold it back.
+            self.assertGreater(guard.policy_entropy(), 0.1)
 
-            def collapsed_rollouts(n):
+            def rollouts(n, episodes):
                 model.ep_info_buffer.clear()
-                model.ep_info_buffer.extend({"r": -128.3, "l": 11, "t": 0.0}
-                                            for _ in range(cli.COLLAPSE_EPISODES))
+                model.ep_info_buffer.extend({"r": r, "l": l, "t": 0.0} for r, l in episodes)
                 with contextlib.redirect_stdout(io.StringIO()) as out:
                     for _ in range(n):
                         guard.on_rollout_end()
                 return out.getvalue()
 
+            same = [(-128.3, 11)] * cli.COLLAPSE_EPISODES
+            varied = [(-128.3, 11)] * (cli.COLLAPSE_EPISODES - 1) + [(300.0, 50)]
+
+            def collapsed_rollouts(n):
+                return rollouts(n, same)
+
             self.assertEqual(collapsed_rollouts(cli.COLLAPSE_PATIENCE - 1), "")   # patience
+            self.assertEqual(guard.repairs, 0)
+            # One rollout whose attempts still differ starts the patience over.
+            self.assertEqual(rollouts(1, varied), "")
+            self.assertEqual(guard.same_rollouts, 0)
+            self.assertEqual(collapsed_rollouts(cli.COLLAPSE_PATIENCE - 1), "")
             self.assertEqual(guard.repairs, 0)
             said = collapsed_rollouts(1)
             self.assertEqual(guard.repairs, 1)
             self.assertIn("[train] warning: the agent stopped exploring", said)
+            self.assertIn("policy entropy", said)
             self.assertIn("Restored the best model", said)
             self.assertEqual(model.ent_coef, 0.02)                           # 0.005 x4, at least 0.02
             self.assertTrue(all(th.equal(v, best_params[k])
@@ -196,7 +223,6 @@ class WidenActionsTests(unittest.TestCase):
             model.learn(16)
             guard = cli._exploration_guard(types.SimpleNamespace(best_mean_reward=5.0), best)
             guard.init_callback(model)
-            guard.policy_entropy = lambda: 0.0
             model.ep_info_buffer.extend({"r": -1.0, "l": 1, "t": 0.0}
                                         for _ in range(cli.COLLAPSE_EPISODES))
             with contextlib.redirect_stdout(io.StringIO()):

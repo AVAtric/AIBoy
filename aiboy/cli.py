@@ -43,22 +43,30 @@ from aiboy.runs import (KEEP_CHECKPOINTS, cpu_count, latest_checkpoint, prune_ch
 
 # PPO stability. A policy that has become nearly deterministic can be pushed
 # by one large update into a state it never leaves: every emulator then
-# plays the very same short episode, the policy's entropy is ~0 and so is
-# its gradient (a marathon run collapsed that way at 70 M steps, to "jump
-# into the first goomba", and stayed there for 80 M more while the eval
-# score read -128 every time). Two safeguards:
+# plays the very same episode, so nothing varies, every advantage is ~0
+# and so is the gradient (a marathon run collapsed that way at 70 M steps,
+# to "jump into the first goomba", and stayed there for 80 M more while the
+# eval score read -128 every time; another settled at 69 M steps on
+# "jump in place at the moving lifts of 1-2 until the stall limit" and
+# replayed that one 677-step attempt for 16 M steps). Two safeguards:
 #   - `target_kl` ends a PPO update early once it has moved the policy too
 #     far (SB3 stops at 1.5x the value);
-#   - the exploration guard (`_exploration_guard`) measures the policy's
-#     entropy after every rollout; when it has been below ENTROPY_FLOOR for
-#     COLLAPSE_PATIENCE rollouts and the last COLLAPSE_EPISODES finished
-#     episodes are all identical and below the run's best evaluation, the
-#     run is repaired: weights and optimizer go back to `best_model.zip`
-#     and ent_coef (curiosity) is raised, ENT_COEF_AFTER_REPAIR. At most
-#     MAX_REPAIRS times per run, then the run stops with a message.
+#   - the exploration guard (`_exploration_guard`) looks at the finished
+#     episodes after every rollout; when for COLLAPSE_PATIENCE rollouts in a
+#     row the last COLLAPSE_EPISODES of them are all identical (same score,
+#     same length: one trajectory in a deterministic game) and are not a
+#     mastered task (they did not win, or score below the run's best
+#     evaluation; see `is_collapsed`), the run is repaired: weights and
+#     optimizer go back to `best_model.zip` and ent_coef (curiosity) is
+#     raised, ENT_COEF_AFTER_REPAIR. At most MAX_REPAIRS times per run,
+#     then the run stops with a message.
+#     The policy's entropy is recorded (train/policy_entropy) but is NOT
+#     the criterion: it stayed at 0.2-0.4 nats through the 1-2 collapse
+#     because the policy split its mass between JUMP and UP+JUMP, which do
+#     the same thing in a walking level. What matters is that the outcome
+#     stopped varying.
 TARGET_KL = 0.03
-ENTROPY_FLOOR = 0.01            # nats; a uniform Discrete(11) policy has ln(11) = 2.4
-COLLAPSE_PATIENCE = 3           # rollouts below the floor before a collapse is declared
+COLLAPSE_PATIENCE = 3           # rollouts of identical episodes before a collapse is declared
 COLLAPSE_EPISODES = 20          # identical finished episodes that make a collapse
 GUARD_COOLDOWN = 20             # rollouts after a repair before the guard looks again
 MAX_REPAIRS = 3
@@ -125,18 +133,24 @@ def pick_policy(obs_type: str) -> tuple[str, dict]:
 
 
 def is_collapsed(episodes, best_reward: float, min_episodes: int = COLLAPSE_EPISODES) -> bool:
-    """True when the last `min_episodes` finished episodes (score, length)
-    are all the same, one deterministic trajectory in a deterministic game,
-    and that score is below `best_reward`, the run's best evaluation.
-    Identical episodes at the best score are a solved task, not a collapse;
-    without an evaluation yet (`best_reward` -inf) nothing is decided."""
+    """True when the last `min_episodes` finished episodes are all the same,
+    one deterministic trajectory in a deterministic game, and are not a
+    mastered task. An episode is (score, length) or (score, length, won);
+    `won` says it ended by finishing what the run asks for (the level, the
+    marathon; see the envs' info["won"]). Identical episodes that all won
+    at or above `best_reward`, the run's best evaluation, are a solved
+    task, not a collapse. Identical episodes that never win are a collapse
+    whatever they score: a marathon agent that replays one attempt ending
+    in a pit is stuck, even when that attempt is its best so far. Without
+    an evaluation yet (`best_reward` -inf) nothing is decided."""
     import math
     recent = list(episodes)[-min_episodes:]
     if len(recent) < min_episodes or not math.isfinite(best_reward):
         return False
-    if len({(round(float(r), 1), int(l)) for r, l in recent}) > 1:
+    if len({(round(float(e[0]), 1), int(e[1])) for e in recent}) > 1:
         return False
-    return float(recent[-1][0]) < best_reward
+    won = all(bool(e[2]) if len(e) > 2 else False for e in recent)
+    return not won or float(recent[-1][0]) < best_reward
 
 
 def _exploration_guard(eval_cb, best_path: Path):
@@ -151,7 +165,7 @@ def _exploration_guard(eval_cb, best_path: Path):
     class ExplorationGuard(BaseCallback):
         def __init__(self):
             super().__init__()
-            self.below_floor = 0        # consecutive rollouts with entropy under the floor
+            self.same_rollouts = 0      # consecutive rollouts whose episodes were identical
             self.cooldown = 0
             self.repairs = 0
             self.stop = False
@@ -172,18 +186,19 @@ def _exploration_guard(eval_cb, best_path: Path):
         def _on_rollout_end(self) -> None:
             entropy = self.policy_entropy()
             self.logger.record("train/policy_entropy", entropy)
-            self.below_floor = self.below_floor + 1 if entropy < ENTROPY_FLOOR else 0
             if self.cooldown > 0:
                 self.cooldown -= 1
                 return
-            episodes = [(float(e["r"]), int(e["l"])) for e in self.model.ep_info_buffer]
+            episodes = [(float(e["r"]), int(e["l"]), bool(e.get("won", False)))
+                        for e in self.model.ep_info_buffer]
             best = float(eval_cb.best_mean_reward)
-            if self.below_floor < COLLAPSE_PATIENCE or not is_collapsed(episodes, best):
+            self.same_rollouts = self.same_rollouts + 1 if is_collapsed(episodes, best) else 0
+            if self.same_rollouts < COLLAPSE_PATIENCE:
                 return
-            reward, length = episodes[-1]
+            reward, length = episodes[-1][:2]
             what = (f"the agent stopped exploring: every attempt ends the same way "
-                    f"({length} steps, score {reward:.0f}) while its best evaluation "
-                    f"scored {best:.0f}")
+                    f"({length} steps, score {reward:.0f}, policy entropy {entropy:.2f}) "
+                    f"while its best evaluation scored {best:.0f}")
             if self.repairs >= MAX_REPAIRS or not best_path.exists():
                 why = ("there is no best model to go back to" if not best_path.exists()
                        else f"it was repaired {self.repairs} times already")
@@ -206,7 +221,7 @@ def _exploration_guard(eval_cb, best_path: Path):
             self.model.ent_coef = min(max(old * factor, at_least), at_most)
             self.model.ep_info_buffer.clear()
             self.repairs += 1
-            self.below_floor = 0
+            self.same_rollouts = 0
             self.cooldown = GUARD_COOLDOWN
             print(f"[train] warning: {what}. Restored the best model and raised curiosity "
                   f"(ent_coef {old:g} -> {self.model.ent_coef:g}) so it explores again "
